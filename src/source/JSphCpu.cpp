@@ -2804,6 +2804,92 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
         }
       }
 
+      // flexure-bound interaction
+      const float knContact=
+                  2.f*youngmod*sqrt(float(Dp))
+                  /(3.f*(1.f-poissratio*poissratio));
+
+      // // Search all bound particles
+      // for(unsigned p2=0;p2<Npb;p2++){
+      //   const typecode codep2=code[p2];
+
+      //   if(!CODE_IsNormal(codep2))continue;
+      //   if(!CODE_IsFixed(codep2))continue;
+      //   if(CODE_IsFlexStrucAny(codep2))continue;
+
+      //   const tdouble3 posp2=pos[p2];
+      //   const float drx=float(posp1.x-posp2.x);
+      //   const float dry=float(posp1.y-posp2.y);
+      //   const float drz=float(posp1.z-posp2.z);
+
+      //   const float contactRange=sqrt(KernelSize2);
+      //   if(drx<=-contactRange || drx>=contactRange)continue;
+      //   if(dry<=-contactRange || dry>=contactRange)continue;
+      //   if(drz<=-contactRange || drz>=contactRange)continue;
+
+      //   const float rr2=drx*drx+dry*dry+drz*drz;
+
+      //   if(rr2>=ALMOSTZERO && rr2<contactRange*contactRange){
+      //     const float rad=sqrt(rr2);
+      //     const float overlap=contactRange-rad;
+
+      //     if(overlap>0.f){
+      //       const float erx=drx/rad;
+      //       const float ery=dry/rad;
+      //       const float erz=drz/rad;
+
+      //       const float sqrtOverlap=sqrt(overlap);
+      //       const float fn=knContact*overlap*sqrtOverlap;
+      //       const float aceContact=fn/mass0p1;
+
+      //       acep1.x+=aceContact*erx;
+      //       acep1.y+=aceContact*ery;
+      //       acep1.z+=aceContact*erz;
+      //     }
+      //   }
+
+      // }
+
+      const StNgSearch ngsb=nsearch::Init(dcell[p1],true,divdata);
+      for(int z=ngsb.zini;z<ngsb.zfin;z++){
+        for(int y=ngsb.yini;y<ngsb.yfin;y++){
+          const tuint2 pib=nsearch::ParticleRange(y,z,ngsb,divdata);
+
+          for(unsigned p2=pib.x;p2<pib.y;p2++){
+            const typecode codep2=code[p2];
+
+            if(CODE_IsFixed(codep2) && !CODE_IsFlexStrucAny(codep2)){
+
+              const tdouble3 posp2=pos[p2];
+              const float drx=float(posp1.x-posp2.x);
+              const float dry=float(posp1.y-posp2.y);
+              const float drz=float(posp1.z-posp2.z);
+              const float rr2=drx*drx+dry*dry+drz*drz;
+              
+              if(rr2<=KernelSize2&&rr2>=ALMOSTZERO){
+                const float rad = sqrt(rr2);
+                const float overlap=float(Dp)-rad;
+
+                if(overlap>0.f){
+                  // interaction force flexure-bound
+                  const float erx=drx/rad;
+                  const float ery=dry/rad;
+                  const float erz=drz/rad;
+
+                  const float fn=knContact*overlap*sqrt(overlap);
+
+                  const float aceContact=fn/mass0p1;
+
+                  acep1.x+=aceContact*erx;
+                  acep1.y+=aceContact*ery;
+                  acep1.z+=aceContact*erz;
+                }
+              }
+            }
+          }
+        }
+      }
+
       //-Loop through pairs and calculate forces.
       for(unsigned pair=0;pair<numpairs[pfs1];pair++){
         const unsigned pfs2=pairidx[pfs1][pair];
