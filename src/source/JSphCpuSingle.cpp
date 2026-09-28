@@ -171,6 +171,7 @@ void JSphCpuSingle::ConfigDomain(){
   CellDivSingle=new JCellDivCpuSingle(Stable,FtCount!=0,PeriActive,CellDomFixed,CellMode
     ,Scell,Map_PosMin,Map_PosMax,Map_Cells,CaseNbound,CaseNfixed,CaseNpb,DirOut);
   CellDivSingle->DefineDomain(DomCellCode,DomCelIni,DomCelFin,DomPosMin,DomPosMax);
+  CellDivSingle->SetFlexDomainEnabled(FlexStruc!=nullptr);
   ConfigCellDiv((JCellDivCpu*)CellDivSingle);
 
   ConfigSaveData(0,1,"",Np,Pos_c->cptr(),Idp_c->cptr());
@@ -1164,7 +1165,13 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   InitRunCpu();
   RunFirstGaugeSystem(TimeStep);
   if(InOut)InOutInit(TimeStepIni);
-  if(FlexStruc)FlexStrucInit(); //<vs_flexstruc>
+  if(FlexStruc){
+    FlexStrucInit();
+
+    // Re-divide cells to update the position of the flexible structure particles.
+    BoundChanged=true;
+    RunCellDivide(true);
+  }
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu());
   UpdateMaxValues();

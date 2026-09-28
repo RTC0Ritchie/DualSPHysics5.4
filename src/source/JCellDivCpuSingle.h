@@ -48,6 +48,8 @@ protected:
     ,unsigned* begincell,unsigned* partsincell,unsigned* sortpart)const;
   void PreSort(const unsigned* dcellc,const typecode* codec);
 
+  bool FlexDomainEnabled=false;
+
 public:
   JCellDivCpuSingle(bool stable,bool floating,byte periactive
     ,bool celldomfixed,TpCellMode cellmode,float scell
@@ -61,6 +63,14 @@ public:
   llong GetAllocMemory()const{ return(JCellDivCpu::GetAllocMemory()); }
   llong GetAllocMemoryNp()const{ return(JCellDivCpu::GetAllocMemoryNp()); };
   llong GetAllocMemoryNct()const{ return(JCellDivCpu::GetAllocMemoryNct()); };
+
+  void SetFlexDomainEnabled(bool enabled){
+  if(FlexDomainEnabled!=enabled){
+    FlexDomainEnabled=enabled;
+    BoundLimitOk=false;
+    BoundDivideOk=false;
+  }
+}
 };
 
 #endif

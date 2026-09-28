@@ -43,6 +43,49 @@ JCellDivCpuSingle::JCellDivCpuSingle(bool stable,bool floating,byte periactive
 /// Calcula limites del dominio en celdas ajustando al fluido (CellDomainMin/Max). 
 //==============================================================================
 void JCellDivCpuSingle::CalcCellDomain(const unsigned* dcellc,const typecode* codec){
+
+  // Add flexure domain
+  bool hasFlex=false;
+  tuint3 flexmin=TUint3(UINT_MAX);
+  tuint3 flexmax=TUint3(0);
+
+  const auto AddFlexRange=[&](unsigned n,unsigned pini){
+    const unsigned pfin=pini+n;
+
+    for(unsigned p=pini;p<pfin;p++){
+      const typecode c=codec[p];
+
+      if(!CODE_IsFlexStrucFlex(c))continue;
+      if(CODE_GetSpecialValue(c)>=CODE_OUTIGNORE)continue;
+
+      const unsigned rcell=dcellc[p];
+      const tuint3 cell=TUint3(
+          DCEL_Cellx(DomCellCode,rcell),
+          DCEL_Celly(DomCellCode,rcell),
+          DCEL_Cellz(DomCellCode,rcell));
+
+      if(!hasFlex){
+        flexmin=flexmax=cell;
+        hasFlex=true;
+      }
+      else{
+        flexmin=MinValues(flexmin,cell);
+        flexmax=MaxValues(flexmax,cell);
+      }
+    }
+  };
+
+  if(FlexDomainEnabled){
+    AddFlexRange(Npb1,0);
+    if(Npb2){
+      AddFlexRange(Npb2,Npb1+Npf1);
+    }
+  }
+
+  if(hasFlex){
+    BoundLimitOk=false;
+    BoundDivideOk=false;
+  }
   //-Define maximum cell domain.
   if(CellDomFixed){
     CellDomainMin=TUint3(0,0,0);
@@ -62,6 +105,23 @@ void JCellDivCpuSingle::CalcCellDomain(const unsigned* dcellc,const typecode* co
     //-Calculate fluid domain | Calcula dominio del fluido.
     tuint3 celfmin,celfmax;
     CalcCellDomainFluid(Npf1,Npb1,Npf2,Npb1+Npf1+Npb2,dcellc,codec,celfmin,celfmax);
+
+    if(hasFlex){
+      const bool hasFluidRange=
+          celfmin.x<=celfmax.x &&
+          celfmin.y<=celfmax.y &&
+          celfmin.z<=celfmax.z;
+
+      if(hasFluidRange){
+        celfmin=MinValues(celfmin,flexmin);
+        celfmax=MaxValues(celfmax,flexmax);
+      }
+      else{
+        celfmin=flexmin;
+        celfmax=flexmax;
+      }
+    }
+
     //Log->Printf("----->CalcCellDomain> celfmin/max:%s",fun::Uint3RangeStr(celfmin,celfmax).c_str());
     //-Computes the domain adjusting to the boundary and the fluid (with KernelSize halo).
     //-Calcula dominio ajustando al contorno y al fluido (con halo de KernelSize). 
