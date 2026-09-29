@@ -1006,6 +1006,7 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   JXml xml;
   xml.LoadFile(FileXml);
   const JXml* cxml=&xml;
+  User.LoadXml(cxml,Log); // Load self-defined user parameters
   //-Shows pre-processing application generating the XML file.
   Log->Printf("XML-App: %s",cxml->GetAttributeStr(cxml->GetNodeError("case")->ToElement()
     ,"app",true,"unknown").c_str());
