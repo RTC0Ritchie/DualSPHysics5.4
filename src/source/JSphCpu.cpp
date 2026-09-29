@@ -2711,6 +2711,34 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
   // Load user-defined parameters
   const int FlexBoundContactMode=User.FlexBoundContactMode;
 
+  const int SurfaceType = (FlexBoundContactMode == 2) ? 
+            User.SurfaceType.value : 0;
+
+  double WallZ_tmp = 0.0;
+  if(SurfaceType==1) WallZ_tmp = User.SurfaceType.WallZ;
+  const double WallZ = WallZ_tmp;
+
+  double w1x_tmp = 0.0, w1z_tmp = 0.0, w2x_tmp = 1e-12, w2z_tmp = 0.0;
+  if(SurfaceType == 2){
+    w1x_tmp = User.SurfaceType.point1.x;
+    w1z_tmp = User.SurfaceType.point1.z;
+    w2x_tmp = User.SurfaceType.point2.x;
+    w2z_tmp = User.SurfaceType.point2.z;
+  }
+  const double w1x = w1x_tmp, w1z = w1z_tmp, w2x = w2x_tmp, w2z = w2z_tmp;
+  const double wallSlope = (w2z-w1z)/(w2x-w1x);
+
+  const int SurfaceNormalDirectionMode = 
+          (SurfaceType == 2) ? User.SurfaceType.NormalDirectionMode : 0;
+
+  double wallNx_tmp=0.0, wallNz_tmp=1.0;
+  if(SurfaceNormalDirectionMode==2){
+  const double invLength=1.0/sqrt(1.0+wallSlope*wallSlope);
+  wallNx_tmp=-wallSlope*invLength;
+  wallNz_tmp=invLength;
+  }
+  const double wallNx=wallNx_tmp, wallNz=wallNz_tmp;
+
   const int KnContactMode=User.KnContactMode;
   const double KnContactConst=User.KnContact;
   const int KnContactLinearity=User.KnContactLinearity;
@@ -2718,6 +2746,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
   const int unContactMode=User.unContactMode;
   const double unContactConst=User.unContact;
 
+  //-Starts execution using OpenMP.
   #ifdef OMP_USE
     #pragma omp parallel for schedule (guided)
   #endif
@@ -2821,8 +2850,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       const float unContact = (unContactMode==1) ? float(unContactConst) : 
                   0.5f*sqrt(float(Dp)*KnContact/mass0p1); // Not finished development for damping force
 
-      if (FlexBoundContactMode==1){
-        // flexure-bound particle interaction
+      if (FlexBoundContactMode==1){ // flexure-bound particle interaction
         const StNgSearch ngsb=nsearch::Init(dcell[p1],true,divdata);
         for(int z=ngsb.zini;z<ngsb.zfin;z++){
           for(int y=ngsb.yini;y<ngsb.yfin;y++){
@@ -2865,23 +2893,37 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           }
         }
       }
-      
-      else if (FlexBoundContactMode==2){
-        // flexure-bound wall interaction
+      else if (FlexBoundContactMode==2){ // flexure-bound wall interaction
+        const double particleRadius=0.5*double(Dp);
+        const double particleBottomZ=posp1.z-particleRadius;
+        
+        if((SurfaceType==1) || 
+            (SurfaceType==2 && SurfaceNormalDirectionMode==1)){
+          const double localZ=(SurfaceType==1) ? WallZ : w1z+wallSlope*(posp1.x-w1x);
 
-        if(User.SurfaceType.value==1){
-          const double WallZ=User.SurfaceType.WallZ;
-          const double particleRadius=0.5*double(Dp);
-
-          const double particleBottomZ=posp1.z-particleRadius;
-          const double overlap=WallZ-particleBottomZ;
+          const double overlap=localZ-particleBottomZ;
 
           if(overlap>0.0){
-            const float fn= (KnContactLinearity==1)? 
-                          KnContact * overlap : // String model
-                          KnContact * overlap*sqrt(overlap); // Full contact model
+            const double fn=(KnContactLinearity==1)
+                ? double(KnContact)*overlap
+                : double(KnContact)*overlap*sqrt(overlap);
 
             acep1.z+=float(fn/double(mass0p1));
+          }
+        }
+
+        else if(SurfaceType==2 && SurfaceNormalDirectionMode==2){
+          const double signedDistance=
+          (posp1.x-w1x)*wallNx + (posp1.z-w1z)*wallNz;
+          const double overlap=particleRadius-signedDistance;
+
+          if(overlap>0.0){
+            const double fn=(KnContactLinearity==1)
+                ? double(KnContact)*overlap
+                : double(KnContact)*overlap*sqrt(overlap);
+
+            acep1.x+=float(fn*wallNx/double(mass0p1));
+            acep1.z+=float(fn*wallNz/double(mass0p1));
           }
         }
       }

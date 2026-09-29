@@ -18,8 +18,11 @@ public:
     // 0: unused; 1: horizontal wall; 2: two-point geometry.
     int value=0;
 
+    // Take effect when value==1
     double WallZ=0.0;
 
+    // Take effect when value==2
+    int NormalDirectionMode=1; // 1: normal in +z direction; 2: normal in surface
     StPoint2d point1;
     StPoint2d point2;
   };

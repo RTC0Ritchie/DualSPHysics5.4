@@ -5,6 +5,7 @@
 
 #include <map>
 #include <string>
+#include <cmath>
 
 UserParameters::UserParameters(){
   ClassName="UserParameters";
@@ -95,7 +96,7 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
       SurfaceType.WallZ=
           xml->ReadElementDouble(surfaceNode,"WallZ","value");
     }
-    else{ // Two-point geometry.
+    else if(SurfaceType.value==2){ // Two-point geometry.
       xml->CheckElementNames(surfaceNode,true,"point1 point2");
       const TiXmlElement* p1=
           xml->GetFirstElement(surfaceNode,"point1");
@@ -108,11 +109,17 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
       SurfaceType.point1.z=xml->GetAttributeDouble(p1,"z");
       SurfaceType.point2.x=xml->GetAttributeDouble(p2,"x");
       SurfaceType.point2.z=xml->GetAttributeDouble(p2,"z");
-      if(SurfaceType.point1.x==SurfaceType.point2.x &&
-         SurfaceType.point1.z==SurfaceType.point2.z)
+      if(std::fabs(SurfaceType.point1.x-SurfaceType.point2.x)<1e-12)
       {
         Run_Exceptioon(
-            "User.SurfaceType.point1 and point2 must be different.");
+            "User.SurfaceType.point1 and point2 must be horizontally different.");
+      }
+
+      SurfaceType.NormalDirectionMode=
+        xml->GetAttributeInt(surfaceNode,"NormalDirectionMode",true,1);
+      if(SurfaceType.NormalDirectionMode<1 || SurfaceType.NormalDirectionMode>2){
+        Run_Exceptioon(
+            "User.SurfaceType.NormalDirectionMode must be 1 or 2.");
       }
     }
   }
@@ -181,7 +188,7 @@ void UserParameters::VisuConfig(JLog2* log)const{
     if(SurfaceType.value==1){
       log->Printf("  WallZ: %.17g",SurfaceType.WallZ);
     }
-    else{
+    else if(SurfaceType.value==2){
       log->Printf("  point1: x=%.17g, z=%.17g",
                   SurfaceType.point1.x,
                   SurfaceType.point1.z);
@@ -189,6 +196,8 @@ void UserParameters::VisuConfig(JLog2* log)const{
       log->Printf("  point2: x=%.17g, z=%.17g",
                   SurfaceType.point2.x,
                   SurfaceType.point2.z);
+      log->Printf("  NormalDirectionMode: %d",
+                SurfaceType.NormalDirectionMode);
     }
   }
 
