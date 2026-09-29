@@ -33,6 +33,7 @@
 #ifndef _JSph_
 #define _JSph_
 
+#include "UserParameters.h"
 #include "DualSphDef.h"
 #include "JObject.h"
 #include "JSphCfgRun.h"
@@ -162,6 +163,8 @@ protected:
   std::string FileXml;
 
   //-Options for execution.
+  UserParameters User;
+
   TpStep TStep;               ///<Step Algorithm: Verlet or Symplectic.                                  | Algoritmo de paso: Verlet o Symplectic.
   int VerletSteps;            ///<Number of steps to apply Eulerian equations.
 

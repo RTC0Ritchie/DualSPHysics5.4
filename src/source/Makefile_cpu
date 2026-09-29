@@ -56,6 +56,7 @@ OBCOMMON:=$(OBCOMMON) JTimeControl.o JTrianglesMesh.o randomc.o
 OBCOMMONDSPH=JDsphConfig.o JDsPips.o JPartDataBi4.o JPartDataHead.o JDsPartFloatSave.o JDsPartMotionSave.o
 OBCOMMONDSPH:=$(OBCOMMONDSPH) JPartFloatInfoBi4.o JPartMotRefBi4Save.o JPartOutBi4Save.o JCaseCtes.o
 OBCOMMONDSPH:=$(OBCOMMONDSPH) JCaseEParms.o JCaseParts.o JCaseProperties.o
+OBCOMMONDSPH:=$(OBCOMMONDSPH) UserParameters.o
 OBSPH=JArraysCpu.o JCellDivCpu.o JDebugSphCpu.o JSphCfgRun.o JComputeMotionRef.o JDsDcell.o JDsDamping.o
 OBSPH:=$(OBSPH) JDsExtraData.o JDsGaugeItem.o JDsGaugeSystem.o JDsPartsOut.o JDsSaveDt.o JSphShifting.o
 OBSPH:=$(OBSPH) JSphShiftingAdv.o JSph.o JDsAccInput.o JSphCpu.o JSphCpu_mdbc.o JSphCpu_preloop.o
