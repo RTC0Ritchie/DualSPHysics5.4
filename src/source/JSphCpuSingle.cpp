@@ -49,6 +49,8 @@
 #include "JDsExtraData.h"
 #include "JDsOutputParts.h" //<vs_outpaarts>
 
+#include "UserParameterOutput.h"
+
 #include <climits>
 
 using namespace std;
@@ -1308,6 +1310,17 @@ void JSphCpuSingle::SaveData(){
   //-Save extra data.
   if(SvExtraDataBi4)SaveExtraData();
   Timersc->TmStop(TMC_SuSavePart);
+
+  // save user-defined data
+  if(save){
+    UserParameterOutput userOutput;
+
+    // userOutput.SaveCsv(
+    //     DirOut+fun::FileNameSec("UserParameter.csv",Part));
+
+    // userOutput.SaveVTK(
+    //     DirOut+fun::FileNameSec("UserParameter.vtk",Part));
+  }
 }
 
 //==============================================================================
