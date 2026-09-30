@@ -2848,8 +2848,8 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       const float KnContact = (KnContactMode==1) ? float(KnContactConst) : 
                   2.f*youngmod*sqrt(float(Dp))/(3.f*(1.f-poissratio*poissratio));
       const float unContact = (unContactMode==1) ? float(unContactConst) : 
-                  0.5f*sqrt(float(Dp)*KnContact/mass0p1); // Not finished development for damping force
-
+                  1.4e-5f * sqrt(6*mass0p1*youngmod*sqrt(float(Dp)/2)); 
+                  
       if (FlexBoundContactMode==1){ // flexure-bound particle interaction
         const StNgSearch ngsb=nsearch::Init(dcell[p1],true,divdata);
         for(int z=ngsb.zini;z<ngsb.zfin;z++){
@@ -2876,10 +2876,16 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
                     const float erx=drx/rad;
                     const float ery=dry/rad;
                     const float erz=drz/rad;
+                    const float vn=  velrhop[p1].x*erx
+                                    + velrhop[p1].y*ery
+                                    + velrhop[p1].z*erz;
 
-                    const float fn= (KnContactLinearity==1)? 
-                                  KnContact * overlap : // String model
-                                  KnContact * overlap*sqrt(overlap); // Full contact model
+                    const float fnE = (KnContactLinearity==1)? 
+                                      KnContact * overlap : // String model
+                                      KnContact * overlap*sqrt(overlap); // Full contact model
+                    const float fnD = -unContact*sqrt(sqrt(overlap))*vn;
+                    const float fn_tmp = fnE + fnD;
+                    const float fn = (fn_tmp>0.f) ? fn_tmp : 0.f; // Only repulsive force
 
                     const float aceContact=fn/mass0p1;
 
@@ -2904,9 +2910,14 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           const double overlap=localZ-particleBottomZ;
 
           if(overlap>0.0){
-            const double fn=(KnContactLinearity==1)
+            const double fnE=(KnContactLinearity==1)
                 ? double(KnContact)*overlap
                 : double(KnContact)*overlap*sqrt(overlap);
+
+            const double vn=double(velrhop[p1].z);
+            const double fnD = -double(unContact)*sqrt(sqrt(overlap))*vn;
+            const double fn_tmp = fnE + fnD;
+            const double fn = (fn_tmp>0.0) ? fn_tmp : 0.0;
 
             acep1.z+=float(fn/double(mass0p1));
           }
@@ -2918,9 +2929,14 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           const double overlap=particleRadius-signedDistance;
 
           if(overlap>0.0){
-            const double fn=(KnContactLinearity==1)
+            const double fnE=(KnContactLinearity==1)
                 ? double(KnContact)*overlap
                 : double(KnContact)*overlap*sqrt(overlap);
+
+            const double vn=double(velrhop[p1].x)*wallNx + double(velrhop[p1].z)*wallNz;
+            const double fnD = -double(unContact)*sqrt(sqrt(overlap))*vn;
+            const double fn_tmp = fnE + fnD;
+            const double fn = (fn_tmp>0.0) ? fn_tmp : 0.0;
 
             acep1.x+=float(fn*wallNx/double(mass0p1));
             acep1.z+=float(fn*wallNz/double(mass0p1));
