@@ -2,7 +2,10 @@
 #include "JXml.h"
 #include "JLog2.h"
 #include "JCaseEParms.h"
+#include "Functions.h"
 
+#include <algorithm>
+#include <set>
 #include <map>
 #include <string>
 #include <cmath>
@@ -24,6 +27,8 @@ void UserParameters::Reset(){
 
   unContactMode=1;
   unContact=0.0;
+
+  OutputObjects.clear();
 }
 
 void UserParameters::LoadXml(const JXml* xml,JLog2* log){
@@ -39,7 +44,7 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     return;
   }
   const TiXmlElement* root=node->ToElement();
-  xml->CheckElementNames(root,true,"*parameter");
+  xml->CheckElementNames(root,true,"*parameter output");
 
   // Record active parameter nodes and reject duplicate keys.
   std::map<std::string,const TiXmlElement*> nodes;
@@ -60,7 +65,24 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
 
   // Read the ordinary key/value parameters.
   JCaseEParms parameters;
-  parameters.LoadXml(xml,"case.User");
+  // Only pass the "parameter" nodes
+  for(const auto& item:nodes){
+    const TiXmlElement* ele=item.second;
+
+    std::string value=xml->GetAttributeStr(ele,"value");
+
+    if(!value.empty() && value[0]=='#'
+        && value.find(':')==std::string::npos){
+      value=fun::DoubleStr(xml->GetAttributeDouble(ele,"value"));
+    }
+
+    parameters.Add(
+        item.first,
+        value,
+        "true",
+        xml->GetAttributeStr(ele,"comment",true),
+        xml->GetAttributeStr(ele,"units_comment",true));
+  }
 
   // ------------------------------------------------------------
   // Contact algorithm.
@@ -170,9 +192,348 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     }
   }
 
+  LoadOutputXml(xml,root);
   // Print only after all checks succeed.
   VisuConfig(log);
 
+}
+
+void UserParameters::LoadOutputXml(
+    const JXml* xml,const TiXmlElement* userNode){
+  OutputObjects.clear();
+
+  const TiXmlElement* output=
+      userNode->FirstChildElement("output");
+
+  if(!output)return;
+
+  // Allow multiple output nodes
+  xml->CheckAttributeNames(output,"comment");
+  xml->CheckElementNames(output,true,"*object");
+
+  // Output failure information altogether with the XML file and line number.
+  const auto Fail=
+      [&](const TiXmlElement* ele,const std::string& message){
+    Run_ExceptioonFile(message,xml->ErrGetFileRow(ele));
+  };
+  const auto Trim=[](const std::string& text)->std::string
+  {
+    const std::string spaces=" \t\r\n";
+
+    const size_t first=text.find_first_not_of(spaces);
+    if(first==std::string::npos)return "";
+
+    const size_t last=text.find_last_not_of(spaces);
+    return text.substr(first,last-first+1);
+  };
+
+  const auto ReadList=
+      [&](const TiXmlElement* ele,
+          const std::string& attribute,
+          const std::vector<std::string>& allowed,
+          bool optional)->std::vector<std::string>
+  {
+    std::vector<std::string> values;
+
+    if(optional && !ele->Attribute(attribute.c_str())){
+      return values;
+    }
+
+    const std::string text=
+        xml->GetAttributeStr(ele,attribute);
+
+    size_t begin=0;
+
+    while(true){
+      const size_t end=text.find(',',begin);
+
+      const std::string value=Trim(
+          text.substr(begin,
+              end==std::string::npos
+                  ? std::string::npos : end-begin));
+
+      if(value.empty()){
+        Fail(ele,"Empty item in output attribute: "+attribute);
+      }
+
+      if(std::find(values.begin(),values.end(),value)
+          !=values.end()){
+        Fail(ele,"Repeated item in "+attribute+": "+value);
+      }
+
+      if(!allowed.empty()
+          && std::find(allowed.begin(),allowed.end(),value)
+              ==allowed.end()){
+        Fail(ele,"Unsupported item in "+attribute+": "+value);
+      }
+
+      values.push_back(value);
+
+      if(end==std::string::npos)break;
+      begin=end+1;
+    }
+
+    return values;
+  };
+
+  // Check that the element has no child elements and only the expected attributes.
+  const auto CheckLeaf=
+      [&](const TiXmlElement* ele,
+          const std::string& attributes)
+  {
+    xml->CheckAttributeNames(ele,attributes);
+
+    if(ele->FirstChildElement()){
+      Fail(ele,"Output variable must not contain child elements.");
+    }
+  };
+
+  // Only accept a specific value for an attribute (source and measure), otherwise fail.
+  const auto RequireValue=
+      [&](const TiXmlElement* ele,
+          const std::string& attribute,
+          const std::string& expected)
+  {
+    const std::string value=
+        Trim(xml->GetAttributeStr(ele,attribute));
+
+    if(value!=expected){
+      Fail(ele,"Unsupported "+attribute+"='"+value+
+          "'. Currently supported: "+expected);
+    }
+  };
+
+  const std::vector<std::string> tensorNames={
+      "xx","yy","zz","xy","xz","yz"};
+
+  const std::vector<std::string> invariantNames={
+      "mean","mech_pressure","von_mises"};
+
+  std::set<std::string> usedNames;
+  std::vector<StOutputObject> objects;
+
+  //---------------------
+  // Start to input xml
+  //---------------------
+  for(const TiXmlElement* obj=output->FirstChildElement("object");
+      obj;
+      obj=obj->NextSiblingElement("object"))
+  {
+    xml->CheckAttributeNames(obj,"name mk formats outputfolder comment");
+    xml->CheckElementNames(obj,true,"dynamic static");
+
+    StOutputObject config;
+
+    // --------------------------------------------------------
+    // Output file name
+    // --------------------------------------------------------
+    config.Name=Trim(xml->GetAttributeStr(obj,"name"));
+
+    const std::string validNameChars=
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789_";
+
+    if(config.Name.empty()
+        || config.Name.find_first_not_of(validNameChars)
+            !=std::string::npos){
+      Fail(obj,
+          "Output object name must contain only letters, "
+          "digits and underscores.");
+    }
+
+    if(!usedNames.insert(config.Name).second){
+      Fail(obj,"Repeated output object name: "+config.Name);
+    }
+
+    // --------------------------------------------------------
+    // MK list
+    // --------------------------------------------------------
+    const std::vector<std::string> mkText=
+        ReadList(obj,"mk",{},false);
+
+    std::set<unsigned> usedMk;
+
+    for(const std::string& text:mkText){
+      unsigned value=0;
+
+      for(char c:text){
+        if(c<'0' || c>'9'){
+          Fail(obj,"MK must be a non-negative integer: "+text);
+        }
+        value=value*10u+unsigned(c-'0');
+
+        if(value>65535u){
+          Fail(obj,"MK is outside the range 0..65535: "+text);
+        }
+      }
+      if(!usedMk.insert(value).second){
+        Fail(obj,"Repeated MK value: "+text);
+      }
+      config.Mk.push_back(value);
+    }
+
+    // --------------------------------------------------------
+    // output file formats
+    // --------------------------------------------------------
+    const std::vector<std::string> formats=
+        ReadList(obj,"formats",{"csv","vtk"},false);
+
+    for(const std::string& format:formats){
+      if(format=="csv")config.Csv=true;
+      else if(format=="vtk")config.Vtk=true;
+    }
+
+    // --------------------------------------------------------
+    // output folder
+    // --------------------------------------------------------
+    config.OutputFolder=
+    xml->GetAttributeStrSimple(obj,"outputfolder",true,"");
+    // Use Linux path separators.
+    if(config.OutputFolder.find('\\')!=std::string::npos){
+      Fail(obj,"outputfolder must use '/' as the path separator.");
+    }
+    // A $ path must stay relative to DirOut.
+    if(!config.OutputFolder.empty()
+        && config.OutputFolder[0]=='$'){
+      const std::string subdir=config.OutputFolder.substr(1);
+
+      if(subdir.empty() || subdir[0]=='/'){
+        Fail(obj,
+            "A $ outputfolder requires a relative subdirectory.");
+      }
+
+      size_t begin=0;
+
+      while(true){
+        const size_t end=subdir.find('/',begin);
+
+        const std::string part=subdir.substr(
+            begin,
+            end==std::string::npos
+                ? std::string::npos : end-begin);
+
+        if(part==".."){
+          Fail(obj,
+              "A $ outputfolder must not contain '..' components.");
+        }
+
+        if(end==std::string::npos)break;
+        begin=end+1;
+      }
+    }
+
+    // --------------------------------------------------------
+    // Time-varying output variables.
+    // --------------------------------------------------------
+    const TiXmlElement* dynamic=
+        obj->FirstChildElement("dynamic");
+
+    if(dynamic){
+      xml->CheckAttributeNames(dynamic,"comment");
+      xml->CheckElementNames(
+          dynamic,true,
+          "density pressure volume velocity strain stress");
+
+      const TiXmlElement* ele=nullptr;
+
+      ele=dynamic->FirstChildElement("density");
+      if(ele){
+        CheckLeaf(ele,"source comment");
+        RequireValue(ele,"source","material");
+        config.Dynamic.DensityMaterial=true;
+      }
+
+      ele=dynamic->FirstChildElement("pressure");
+      if(ele){
+        CheckLeaf(ele,"source comment");
+        RequireValue(ele,"source","sph");
+        config.Dynamic.PressureSPH=true;
+      }
+
+      ele=dynamic->FirstChildElement("volume");
+      if(ele){
+        CheckLeaf(ele,"source comment");
+        RequireValue(ele,"source","material");
+        config.Dynamic.VolumeMaterial=true;
+      }
+
+      ele=dynamic->FirstChildElement("velocity");
+      if(ele){
+        CheckLeaf(ele,"comment");
+        config.Dynamic.Velocity=true;
+      }
+
+      ele=dynamic->FirstChildElement("strain");
+      if(ele){
+        CheckLeaf(ele,"measure components comment");
+        RequireValue(ele,"measure","green_lagrange");
+
+        config.Dynamic.StrainComponents=
+            ReadList(ele,"components",tensorNames,false);
+      }
+
+      ele=dynamic->FirstChildElement("stress");
+      if(ele){
+        CheckLeaf(ele,"measure components invariants comment");
+        RequireValue(ele,"measure","cauchy");
+
+        config.Dynamic.StressComponents=
+            ReadList(ele,"components",tensorNames,true);
+
+        config.Dynamic.StressInvariants=
+            ReadList(ele,"invariants",invariantNames,true);
+
+        if(config.Dynamic.StressComponents.empty()
+            && config.Dynamic.StressInvariants.empty()){
+          Fail(ele,
+              "Stress requires components and/or invariants.");
+        }
+      }
+    }
+
+    // --------------------------------------------------------
+    // Time-invariant output variables.
+    // --------------------------------------------------------
+    const TiXmlElement* statics=
+        obj->FirstChildElement("static");
+
+    if(statics){
+      xml->CheckAttributeNames(statics,"comment");
+      xml->CheckElementNames(statics,true,"mass");
+
+      const TiXmlElement* mass=
+          statics->FirstChildElement("mass");
+
+      if(mass){
+        CheckLeaf(mass,"comment");
+        config.Static.Mass=true;
+      }
+    }
+
+    // Every written output object must have at least one variable selected.
+    const StOutputDynamic& d=config.Dynamic;
+
+    const bool hasVariable=
+        d.DensityMaterial
+        || d.PressureSPH
+        || d.VolumeMaterial
+        || d.Velocity
+        || !d.StrainComponents.empty()
+        || !d.StressComponents.empty()
+        || !d.StressInvariants.empty()
+        || config.Static.Mass;
+
+    if(!hasVariable){
+      Fail(obj,"Output object has no selected variables: "
+          +config.Name);
+    }
+
+    objects.push_back(config);
+  }
+
+  // Submit after check every objects
+  OutputObjects.swap(objects);
 }
 
 void UserParameters::VisuConfig(JLog2* log)const{

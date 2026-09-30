@@ -77,6 +77,7 @@ public:
   float GetYoungMod()const{ return YoungMod; };
   float GetPoissRatio()const{ return PoissRatio; };
   float GetHgFactor()const{ return HgFactor; };
+  TpConstitModel GetConstitModel()const{return ConstitModel;}
 
   float GetParticleMass()const{ return GetParticleVolume()*GetDensity(); };
   tmatrix6f GetConstitMatrix()const{ return ConstitMatrix; };

@@ -99,6 +99,13 @@ protected:
   void SaveExtraData();
   void FinishRun(bool stop);
 
+  void SaveUserOutput(
+    unsigned npsave,
+    const unsigned* svidp,
+    const tdouble3* svpos,
+    const tfloat3* svvel,
+    const float* svrho);
+
   //<vs_flexstruc_ini>
   void FlexStrucInit();
   void UpdateFlexStrucGeometry();

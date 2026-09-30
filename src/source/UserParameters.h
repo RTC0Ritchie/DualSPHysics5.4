@@ -1,10 +1,14 @@
 #ifndef USERPARAMETERS_H
 #define USERPARAMETERS_H
 
+#include <string>
+#include <vector>
+
 #include "JObject.h"
 
 class JXml;
 class JLog2;
+class TiXmlElement;
 
 class UserParameters : protected JObject
 {
@@ -39,11 +43,53 @@ public:
   int unContactMode; // 1: manual; 2: automatic.
   double unContact;
 
+  // Output
+  // Time-varying output configuration.
+  struct StOutputDynamic{
+    bool DensityMaterial=false;
+    bool PressureSPH=false;
+    bool VolumeMaterial=false;
+    bool Velocity=false;
+
+    // If empty, no output is generated. 
+    std::vector<std::string> StrainComponents;
+    std::vector<std::string> StressComponents;
+    std::vector<std::string> StressInvariants;
+  };
+
+  // Time-invariant output configuration.
+  struct StOutputStatic{
+    bool Mass=false;
+  };
+
+  struct StOutputObject{
+    std::string Name;
+    std::vector<unsigned> Mk;
+    std::string OutputFolder;
+
+    bool Csv=false;
+    bool Vtk=false;
+
+    StOutputDynamic Dynamic;
+    StOutputStatic Static;
+  };
+
+  // if empty, no output is generated.
+  std::vector<StOutputObject> OutputObjects;
+
+
+
+
+
   UserParameters();
 
   void Reset();
   void LoadXml(const JXml* xml,JLog2* log);
   void VisuConfig(JLog2* log)const;
+
+private:
+  void LoadOutputXml(const JXml* xml,const TiXmlElement* userNode);
+
 };
 
 #endif

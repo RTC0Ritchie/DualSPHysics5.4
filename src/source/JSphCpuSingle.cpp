@@ -49,7 +49,7 @@
 #include "JDsExtraData.h"
 #include "JDsOutputParts.h" //<vs_outpaarts>
 
-#include "UserParameterOutput.h"
+#include <algorithm>
 
 #include <climits>
 
@@ -1309,18 +1309,19 @@ void JSphCpuSingle::SaveData(){
     ,npsave,Npb,Pos_c->cptr(),Idp_c->cptr(),BoundNor_c->cptr(),1.f);
   //-Save extra data.
   if(SvExtraDataBi4)SaveExtraData();
+
+  // Save user-defined elected user fields at the current output frame.
+  if(save){
+    SaveUserOutput(
+      npsave,
+      svidp.cptr(),
+      svpos.cptr(),
+      svvel.cptr(),
+      svrho.cptr());
+  }
+
   Timersc->TmStop(TMC_SuSavePart);
 
-  // save user-defined data
-  if(save){
-    UserParameterOutput userOutput;
-
-    // userOutput.SaveCsv(
-    //     DirOut+fun::FileNameSec("UserParameter.csv",Part));
-
-    // userOutput.SaveVTK(
-    //     DirOut+fun::FileNameSec("UserParameter.vtk",Part));
-  }
 }
 
 //==============================================================================
