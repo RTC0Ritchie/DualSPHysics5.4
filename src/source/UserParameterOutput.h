@@ -19,9 +19,11 @@ public:
     tdouble3 Pos=TDouble3(0);
     tfloat3 Velocity=TFloat3(0);
 
-    double Density=0;
-    double Pressure=0;
-    double Volume=0;
+    double DensityMaterial=0;
+    double DensitySPH=0;
+    double PressureSPH=0;
+    double VolumeMaterial=0;
+    double VolumeSPH=0;
     double Mass=0;
 
     tmatrix3f Strain={};

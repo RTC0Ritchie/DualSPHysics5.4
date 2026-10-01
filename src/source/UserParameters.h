@@ -47,11 +47,13 @@ public:
   // Time-varying output configuration.
   struct StOutputDynamic{
     bool DensityMaterial=false;
+    bool DensitySPH=false;
     bool PressureSPH=false;
     bool VolumeMaterial=false;
+    bool VolumeSPH=false;
     bool Velocity=false;
 
-    // If empty, no output is generated. 
+    // If empty, no output is generated.
     std::vector<std::string> StrainComponents;
     std::vector<std::string> StressComponents;
     std::vector<std::string> StressInvariants;

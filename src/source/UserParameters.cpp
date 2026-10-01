@@ -118,30 +118,105 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
       SurfaceType.WallZ=
           xml->ReadElementDouble(surfaceNode,"WallZ","value");
     }
-    else if(SurfaceType.value==2){ // Two-point geometry.
-      xml->CheckElementNames(surfaceNode,true,"point1 point2");
-      const TiXmlElement* p1=
-          xml->GetFirstElement(surfaceNode,"point1");
-      const TiXmlElement* p2=
-          xml->GetFirstElement(surfaceNode,"point2");
-      xml->CheckAttributeNames(p1,"x z comment");
-      xml->CheckAttributeNames(p2,"x z comment");
-      // All four coordinates are required.
-      SurfaceType.point1.x=xml->GetAttributeDouble(p1,"x");
-      SurfaceType.point1.z=xml->GetAttributeDouble(p1,"z");
-      SurfaceType.point2.x=xml->GetAttributeDouble(p2,"x");
-      SurfaceType.point2.z=xml->GetAttributeDouble(p2,"z");
-      if(std::fabs(SurfaceType.point1.x-SurfaceType.point2.x)<1e-12)
-      {
-        Run_Exceptioon(
-            "User.SurfaceType.point1 and point2 must be horizontally different.");
-      }
+    else if(SurfaceType.value==2){
+      xml->CheckElementNames(
+          surfaceNode,true,"point1 point2 point slope");
 
       SurfaceType.NormalDirectionMode=
-        xml->GetAttributeInt(surfaceNode,"NormalDirectionMode",true,1);
-      if(SurfaceType.NormalDirectionMode<1 || SurfaceType.NormalDirectionMode>2){
+          xml->GetAttributeInt(
+              surfaceNode,"NormalDirectionMode",true,1);
+
+      if(SurfaceType.NormalDirectionMode<1 ||
+        SurfaceType.NormalDirectionMode>2){
         Run_Exceptioon(
             "User.SurfaceType.NormalDirectionMode must be 1 or 2.");
+      }
+
+      const bool hasP1=xml->ExistsElement(surfaceNode,"point1");
+      const bool hasP2=xml->ExistsElement(surfaceNode,"point2");
+      const bool hasPoint=xml->ExistsElement(surfaceNode,"point");
+      const bool hasSlope=xml->ExistsElement(surfaceNode,"slope");
+
+      // Exactly one complete definition is permitted.
+      const bool useTwoPoints=
+          hasP1 && hasP2 && !hasPoint && !hasSlope;
+
+      const bool usePointSlope=
+          hasPoint && hasSlope && !hasP1 && !hasP2;
+
+      if(!useTwoPoints && !usePointSlope){
+        Run_Exceptioon(
+            "Specify either point1 + point2 or point + slope, "
+            "without mixing the two definitions.");
+      }
+
+      if(useTwoPoints){
+        const TiXmlElement* p1=
+            xml->GetFirstElement(surfaceNode,"point1");
+        const TiXmlElement* p2=
+            xml->GetFirstElement(surfaceNode,"point2");
+
+        xml->CheckAttributeNames(p1,"x z comment");
+        xml->CheckAttributeNames(p2,"x z comment");
+
+        SurfaceType.point1.x=xml->GetAttributeDouble(p1,"x");
+        SurfaceType.point1.z=xml->GetAttributeDouble(p1,"z");
+        SurfaceType.point2.x=xml->GetAttributeDouble(p2,"x");
+        SurfaceType.point2.z=xml->GetAttributeDouble(p2,"z");
+      }
+      else{
+        // New definition is enabled for normal-force mode.
+        if(SurfaceType.NormalDirectionMode!=2){
+          Run_Exceptioon(
+              "point + slope requires NormalDirectionMode=2.");
+        }
+
+        const TiXmlElement* point=
+            xml->GetFirstElement(surfaceNode,"point");
+        const TiXmlElement* slope=
+            xml->GetFirstElement(surfaceNode,"slope");
+
+        xml->CheckAttributeNames(point,"x z comment");
+        xml->CheckAttributeNames(slope,"value comment");
+
+        const double x0=xml->GetAttributeDouble(point,"x");
+        const double z0=xml->GetAttributeDouble(point,"z");
+        const double k=xml->GetAttributeDouble(slope,"value");
+
+        if(!std::isfinite(x0) ||
+          !std::isfinite(z0) ||
+          !std::isfinite(k)){
+          Run_Exceptioon(
+              "Surface point coordinates and slope must be finite.");
+        }
+
+        // Convert to the existing two-point representation.
+        SurfaceType.point1.x=x0;
+        SurfaceType.point1.z=z0;
+        SurfaceType.point2.x=x0+1.0;
+        SurfaceType.point2.z=z0+k;
+      }
+
+      // Common validation for both definitions.
+      const double x1=SurfaceType.point1.x;
+      const double z1=SurfaceType.point1.z;
+      const double x2=SurfaceType.point2.x;
+      const double z2=SurfaceType.point2.z;
+
+      if(!std::isfinite(x1) || !std::isfinite(z1) ||
+        !std::isfinite(x2) || !std::isfinite(z2)){
+        Run_Exceptioon("Surface coordinates must be finite.");
+      }
+
+      const double dx=x2-x1;
+      if(std::fabs(dx)<1e-12){
+        Run_Exceptioon(
+            "Surface points must have different x coordinates.");
+      }
+
+      const double k=(z2-z1)/dx;
+      if(!std::isfinite(k)){
+        Run_Exceptioon("Surface slope must be finite.");
       }
     }
   }
@@ -440,22 +515,49 @@ void UserParameters::LoadOutputXml(
       ele=dynamic->FirstChildElement("density");
       if(ele){
         CheckLeaf(ele,"source comment");
-        RequireValue(ele,"source","material");
-        config.Dynamic.DensityMaterial=true;
+
+        const auto sources=
+          ReadList(ele,"source",{"material","sph"},false);
+
+        for(const std::string& source:sources){
+          if(source=="material"){
+            config.Dynamic.DensityMaterial=true;
+          }
+          else if(source=="sph"){
+            config.Dynamic.DensitySPH=true;
+          }
+        }
       }
 
       ele=dynamic->FirstChildElement("pressure");
       if(ele){
         CheckLeaf(ele,"source comment");
-        RequireValue(ele,"source","sph");
-        config.Dynamic.PressureSPH=true;
+
+        const auto sources=
+          ReadList(ele,"source",{"sph"},false);
+
+        for(const std::string& source:sources){
+          if(source=="sph"){
+            config.Dynamic.PressureSPH=true;
+          }
+        }
       }
 
       ele=dynamic->FirstChildElement("volume");
       if(ele){
         CheckLeaf(ele,"source comment");
-        RequireValue(ele,"source","material");
-        config.Dynamic.VolumeMaterial=true;
+
+        const auto sources=
+          ReadList(ele,"source",{"material","sph"},false);
+
+        for(const std::string& source:sources){
+          if(source=="material"){
+            config.Dynamic.VolumeMaterial=true;
+          }
+          else if(source=="sph"){
+            config.Dynamic.VolumeSPH=true;
+          }
+        }
       }
 
       ele=dynamic->FirstChildElement("velocity");
@@ -515,14 +617,16 @@ void UserParameters::LoadOutputXml(
     const StOutputDynamic& d=config.Dynamic;
 
     const bool hasVariable=
-        d.DensityMaterial
-        || d.PressureSPH
-        || d.VolumeMaterial
-        || d.Velocity
-        || !d.StrainComponents.empty()
-        || !d.StressComponents.empty()
-        || !d.StressInvariants.empty()
-        || config.Static.Mass;
+      d.DensityMaterial
+      || d.DensitySPH
+      || d.PressureSPH
+      || d.VolumeMaterial
+      || d.VolumeSPH
+      || d.Velocity
+      || !d.StrainComponents.empty()
+      || !d.StressComponents.empty()
+      || !d.StressInvariants.empty()
+      || config.Static.Mass;
 
     if(!hasVariable){
       Fail(obj,"Output object has no selected variables: "

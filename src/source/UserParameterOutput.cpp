@@ -78,15 +78,23 @@ void UserParameterOutput::SaveFiles(
     const auto& dynamic=config.Dynamic;
 
     if(dynamic.DensityMaterial){
-      AddScalar("Density",&StVtkParticle::Density);
+      AddScalar("Density_material",&StVtkParticle::DensityMaterial);
+    }
+
+    if(dynamic.DensitySPH){
+      AddScalar("Density_sph",&StVtkParticle::DensitySPH);
     }
 
     if(dynamic.PressureSPH){
-      AddScalar("Pressure",&StVtkParticle::Pressure);
+      AddScalar("Pressure_sph",&StVtkParticle::PressureSPH);
     }
 
     if(dynamic.VolumeMaterial){
-      AddScalar("Volume",&StVtkParticle::Volume);
+      AddScalar("Volume_material",&StVtkParticle::VolumeMaterial);
+    }
+
+    if(dynamic.VolumeSPH){
+      AddScalar("Volume_sph",&StVtkParticle::VolumeSPH);
     }
 
     if(dynamic.Velocity){
@@ -331,6 +339,7 @@ void JSphCpuSingle::SaveUserOutput(
     if(!config.Vtk && !config.Csv)continue;
 
     if(HasMaterialFields(config.Dynamic)
+        || config.Dynamic.VolumeSPH
         || (firstFrame && config.Static.Mass)){
       needFlexMap=true;
       break;
@@ -374,9 +383,16 @@ void JSphCpuSingle::SaveUserOutput(
     const bool outputMaterial=HasMaterialFields(dynamic);
 
     const bool outputDynamic=
-      outputMaterial || dynamic.PressureSPH || dynamic.Velocity;
+      outputMaterial
+      || dynamic.DensitySPH
+      || dynamic.VolumeSPH
+      || dynamic.PressureSPH
+      || dynamic.Velocity;
 
     const bool outputMass=firstFrame && config.Static.Mass;
+
+    // SPH volume requires mass at every output frame.
+    const bool needParticleMass=outputMass || dynamic.VolumeSPH;
 
     if(!outputDynamic && !outputMass)continue;
 
@@ -418,7 +434,21 @@ void JSphCpuSingle::SaveUserOutput(
 
       // Use SPH density from this output frame.
       if(dynamic.PressureSPH){
-        particle.Pressure=fsph::ComputePress(svrho[q],CSP);
+        particle.PressureSPH=fsph::ComputePress(svrho[q],CSP);
+      }
+
+      if(dynamic.DensitySPH || dynamic.VolumeSPH){
+        const double rho=double(svrho[q]);
+
+        if(!std::isfinite(rho) || rho<=0.0){
+          Run_Exceptioon(fun::PrintStr(
+            "Invalid SPH density: Idp=%u MK=%u rho=%.17g.",
+            id,mk,rho));
+        }
+
+        if(dynamic.DensitySPH){
+          particle.DensitySPH=rho;
+        }
       }
 
       const auto it=flexById.find(id);
@@ -450,7 +480,7 @@ void JSphCpuSingle::SaveUserOutput(
         const StFlexStrucData& material=FlexStrucDatac[body];
 
         // Reference mass does not require F.
-        if(outputMass){
+        if(needParticleMass){
           particle.Mass=
             double(material.rho0)*double(material.vol0);
         }
@@ -482,11 +512,11 @@ void JSphCpuSingle::SaveUserOutput(
           }
 
           if(dynamic.DensityMaterial){
-            particle.Density=double(material.rho0)/j;
+            particle.DensityMaterial=double(material.rho0)/j;
           }
 
           if(dynamic.VolumeMaterial){
-            particle.Volume=double(material.vol0)*j;
+            particle.VolumeMaterial=double(material.vol0)*j;
           }
 
           if(outputStrain){
@@ -514,7 +544,7 @@ void JSphCpuSingle::SaveUserOutput(
           }
         }
       }
-      else if(outputMass){
+      else if(needParticleMass){
         // Mass of ordinary SPH and rigid-body particles.
         const typecode code=mkblock->Code;
 
@@ -533,6 +563,16 @@ void JSphCpuSingle::SaveUserOutput(
         else{
           particle.Mass=MassBound;
         }
+      }
+
+      if(dynamic.VolumeSPH){
+        if(!std::isfinite(particle.Mass) || particle.Mass<=0.0){
+          Run_Exceptioon(fun::PrintStr(
+            "Invalid particle mass: Idp=%u MK=%u mass=%.17g.",
+            id,mk,particle.Mass));
+        }
+
+        particle.VolumeSPH=particle.Mass/double(svrho[q]);
       }
 
       particles.push_back(particle);
