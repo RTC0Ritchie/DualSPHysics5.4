@@ -2,6 +2,7 @@
 #include "JCellSearch_inline.h"
 #include "FunSphKernel.h"
 #include "FunctionsMath.h"
+#include "UserParameters.h"
 
 #include <cmath>
 
@@ -57,6 +58,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
 
   // --------------------------------------------------------------------------------------
   // Load user-defined parameters
+  const UserParameters& User = *this->User;
   const int FlexBoundContactMode=User.FlexBoundContactMode;
 
   const int SurfaceType = (FlexBoundContactMode == 2) ? 

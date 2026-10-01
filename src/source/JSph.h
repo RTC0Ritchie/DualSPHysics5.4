@@ -33,7 +33,6 @@
 #ifndef _JSph_
 #define _JSph_
 
-#include "UserParameters.h"
 #include "DualSphDef.h"
 #include "JObject.h"
 #include "JSphCfgRun.h"
@@ -46,6 +45,7 @@
 #include <sstream>
 #include <iostream>
 #include <fstream>
+#include <memory>
 
 class JSphMk;
 class JDsMotion;
@@ -84,6 +84,8 @@ class JCaseEParms;
 class JDataArrays;
 class JDsExtraDataSave;
 class JDsOutputParts;//<vs_outpaarts>
+
+class UserParameters;
 
 //##############################################################################
 //# XML format of execution parameters in _FmtXML__Parameters.xml.
@@ -163,7 +165,7 @@ protected:
   std::string FileXml;
 
   //-Options for execution.
-  UserParameters User;
+  std::unique_ptr<UserParameters> User;
 
   TpStep TStep;               ///<Step Algorithm: Verlet or Symplectic.                                  | Algoritmo de paso: Verlet o Symplectic.
   int VerletSteps;            ///<Number of steps to apply Eulerian equations.

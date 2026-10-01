@@ -303,6 +303,7 @@ void JSphCpuSingle::SaveUserOutput(
   const tfloat3* svvel,
   const float* svrho)
 {
+  const UserParameters& User = *this->User;
   if(User.OutputObjects.empty())return;
 
   // First output frame of this run, including restart runs.

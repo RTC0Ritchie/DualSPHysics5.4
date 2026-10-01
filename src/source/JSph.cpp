@@ -18,6 +18,8 @@
 
 /// \file JSph.cpp \brief Implements the class \ref JSph.
 
+#include "UserParameters.h"
+
 #include "JSph.h"
 #include "JAppInfo.h"
 #include "Functions.h"
@@ -75,7 +77,7 @@ using namespace std;
 /// Constructor.
 //==============================================================================
 JSph::JSph(int gpucount,bool withmpi):Cpu(gpucount==0)
-  ,Mgpu(gpucount>1),GpuCount(gpucount),WithMpi(withmpi)
+  ,Mgpu(gpucount>1),GpuCount(gpucount),WithMpi(withmpi),User(new UserParameters())
 {
   ClassName="JSph";
   DgNum=0;
@@ -1006,7 +1008,7 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   JXml xml;
   xml.LoadFile(FileXml);
   const JXml* cxml=&xml;
-  User.LoadXml(cxml,Log); // Load self-defined user parameters
+  User->LoadXml(cxml,Log); // Load self-defined user parameters
   //-Shows pre-processing application generating the XML file.
   Log->Printf("XML-App: %s",cxml->GetAttributeStr(cxml->GetNodeError("case")->ToElement()
     ,"app",true,"unknown").c_str());

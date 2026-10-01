@@ -27,6 +27,7 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
+#include <deque>
 
 #include "JObject.h"
 #include "JLog2.h"
@@ -48,7 +49,7 @@ public:
   void Run(std::string appname,JSphCfgRun* cfg,JLog2* log);
 
 private:
-  std::vector<T> VResObj; 
+  std::deque<T> VResObj;
   std::vector<TP> Parms;   
   JCaseVRes CaseVRes;
   unsigned VResCount  = 1;
