@@ -66,6 +66,10 @@ public:
   void AddNormals(bool usenormalsft,unsigned np,unsigned npb
     ,const unsigned* idp,const typecode* code,const tfloat3* boundnor);
   void SavePartData();
+
+  void AddBoundaryMotion(unsigned np,
+  const unsigned* idp, const typecode* code,
+  const tfloat3* motionvel, const tfloat3* motionace);
 };
 
 
@@ -98,6 +102,10 @@ public:
   void LoadPartData(std::string dir,int cpart);
 
   bool LoadNormals(unsigned np,unsigned npb,const unsigned* idp,tfloat3* boundnor);
+
+  void LoadBoundaryMotion(unsigned np,
+  const unsigned* idp, const typecode* code,
+  tfloat3* motionvel, tfloat3* motionace);
 
 };
 

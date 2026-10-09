@@ -24,6 +24,7 @@
 #include "Functions.h"
 #include "JRangeFilter.h"
 #include <algorithm>
+#include <vector>
 
 using namespace std;
 
@@ -143,6 +144,47 @@ void JDsExtraDataSave::SavePartData(){
   delete Data; Data=NULL;
 }
 
+//==============================================================================
+/// Add boundary motion data (velocity and acceleration) for fixed, moving and floating particles.
+//==============================================================================
+void JDsExtraDataSave::AddBoundaryMotion(
+  unsigned np, const unsigned* idp, const typecode* code,
+  const tfloat3* motionvel, const tfloat3* motionace)
+{
+  if(!Data || !motionvel || !motionace)
+    Run_Exceptioon("Missing boundary motion data for saving.");
+
+  Data->SetvUint("BoundaryMotionVersion",1);
+
+  // Arrays indexed by stable particle ID.
+  tfloat3* mv=
+    Data->CreateArrayFloat3("MotionVel",CaseNbound,true);
+  tfloat3* ma=
+    Data->CreateArrayFloat3("MotionAce",CaseNbound,true);
+
+  std::vector<unsigned char> seen(CaseNbound,0);
+
+  for(unsigned p=0;p<np;p++){
+    const unsigned id=idp[p];
+    if(id>=CaseNbound)continue;
+
+    // Exclude periodic copies and other non-normal entries.
+    if(code && !CODE_IsNormal(code[p]))continue;
+
+    if(seen[id])
+      Run_Exceptioon("Duplicated boundary ID in motion data.");
+
+    mv[id]=motionvel[p];
+    ma[id]=motionace[p];
+    seen[id]=1;
+  }
+
+  for(unsigned id=0;id<CaseNbound;id++){
+    if(!seen[id])
+      Run_Exceptioon("Incomplete boundary motion data.");
+  }
+}
+
 
 //##############################################################################
 //# JDsExtraDataLoad
@@ -223,5 +265,51 @@ bool JDsExtraDataLoad::LoadNormals(unsigned np,unsigned npb
     for(unsigned p=npb;p<np;p++)if(idp[p]<nsize)boundnor[p]=vnor[idp[p]];
   }
   return(usenormalsft);
+}
+
+//==============================================================================
+/// Load boundary motion data (velocity and acceleration) for fixed, moving and floating particles.
+//==============================================================================
+void JDsExtraDataLoad::LoadBoundaryMotion(
+  unsigned np, const unsigned* idp, const typecode* code,
+  tfloat3* motionvel, tfloat3* motionace)
+{
+  if(!Data || !motionvel || !motionace)
+    Run_Exceptioon("Missing boundary motion storage.");
+
+  if(Data->GetvUint("BoundaryMotionVersion",true,0)!=1)
+    Run_ExceptioonFile(
+      "Restart file does not contain boundary motion data.",
+      FileData);
+
+  if(Data->GetvUint("CaseNbound")!=CaseNbound ||
+     Data->GetvUint("CaseNfloat")!=CaseNfloat)
+    Run_ExceptioonFile(
+      "Boundary particle counts do not match.",FileData);
+
+  JBinaryDataArray* av=Data->GetArray("MotionVel");
+  JBinaryDataArray* aa=Data->GetArray("MotionAce");
+
+  if(!av || !aa ||
+     av->GetType()!=JBinaryDataDef::DatFloat3 ||
+     aa->GetType()!=JBinaryDataDef::DatFloat3 ||
+     av->GetCount()!=CaseNbound ||
+     aa->GetCount()!=CaseNbound)
+    Run_ExceptioonFile(
+      "Invalid MotionVel or MotionAce array.",FileData);
+
+  const tfloat3* mv=
+    static_cast<const tfloat3*>(av->GetDataPointer());
+  const tfloat3* ma=
+    static_cast<const tfloat3*>(aa->GetDataPointer());
+
+  for(unsigned p=0;p<np;p++){
+    const unsigned id=idp[p];
+    if(id>=CaseNbound)continue;
+    if(code && !CODE_IsNormal(code[p]))continue;
+
+    motionvel[p]=mv[id];
+    motionace[p]=ma[id];
+  }
 }
 

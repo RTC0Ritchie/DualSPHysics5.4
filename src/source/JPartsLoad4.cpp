@@ -279,10 +279,13 @@ void JPartsLoad4::LoadParticles(const std::string& casedir
     if(!sizetot)Run_Exceptioon("Number of particles is invalid to calculates Y in 2D simulations.");
     Simulate2DPosY=Pos[0].y;
   }
-  //-Checks order of boundary particles.
+  // Restore the particle order required during restart initialization.
+  if(PartBegin){
+    SortParticles();
+  }
+
+  // Check the restored boundary-particle order.
   CheckSortParticles();
-  //-Sorts particles according to Id. | Ordena particulas por Id.
-  //SortParticles();
 }
 
 //==============================================================================

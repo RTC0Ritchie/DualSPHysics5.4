@@ -41,6 +41,7 @@ protected:
   void UpdateMaxValues();
   void LoadConfig(const JSphCfgRun* cfg);
   void ConfigDomain();
+  void LoadBoundaryMotionRestart();
 
   void ResizeParticlesSizeData(unsigned ndatacpu,unsigned newsize,unsigned minsize,float oversize,bool updatedivide);
   unsigned PeriodicMakeList(unsigned np,unsigned pini,bool stable,unsigned nmax,tdouble3 perinc,const tdouble3* pos,const typecode* code,unsigned* listp)const;

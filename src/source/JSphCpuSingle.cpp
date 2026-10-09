@@ -133,11 +133,18 @@ void JSphCpuSingle::ConfigDomain(){
   Velrho_c->CopyFrom(PartsLoaded->GetVelRho(),Np);
   if(UseNormals){
     BoundNor_c->Memset(0,Np);
-    if(PartsLoaded->GetBoundNor())BoundNor_c->CopyFrom(PartsLoaded->GetBoundNor(),CaseNbound);
-    else if(AbortNoNormals)Run_ExceptioonFile(
-      "No normal data for mDBC in the input file.",PartsLoaded->GetFileLoaded());
-    else Log->PrintWarning(fun::PrintStr("No normal data for mDBC in the input file (%s)."
-      ,PartsLoaded->GetFileLoaded().c_str()));
+    if(!PartBegin){
+      if(PartsLoaded->GetBoundNor())
+        BoundNor_c->CopyFrom(PartsLoaded->GetBoundNor(),CaseNbound);
+      else if(AbortNoNormals)
+        Run_ExceptioonFile(
+          "No normal data for mDBC in the input file.",
+          PartsLoaded->GetFileLoaded());
+      else
+        Log->PrintWarning(fun::PrintStr(
+          "No normal data for mDBC in the input file (%s).",
+          PartsLoaded->GetFileLoaded().c_str()));
+    }
   }
 
   //-Computes radius of floating bodies.
@@ -1165,6 +1172,8 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Initialisation of execution variables.
   InitRunCpu();
+  LoadBoundaryMotionRestart();
+  
   RunFirstGaugeSystem(TimeStep);
   if(InOut)InOutInit(TimeStepIni);
   if(FlexStruc){
@@ -1337,6 +1346,17 @@ void JSphCpuSingle::SaveExtraData(){
       SvExtraDataBi4->AddNormals(UseNormalsFt,Np,Npb,Idp_c->cptr()
         ,(PeriActive? Code_c->cptr(): NULL),BoundNor_c->cptr());
     }
+    if(FlexStruc && TMdbc2>=MDBC2_Std){
+      if(!MotionVel_c || !MotionAce_c)
+        Run_Exceptioon("Boundary motion arrays are unavailable.");
+
+      SvExtraDataBi4->AddBoundaryMotion(
+        Np,
+        Idp_c->cptr(),
+        Code_c->cptr(),
+        MotionVel_c->cptr(),
+        MotionAce_c->cptr());
+    }
     //-Saves file.
     SvExtraDataBi4->SavePartData();
   }
@@ -1361,6 +1381,34 @@ void JSphCpuSingle::FinishRun(bool stop){
   Log->PrintFilesList();
   Log->PrintWarningList();
   VisuRefs();
+}
+
+//==============================================================================
+/// Restores boundary motion data for flexible-structure mDBC restart.
+//==============================================================================
+void JSphCpuSingle::LoadBoundaryMotionRestart(){
+  if(!PartBegin || !FlexStruc || TMdbc2<MDBC2_Std)
+    return;
+
+  if(!MotionVel_c || !MotionAce_c)
+    Run_Exceptioon("Boundary motion arrays are unavailable.");
+
+  if(!JDsExtraDataLoad::ExistsPartData(
+      PartBeginDir,int(PartBegin)))
+    Run_Exceptioon(
+      "Missing extra data for boundary motion restart.");
+
+  JDsExtraDataLoad edat(CaseNbound,CaseNfloat,Log);
+  edat.LoadPartData(PartBeginDir,int(PartBegin));
+
+  edat.LoadBoundaryMotion(
+    Np,
+    Idp_c->cptr(),
+    Code_c->cptr(),
+    MotionVel_c->ptr(),
+    MotionAce_c->ptr());
+
+  Log->Print("Boundary MotionVel and MotionAce restored.");
 }
 
 //<vs_flexstruc_ini>
