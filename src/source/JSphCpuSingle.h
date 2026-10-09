@@ -100,6 +100,9 @@ protected:
   void SaveExtraData();
   void FinishRun(bool stop);
 
+  void SaveFlexData();
+  void LoadFlexDataRestart();
+
   void SaveUserOutput(
     unsigned npsave,
     const unsigned* svidp,

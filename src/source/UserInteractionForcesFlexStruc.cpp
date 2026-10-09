@@ -3,8 +3,24 @@
 #include "FunSphKernel.h"
 #include "FunctionsMath.h"
 #include "UserParameters.h"
+#include "JSphCpuSingle.h"
+#include "JBinaryData.h"
+#include "JLog2.h"
+#include "Functions.h"
 
 #include <cmath>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace {
+tmatrix3f ScaleFlexMatrix(tmatrix3f m,float s){
+  m.a11*=s; m.a12*=s; m.a13*=s;
+  m.a21*=s; m.a22*=s; m.a23*=s;
+  m.a31*=s; m.a32*=s; m.a33*=s;
+  return m;
+}
+}
 
 using namespace std;
 
@@ -97,6 +113,62 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
   const double unContactConst=User.unContact;
   // --------------------------------------------------------------------------------------
 
+  // Prepare constitutive quantities once per flexible particle.
+  // Includes clamp particles, which can appear as neighbours.
+  const bool useHistory=(PartBegin!=0);
+
+  if(useHistory && !User.FlexRestartHistory.Available())
+    Run_Exceptioon("Flexible deformation history is unavailable.");
+
+  std::vector<tmatrix3f> flexForceMatrix(np);
+  std::vector<float> flexDensity(np);
+
+  for(unsigned pfs=0;pfs<np;pfs++){
+    const unsigned p=flexstrucridp[pfs];
+    const unsigned id=Idp_c->cptr()[p];
+
+    const StFlexStrucData& material=
+        flexstrucdata[CODE_GetIbodyFlexStruc(code[p])];
+
+    // F*: natural reference -> this run's input reference.
+    tmatrix3f fstar=TMatrix3f();
+    if(useHistory)
+      fstar=User.GetFlexRestartDefGrad(pfs,id);
+
+    const float jstar=fmath::Determinant3x3(fstar);
+    if(!std::isfinite(jstar) || jstar<=0.f)
+      Run_Exceptioon("Invalid historical deformation determinant.");
+
+    // F_t/n = F_t/0 * F*.
+    const tmatrix3f ftotal=
+        fmath::MulMatrix3x3(defgrad[pfs],fstar);
+
+    const float jtotal=fmath::Determinant3x3(ftotal);
+    if(!std::isfinite(jtotal) || jtotal<=0.f)
+      Run_Exceptioon("Invalid total deformation determinant.");
+
+    // PK1 relative to the natural reference.
+    const tmatrix3f pnatural=
+        CalcFlexStrucPK1Stress(ftotal,material.cmat);
+
+    // PK1 relative to this run's input reference.
+    const tmatrix3f preference=ScaleFlexMatrix(
+        fmath::MulMatrix3x3(
+            pnatural,fmath::TrasMatrix3x3(fstar)),
+        1.f/jstar);
+
+    // Input material values remain natural-reference quantities.
+    const float volumen=material.vol0;
+    const float volume0=volumen*jstar;
+
+    flexDensity[pfs]=material.rho0/jtotal;
+
+    // Weight consistent with the existing discrete deformation gradient.
+    flexForceMatrix[pfs]=ScaleFlexMatrix(
+        fmath::MulMatrix3x3(preference,kercorr[pfs]),
+        volume0*volumen);
+  }
+
   //-Starts execution using OpenMP.
   #ifdef OMP_USE
     #pragma omp parallel for schedule (guided)
@@ -115,7 +187,6 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       tfloat4 velrhop1=velrhop[p1];
       const float pressp1=press[p1];
       const tdouble3 pos0p1=pos0[pfs1];
-      const tmatrix3f kercorrp1=kercorr[pfs1];
       const tmatrix3f defgradp1=defgrad[pfs1];
 
       //-Obtains flexible structure data.
@@ -124,13 +195,12 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       const float youngmod=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].youngmod;
       const float poissratio=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].poissratio;
       const float hgfactor=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].hgfactor;
-      const tmatrix6f cmat=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].cmat;
-      const tmatrix3f pk1p1=CalcFlexStrucPK1Stress(defgradp1,cmat);
-      const tmatrix3f pk1kercorrp1=fmath::MulMatrix3x3(pk1p1,kercorrp1);
+      // Includes the reference-volume weights.
+      const tmatrix3f pk1kercorrp1=flexForceMatrix[pfs1];
 
       //-Get current mass of flexible structure particle.
       const float mass0p1=vol0p1*rho0p1;
-      const float rhop1=rho0p1/fmath::Determinant3x3(defgradp1);
+      const float rhop1=flexDensity[pfs1];
 
       //-Calculate structural speed of sound.
       const float csp1=float( sqrt(youngmod*(1.0-poissratio)/(rhop1*(1.0+poissratio)*(1.0-2.0*poissratio))) );
@@ -312,9 +382,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
         const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
         //-Acceleration due to structure.
         const tmatrix3f defgradp2=defgrad[pfs2];
-        const tmatrix3f pk1p2=CalcFlexStrucPK1Stress(defgradp2,cmat);
-        const tmatrix3f kercorrp2=kercorr[pfs2];
-        const tmatrix3f pk1kercorrp2=fmath::MulMatrix3x3(pk1p2,kercorrp2);
+        const tmatrix3f pk1kercorrp2=flexForceMatrix[pfs2];
         tmatrix3f pk1kercorrp1p2;
         pk1kercorrp1p2.a11=pk1kercorrp1.a11+pk1kercorrp2.a11; pk1kercorrp1p2.a12=pk1kercorrp1.a12+pk1kercorrp2.a12; pk1kercorrp1p2.a13=pk1kercorrp1.a13+pk1kercorrp2.a13;
         pk1kercorrp1p2.a21=pk1kercorrp1.a21+pk1kercorrp2.a21; pk1kercorrp1p2.a22=pk1kercorrp1.a22+pk1kercorrp2.a22; pk1kercorrp1p2.a23=pk1kercorrp1.a23+pk1kercorrp2.a23;
@@ -323,7 +391,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
         pk1kercorrdw.x=pk1kercorrp1p2.a11*frx0+pk1kercorrp1p2.a12*fry0+pk1kercorrp1p2.a13*frz0;
         pk1kercorrdw.y=pk1kercorrp1p2.a21*frx0+pk1kercorrp1p2.a22*fry0+pk1kercorrp1p2.a23*frz0;
         pk1kercorrdw.z=pk1kercorrp1p2.a31*frx0+pk1kercorrp1p2.a32*fry0+pk1kercorrp1p2.a33*frz0;
-        acep1.x+=pk1kercorrdw.x*vol0p1/rho0p1; acep1.y+=pk1kercorrdw.y*vol0p1/rho0p1; acep1.z+=pk1kercorrdw.z*vol0p1/rho0p1;
+        acep1.x+=pk1kercorrdw.x/mass0p1; acep1.y+=pk1kercorrdw.y/mass0p1; acep1.z+=pk1kercorrdw.z/mass0p1;
         //-Hourglass correction.
         if(hgfactor){
           const unsigned p2=flexstrucridp[pfs2];
@@ -399,4 +467,186 @@ template<TpKernel tker> void JSphCpu::Interaction_ForcesFlexStruc_ct0(float& fle
 void JSphCpu::Interaction_ForcesFlexStruc(float& flexstrucdtmax)const{
   if(TKernel==KERNEL_Wendland)  Interaction_ForcesFlexStruc_ct0<KERNEL_Wendland>(flexstrucdtmax);
   else if(TKernel==KERNEL_Cubic)Interaction_ForcesFlexStruc_ct0<KERNEL_Cubic>   (flexstrucdtmax);
+}
+
+//==============================================================================
+/// Saves particle IDs and deformation gradients for flexible particles.
+//==============================================================================
+void JSphCpuSingle::SaveFlexData(){
+  if(!User->SaveFlexData || !FlexStruc)
+    return;
+  if(!(SvData & SDAT_Binx))
+    return;
+
+  const unsigned nf=CaseNflexstruc;
+  if(!nf)
+    return;
+
+  if(!FlexStrucRidpc || !DefGradc)
+    Run_Exceptioon("Flexible state arrays are unavailable.");
+
+  const std::string file=
+      fun::GetDirWithSlash(DirDataOut)
+      +fun::PrintStr("PartFlex_%04u.bi4",unsigned(Part));
+
+  JBinaryData data("JPartFlexBi4");
+  data.SetvUint("FormatVer",1);
+  data.SetvUint("Cpart",unsigned(Part));
+  data.SetvDouble("TimeStep",TimeStep);
+  data.SetvUint("Nflex",nf);
+
+  unsigned* ids=data.CreateArrayUint("Idp",nf,false);
+  tfloat3* row1=data.CreateArrayFloat3("Frow1",nf,false);
+  tfloat3* row2=data.CreateArrayFloat3("Frow2",nf,false);
+  tfloat3* row3=data.CreateArrayFloat3("Frow3",nf,false);
+
+  std::unordered_set<unsigned> seen;
+  seen.reserve(nf);
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    // Flexible-array index -> main-array index -> stable particle ID.
+    const unsigned p=FlexStrucRidpc[pfs];
+
+    if(p>=Np)
+      Run_Exceptioon("Invalid flexible particle index.");
+
+    const typecode code=Code_c->cptr()[p];
+    if(!CODE_IsNormal(code) || !CODE_IsFlexStrucAny(code))
+      Run_Exceptioon("Invalid flexible particle in PartFlex output.");
+
+    const unsigned id=Idp_c->cptr()[p];
+    if(!seen.insert(id).second)
+      Run_Exceptioon("Duplicated flexible particle ID.");
+
+    ids[pfs]=id;
+
+    tmatrix3f f=DefGradc[pfs];
+
+    if(PartBegin){
+      const tmatrix3f& fstar=
+          User->GetFlexRestartDefGrad(pfs,id);
+
+      f=fmath::MulMatrix3x3(f,fstar);
+    }
+    row1[pfs]=TFloat3(f.a11,f.a12,f.a13);
+    row2[pfs]=TFloat3(f.a21,f.a22,f.a23);
+    row3[pfs]=TFloat3(f.a31,f.a32,f.a33);
+  }
+
+  data.SaveFile(file,false,true);
+}
+
+//==============================================================================
+/// Restores flexible deformation gradients by stable particle ID.
+//==============================================================================
+void JSphCpuSingle::LoadFlexDataRestart(){
+  User->FlexRestartHistory.Clear();
+
+  if(!PartBegin || !FlexStruc)
+    return;
+
+  const unsigned nf=CaseNflexstruc;
+  if(!nf)
+    return;
+
+  // Loading history does not require writing to DefGradc.
+  if(!FlexStrucRidpc)
+    Run_Exceptioon("Flexible particle indices are unavailable.");
+
+  const std::string file=
+      fun::GetDirWithSlash(PartBeginDir)
+      +fun::PrintStr("PartFlex_%04u.bi4",unsigned(PartBegin));
+
+  JBinaryData data;
+  data.LoadFile(file);
+
+  if(data.GetvUint("FormatVer")!=1)
+    Run_ExceptioonFile("Unsupported PartFlex format.",file);
+
+  if(data.GetvUint("Cpart")!=unsigned(PartBegin))
+    Run_ExceptioonFile("PartFlex frame number does not match.",file);
+
+  if(data.GetvUint("Nflex")!=nf)
+    Run_ExceptioonFile("Flexible particle count does not match.",file);
+
+  const double savedtime=data.GetvDouble("TimeStep");
+  const double timetol=1e-9*(1.0+std::fabs(TimeStep));
+  if(!std::isfinite(savedtime) ||
+     std::fabs(savedtime-TimeStep)>timetol)
+    Run_ExceptioonFile("PartFlex time does not match restart time.",file);
+
+  // Check array names, types and lengths before accessing their data.
+  const unsigned* ids=static_cast<const unsigned*>(
+      data.GetArrayTpSize(
+          "Idp",JBinaryDataDef::DatUint,nf,file)->GetDataPointer());
+
+  const tfloat3* row1=static_cast<const tfloat3*>(
+      data.GetArrayTpSize(
+          "Frow1",JBinaryDataDef::DatFloat3,nf,file)->GetDataPointer());
+
+  const tfloat3* row2=static_cast<const tfloat3*>(
+      data.GetArrayTpSize(
+          "Frow2",JBinaryDataDef::DatFloat3,nf,file)->GetDataPointer());
+
+  const tfloat3* row3=static_cast<const tfloat3*>(
+      data.GetArrayTpSize(
+          "Frow3",JBinaryDataDef::DatFloat3,nf,file)->GetDataPointer());
+
+  // Stable particle ID -> row in the saved file.
+  std::unordered_map<unsigned,unsigned> savedindex;
+  savedindex.reserve(nf);
+
+  for(unsigned i=0;i<nf;i++){
+    if(!savedindex.emplace(ids[i],i).second)
+      Run_ExceptioonFile("Duplicated particle ID in PartFlex.",file);
+  }
+
+  std::vector<unsigned char> used(nf,0);
+  std::vector<unsigned> restoredid(nf);
+  std::vector<tmatrix3f> restored(nf);
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    const unsigned p=FlexStrucRidpc[pfs];
+
+    if(p>=Np)
+      Run_Exceptioon("Invalid flexible particle index.");
+
+    const typecode code=Code_c->cptr()[p];
+    if(!CODE_IsNormal(code) || !CODE_IsFlexStrucAny(code))
+      Run_Exceptioon("Invalid flexible particle during restart.");
+
+    const unsigned id=Idp_c->cptr()[p];
+    const auto it=savedindex.find(id);
+
+    if(it==savedindex.end())
+      Run_ExceptioonFile("Flexible particle ID missing from PartFlex.",file);
+
+    const unsigned i=it->second;
+    if(used[i])
+      Run_ExceptioonFile("Duplicated current flexible particle ID.",file);
+    used[i]=1;
+
+    const tmatrix3f f={
+      row1[i].x,row1[i].y,row1[i].z,
+      row2[i].x,row2[i].y,row2[i].z,
+      row3[i].x,row3[i].y,row3[i].z
+    };
+
+    restoredid[pfs]=id;
+    restored[pfs]=f;
+  }
+
+  for(unsigned i=0;i<nf;i++){
+    if(!used[i])
+      Run_ExceptioonFile("Unmatched particle ID in PartFlex.",file);
+  }
+
+  // Commit history only after every ID correspondence check succeeds.
+  // Keep DefGradc as calculated from the new reference geometry.
+  User->FlexRestartHistory.Idp.swap(restoredid);
+  User->FlexRestartHistory.DefGrad.swap(restored);
+
+  Log->Printf(
+      "Flexible deformation history loaded: %u particles. "
+      "Current deformation gradients remain unchanged.",nf);
 }

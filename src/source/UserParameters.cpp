@@ -28,7 +28,12 @@ void UserParameters::Reset(){
   unContactMode=1;
   unContact=0.0;
 
+  SaveFlexData=false;
+
   OutputObjects.clear();
+
+
+  FlexRestartHistory.Clear();
 }
 
 void UserParameters::LoadXml(const JXml* xml,JLog2* log){
@@ -266,6 +271,18 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
           "User.unContact must be non-negative.");
     }
   }
+    
+  // ------------------------------------------------------------
+  // Elastic-state output.
+  // ------------------------------------------------------------
+  const int saveflexdata=
+      parameters.GetValueInt("SaveFlexData",true,0);
+
+  if(saveflexdata!=0 && saveflexdata!=1){
+    Run_Exceptioon("User.SaveFlexData must be 0 or 1.");
+  }
+
+  SaveFlexData=(saveflexdata==1);
 
   LoadOutputXml(xml,root);
   // Print only after all checks succeed.
@@ -678,4 +695,20 @@ void UserParameters::VisuConfig(JLog2* log)const{
   if(unContactMode==1){
     log->Printf("  unContact: %.17g",unContact);
   }
+
+  log->Printf("  SaveFlexData: %s",
+            SaveFlexData ? "true" : "false");
+}
+
+const tmatrix3f& UserParameters::GetFlexRestartDefGrad(
+    unsigned pfs,unsigned idp)const
+{
+  if(pfs>=FlexRestartHistory.DefGrad.size() ||
+     pfs>=FlexRestartHistory.Idp.size())
+    Run_Exceptioon("Flexible restart history is unavailable.");
+
+  if(FlexRestartHistory.Idp[pfs]!=idp)
+    Run_Exceptioon("Flexible restart history particle ID mismatch.");
+
+  return FlexRestartHistory.DefGrad[pfs];
 }

@@ -492,7 +492,14 @@ void JSphCpuSingle::SaveUserOutput(
               "structural neighbours.");
           }
 
-          const tmatrix3f& f=DefGradc[pfs];
+          tmatrix3f fstar=TMatrix3f();
+          if(PartBegin){
+            fstar=User.GetFlexRestartDefGrad(pfs,id);
+          }
+
+          const tmatrix3f f=
+              fmath::MulMatrix3x3(DefGradc[pfs],fstar);
+
           const double j=fmath::Determinant3x3(f);
 
           if(!std::isfinite(j) || j<=0.0){

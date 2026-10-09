@@ -49,6 +49,8 @@
 #include "JDsExtraData.h"
 #include "JDsOutputParts.h" //<vs_outpaarts>
 
+#include "UserParameters.h"
+
 #include <algorithm>
 
 #include <climits>
@@ -1179,6 +1181,9 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   if(FlexStruc){
     FlexStrucInit();
 
+    // Restore after elastic arrays and reference data are initialized.
+    LoadFlexDataRestart();
+
     // Re-divide cells to update the position of the flexible structure particles.
     BoundChanged=true;
     RunCellDivide(true);
@@ -1318,6 +1323,7 @@ void JSphCpuSingle::SaveData(){
     ,npsave,Npb,Pos_c->cptr(),Idp_c->cptr(),BoundNor_c->cptr(),1.f);
   //-Save extra data.
   if(SvExtraDataBi4)SaveExtraData();
+  SaveFlexData();
 
   // Save user-defined elected user fields at the current output frame.
   if(save){

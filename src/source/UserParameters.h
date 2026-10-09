@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "JObject.h"
+#include "TypesDef.h"
 
 class JXml;
 class JLog2;
@@ -43,6 +44,8 @@ public:
   int unContactMode; // 1: manual; 2: automatic.
   double unContact;
 
+  bool SaveFlexData; // Enable PartFlex elastic-state output.
+
   // Output
   // Time-varying output configuration.
   struct StOutputDynamic{
@@ -80,14 +83,37 @@ public:
   std::vector<StOutputObject> OutputObjects;
 
 
-
-
-
   UserParameters();
 
   void Reset();
   void LoadXml(const JXml* xml,JLog2* log);
   void VisuConfig(JLog2* log)const;
+
+
+
+
+  // Inner variables and functions, not directly accessible to users.
+  // Runtime restart state, indexed by flexible-particle index.
+  struct StFlexRestartHistory{
+    std::vector<unsigned> Idp;
+    std::vector<tmatrix3f> DefGrad;
+
+    void Clear(){
+      Idp.clear();
+      DefGrad.clear();
+    }
+
+    bool Available()const{
+      return !DefGrad.empty();
+    }
+  };
+
+  StFlexRestartHistory FlexRestartHistory;
+
+  // Retrieve history by flexible index and verify particle identity.
+  const tmatrix3f& GetFlexRestartDefGrad(
+      unsigned pfs,unsigned idp)const;
+  
 
 private:
   void LoadOutputXml(const JXml* xml,const TiXmlElement* userNode);
