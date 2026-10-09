@@ -139,10 +139,15 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       float massp2=MassFluid;
       if(mdbc2>=MDBC2_Std){
         if(boundmode[p1]==BMODE_MDBC2OFF)massp2=0;
-        const tfloat3 tangentvelp1=tangenvel[p1];
-        velrhop1.x=tangentvelp1.x;
-        velrhop1.y=tangentvelp1.y;
-        velrhop1.z=tangentvelp1.z;
+
+        //-Use reconstructed velocity only when available.
+        //-Otherwise keep the original particle velocity.
+        if(boundmode[p1]!=BMODE_DBC){
+          const tfloat3 tangentvelp1=tangenvel[p1];
+          velrhop1.x=tangentvelp1.x;
+          velrhop1.y=tangentvelp1.y;
+          velrhop1.z=tangentvelp1.z;
+        }
       }
 
       //-Obtains neighborhood search limits.
