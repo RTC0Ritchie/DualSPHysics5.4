@@ -1181,9 +1181,6 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   if(FlexStruc){
     FlexStrucInit();
 
-    // Restore after elastic arrays and reference data are initialized.
-    LoadFlexDataRestart();
-
     // Re-divide cells to update the position of the flexible structure particles.
     BoundChanged=true;
     RunCellDivide(true);
@@ -1470,6 +1467,8 @@ void JSphCpuSingle::FlexStrucInit(){
   }
   //-Set the indices for each particle pair.
   JSphCpu::SetFlexStrucPairs(CaseNflexstruc,Pos0c,PairIdxc);
+  // Load F* and Xn/X0 material quantities before kernel correction.
+  LoadFlexDataRestart();
   //-Calculate kernel correction and update geometry.
   JSphCpu::CalcFlexStrucKerCorr();
   JSphCpu::UpdateFlexStrucGeometry();

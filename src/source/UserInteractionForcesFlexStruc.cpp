@@ -116,9 +116,11 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
   // Prepare constitutive quantities once per flexible particle.
   // Includes clamp particles, which can appear as neighbours.
   const bool useHistory=(PartBegin!=0);
+  const auto& history=User.FlexRestartHistory;
 
-  if(useHistory && !User.FlexRestartHistory.Available())
-    Run_Exceptioon("Flexible deformation history is unavailable.");
+  if(useHistory &&
+    (!history.Available() || history.Idp.size()!=np))
+    Run_Exceptioon("Flexible restart state is unavailable.");
 
   std::vector<tmatrix3f> flexForceMatrix(np);
   std::vector<float> flexDensity(np);
@@ -130,44 +132,60 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
     const StFlexStrucData& material=
         flexstrucdata[CODE_GetIbodyFlexStruc(code[p])];
 
-    // F*: natural reference -> this run's input reference.
-    tmatrix3f fstar=TMatrix3f();
-    if(useHistory)
-      fstar=User.GetFlexRestartDefGrad(pfs,id);
+    const tmatrix3f& frelative=defgrad[pfs];
+    const float jrelative=
+        fmath::Determinant3x3(frelative);
 
-    const float jstar=fmath::Determinant3x3(fstar);
-    if(!std::isfinite(jstar) || jstar<=0.f)
-      Run_Exceptioon("Invalid historical deformation determinant.");
+    if(!std::isfinite(jrelative) || jrelative<=0.f)
+      Run_Exceptioon("Invalid relative deformation determinant.");
 
-    // F_t/n = F_t/0 * F*.
-    const tmatrix3f ftotal=
-        fmath::MulMatrix3x3(defgrad[pfs],fstar);
+    if(!useHistory){
+      // Ordinary simulation: use original material fields directly.
+      const tmatrix3f pk1=
+          CalcFlexStrucPK1Stress(frelative,material.cmat);
 
-    const float jtotal=fmath::Determinant3x3(ftotal);
-    if(!std::isfinite(jtotal) || jtotal<=0.f)
-      Run_Exceptioon("Invalid total deformation determinant.");
+      flexDensity[pfs]=material.rho0/jrelative;
 
-    // PK1 relative to the natural reference.
-    const tmatrix3f pnatural=
-        CalcFlexStrucPK1Stress(ftotal,material.cmat);
+      // Keep the current force assembly convention.
+      flexForceMatrix[pfs]=ScaleFlexMatrix(
+          fmath::MulMatrix3x3(pk1,kercorr[pfs]),
+          material.vol0*material.vol0);
+    }
+    else{
+      // Verify stable particle identity.
+      const tmatrix3f& fstar=
+          User.GetFlexRestartDefGrad(pfs,id);
 
-    // PK1 relative to this run's input reference.
-    const tmatrix3f preference=ScaleFlexMatrix(
-        fmath::MulMatrix3x3(
-            pnatural,fmath::TrasMatrix3x3(fstar)),
-        1.f/jstar);
+      const float jstar=history.Jstar[pfs];
 
-    // Input material values remain natural-reference quantities.
-    const float volumen=material.vol0;
-    const float volume0=volumen*jstar;
+      // Total deformation relative to Xn.
+      const tmatrix3f ftotal=
+          fmath::MulMatrix3x3(frelative,fstar);
 
-    flexDensity[pfs]=material.rho0/jtotal;
+      const float jtotal=fmath::Determinant3x3(ftotal);
+      if(!std::isfinite(jtotal) || jtotal<=0.f)
+        Run_Exceptioon("Invalid total deformation determinant.");
 
-    // Weight consistent with the existing discrete deformation gradient.
-    flexForceMatrix[pfs]=ScaleFlexMatrix(
-        fmath::MulMatrix3x3(preference,kercorr[pfs]),
-        volume0*volumen);
+      // Constitutive parameters still come from the original material.
+      const tmatrix3f pnatural=
+          CalcFlexStrucPK1Stress(ftotal,material.cmat);
+
+      // PK1 relative to this run's X0.
+      const tmatrix3f preference=ScaleFlexMatrix(
+          fmath::MulMatrix3x3(
+              pnatural,fmath::TrasMatrix3x3(fstar)),
+          1.f/jstar);
+
+      // Current density from the X0 reference density.
+      flexDensity[pfs]=history.Rho0[pfs]/jrelative;
+
+      /// Restart: store P_t/0 * B_0 without volume weights.
+      // Vi*Vj is applied in the particle-pair loop.
+      flexForceMatrix[pfs]=
+          fmath::MulMatrix3x3(preference,kercorr[pfs]);
+    }
   }
+  // --------------------------------------------------------------------------------------
 
   //-Starts execution using OpenMP.
   #ifdef OMP_USE
@@ -195,11 +213,15 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       const float youngmod=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].youngmod;
       const float poissratio=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].poissratio;
       const float hgfactor=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].hgfactor;
-      // Includes the reference-volume weights.
+      // Ordinary: includes volume weights.
+      // Restart: stores P_t/0 * B_0; pair volumes are applied below.
       const tmatrix3f pk1kercorrp1=flexForceMatrix[pfs1];
 
       //-Get current mass of flexible structure particle.
-      const float mass0p1=vol0p1*rho0p1;
+      const float mass0p1=
+        useHistory
+        ? history.Mass[pfs1]
+        : vol0p1*rho0p1;
       const float rhop1=flexDensity[pfs1];
 
       //-Calculate structural speed of sound.
@@ -391,7 +413,22 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
         pk1kercorrdw.x=pk1kercorrp1p2.a11*frx0+pk1kercorrp1p2.a12*fry0+pk1kercorrp1p2.a13*frz0;
         pk1kercorrdw.y=pk1kercorrp1p2.a21*frx0+pk1kercorrp1p2.a22*fry0+pk1kercorrp1p2.a23*frz0;
         pk1kercorrdw.z=pk1kercorrp1p2.a31*frx0+pk1kercorrp1p2.a32*fry0+pk1kercorrp1p2.a33*frz0;
-        acep1.x+=pk1kercorrdw.x/mass0p1; acep1.y+=pk1kercorrdw.y/mass0p1; acep1.z+=pk1kercorrdw.z/mass0p1;
+        if(useHistory){
+          const float pairVolume=
+              history.Vol0[pfs1]*history.Vol0[pfs2];
+
+          const float forceToAcceleration=pairVolume/mass0p1;
+
+          acep1.x+=pk1kercorrdw.x*forceToAcceleration;
+          acep1.y+=pk1kercorrdw.y*forceToAcceleration;
+          acep1.z+=pk1kercorrdw.z*forceToAcceleration;
+        }
+        else{
+          // Ordinary branch already includes the original volume weights.
+          acep1.x+=pk1kercorrdw.x/mass0p1;
+          acep1.y+=pk1kercorrdw.y/mass0p1;
+          acep1.z+=pk1kercorrdw.z/mass0p1;
+        }
         //-Hourglass correction.
         if(hgfactor){
           const unsigned p2=flexstrucridp[pfs2];
@@ -468,6 +505,217 @@ void JSphCpu::Interaction_ForcesFlexStruc(float& flexstrucdtmax)const{
   if(TKernel==KERNEL_Wendland)  Interaction_ForcesFlexStruc_ct0<KERNEL_Wendland>(flexstrucdtmax);
   else if(TKernel==KERNEL_Cubic)Interaction_ForcesFlexStruc_ct0<KERNEL_Cubic>   (flexstrucdtmax);
 }
+
+//==============================================================================
+/// Calculates the kernel correction matrix for each flexible structure particle.
+/// Calcula la matriz de corrección del kernel para cada partícula de estructura flexible.
+//==============================================================================
+template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucKerCorr(unsigned np,const typecode* code,const StFlexStrucData* flexstrucdata
+        ,const unsigned* flexstrucridp,const tdouble3* pos0,const unsigned* numpairs,const unsigned* const* pairidx
+        ,tmatrix3f* kercorr)const
+{ 
+  const bool useHistory=(PartBegin!=0);
+  const auto& history=User->FlexRestartHistory;
+
+  if(useHistory &&
+    (!history.Available() || history.Idp.size()!=np))
+    Run_Exceptioon("Flexible restart state is unavailable.");
+
+  //-Starts execution using OpenMP.
+  const int n=int(np);
+  #ifdef OMP_USE
+    #pragma omp parallel for schedule (static) if(n>OMP_LIMIT_COMPUTESTEP)
+  #endif
+  for(int p=0;p<n;p++){
+    const unsigned pfs1=p;      //-Number of particle.
+
+    //-Get number of pairs for this particle.
+    const unsigned numpairsp1=numpairs[pfs1];
+
+    //-If this particle has pairs.
+    if(numpairsp1){
+      tmatrix3f kercorrp1={0};
+
+      //-Obtains basic data of particle p1.
+      const float vol0p1=flexstrucdata[CODE_GetIbodyFlexStruc(code[flexstrucridp[pfs1]])].vol0;
+      const tdouble3 pos0p1=pos0[pfs1];
+
+      //-Calculate kernel correction matrix.
+      for(unsigned pair=0;pair<numpairsp1;pair++){
+        const unsigned pfs2=pairidx[pfs1][pair];
+        // Restart: neighbour volume in X0.
+        // Ordinary simulation: preserve the original central-volume weighting.
+        const float pairWeightVolume=
+            useHistory ? history.Vol0[pfs2] : vol0p1;
+        const tdouble3 pos0p2=pos0[pfs2];
+        const float drx0=float(pos0p1.x-pos0p2.x);
+        const float dry0=float(pos0p1.y-pos0p2.y);
+        const float drz0=float(pos0p1.z-pos0p2.z);
+        const float rr20=drx0*drx0+dry0*dry0+drz0*drz0;
+        //-Computes kernel.
+        const float fac0=fsph::GetKernel_Fac<tker>(CSP,rr20);
+        const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
+        kercorrp1.a11-=pairWeightVolume*drx0*frx0;
+        kercorrp1.a12-=pairWeightVolume*drx0*fry0;
+        kercorrp1.a13-=pairWeightVolume*drx0*frz0;
+
+        kercorrp1.a21-=pairWeightVolume*dry0*frx0;
+        kercorrp1.a22-=pairWeightVolume*dry0*fry0;
+        kercorrp1.a23-=pairWeightVolume*dry0*frz0;
+
+        kercorrp1.a31-=pairWeightVolume*drz0*frx0;
+        kercorrp1.a32-=pairWeightVolume*drz0*fry0;
+        kercorrp1.a33-=pairWeightVolume*drz0*frz0;
+      }
+      if(simulate2d){
+        kercorrp1.a12=kercorrp1.a21=kercorrp1.a23=kercorrp1.a32=0.0;
+        kercorrp1.a22=1.0;
+      }
+      kercorr[pfs1]=fmath::InverseMatrix3x3(kercorrp1);
+    }
+  }
+}
+
+//==============================================================================
+/// Calculates the kernel correction matrix for each flexible structure particle.
+/// Calcula la matriz de corrección del kernel para cada partícula de estructura flexible.
+//==============================================================================
+template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucKerCorrT()const{
+  if(CaseNflexstruc){
+    CalcFlexStrucKerCorr<tker,simulate2d>
+      (CaseNflexstruc,Code_c->cptr(),FlexStrucDatac,FlexStrucRidpc,Pos0c,NumPairsc,PairIdxc,KerCorrc);
+  }
+}
+
+//==============================================================================
+/// Calculates the kernel correction matrix for each flexible structure particle.
+/// Calcula la matriz de corrección del kernel para cada partícula de estructura flexible.
+//==============================================================================
+template<TpKernel tker> void JSphCpu::CalcFlexStrucKerCorr_ct0()const{
+  if(Simulate2D)CalcFlexStrucKerCorrT<tker,true> ();
+  else          CalcFlexStrucKerCorrT<tker,false>();
+}
+
+//==============================================================================
+/// Calculates the kernel correction matrix for each flexible structure particle.
+/// Calcula la matriz de corrección del kernel para cada partícula de estructura flexible.
+//==============================================================================
+void JSphCpu::CalcFlexStrucKerCorr()const{
+  if(TKernel==KERNEL_Wendland)  CalcFlexStrucKerCorr_ct0<KERNEL_Wendland>();
+  else if(TKernel==KERNEL_Cubic)CalcFlexStrucKerCorr_ct0<KERNEL_Cubic>   ();
+}
+
+//==============================================================================
+/// Calculates the deformation gradient matrix for each flexible structure particle.
+/// Calcula la matriz de gradiente de deformación para cada partícula de estructura flexible.
+//==============================================================================
+template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGrad(unsigned np,const tdouble3* pos,const typecode* code
+    ,const StFlexStrucData* flexstrucdata,const unsigned* flexstrucridp
+    ,const tdouble3* pos0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr
+    ,tmatrix3f* defgrad)const
+{
+    const bool useHistory=(PartBegin!=0);
+    const auto& history=User->FlexRestartHistory;
+
+    if(useHistory &&
+      (!history.Available() || history.Idp.size()!=np))
+      Run_Exceptioon("Flexible restart state is unavailable.");
+  //-Starts execution using OpenMP.
+  const int n=int(np);
+  #ifdef OMP_USE
+    #pragma omp parallel for schedule (guided)
+  #endif
+  for(int p=0;p<n;p++){
+    const int pfs1=p;      //-Number of particle.
+
+    //-Get number of pairs for this particle.
+    const unsigned numpairsp1=numpairs[pfs1];
+
+    //-If this particle has pairs.
+    if(numpairsp1){
+      tmatrix3f defgradp1={0};
+
+      //-Obtains basic data of particle p1.
+      const unsigned p1=flexstrucridp[pfs1];
+      const float vol0p1=flexstrucdata[CODE_GetIbodyFlexStruc(code[p1])].vol0;
+      const tdouble3 posp1=pos[p1];
+      const tdouble3 pos0p1=pos0[pfs1];
+      const tmatrix3f kercorrp1=kercorr[pfs1];
+
+      //-Calculate deformation gradient.
+      for(unsigned pair=0;pair<numpairsp1;pair++){
+        const unsigned pfs2=pairidx[pfs1][pair];
+        // Restart: neighbour volume in X0.
+        // Ordinary simulation: preserve the original central-volume weighting.
+        const float pairWeightVolume=
+            useHistory ? history.Vol0[pfs2] : vol0p1;
+        const unsigned p2=flexstrucridp[pfs2];
+        const tdouble3 posp2=pos[p2];
+        const tdouble3 pos0p2=pos0[pfs2];
+        const float drx=float(posp1.x-posp2.x);
+        const float dry=float(posp1.y-posp2.y);
+        const float drz=float(posp1.z-posp2.z);
+        const float drx0=float(pos0p1.x-pos0p2.x);
+        const float dry0=float(pos0p1.y-pos0p2.y);
+        const float drz0=float(pos0p1.z-pos0p2.z);
+        const float rr20=drx0*drx0+dry0*dry0+drz0*drz0;
+        const float fac0=fsph::GetKernel_Fac<tker>(CSP,rr20);
+        const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
+        defgradp1.a11-=pairWeightVolume*drx*frx0;
+        defgradp1.a12-=pairWeightVolume*drx*fry0;
+        defgradp1.a13-=pairWeightVolume*drx*frz0;
+
+        defgradp1.a21-=pairWeightVolume*dry*frx0;
+        defgradp1.a22-=pairWeightVolume*dry*fry0;
+        defgradp1.a23-=pairWeightVolume*dry*frz0;
+
+        defgradp1.a31-=pairWeightVolume*drz*frx0;
+        defgradp1.a32-=pairWeightVolume*drz*fry0;
+        defgradp1.a33-=pairWeightVolume*drz*frz0;
+      }
+      if(simulate2d){
+        defgradp1.a12=defgradp1.a21=defgradp1.a23=defgradp1.a32=0.0;
+        defgradp1.a22=1.0;
+      }
+      defgrad[pfs1]=fmath::MulMatrix3x3(defgradp1,kercorrp1);
+    }
+  }
+}
+
+//==============================================================================
+/// Calculates the deformation gradient matrix for each flexible structure particle.
+/// Calcula la matriz de gradiente de deformación para cada partícula de estructura flexible.
+//==============================================================================
+template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGradT()const{
+  if(CaseNflexstruc){
+    CalcFlexStrucDefGrad<tker,simulate2d>
+      (CaseNflexstruc,Pos_c->cptr(),Code_c->cptr(),FlexStrucDatac,FlexStrucRidpc,Pos0c,NumPairsc,PairIdxc,KerCorrc,DefGradc);
+  }
+}
+
+//==============================================================================
+/// Calculates the deformation gradient matrix for each flexible structure particle.
+/// Calcula la matriz de gradiente de deformación para cada partícula de estructura flexible.
+//==============================================================================
+template<TpKernel tker> void JSphCpu::CalcFlexStrucDefGrad_ct0()const{
+  if(Simulate2D)CalcFlexStrucDefGradT<tker,true> ();
+  else          CalcFlexStrucDefGradT<tker,false>();
+}
+
+
+//==============================================================================
+/// Updates the geometric information for each flexible structure particle.
+/// Actualiza la información geométrica de cada partícula de estructura flexible.
+//==============================================================================
+void JSphCpu::UpdateFlexStrucGeometry()const{
+  if(TKernel==KERNEL_Wendland)  CalcFlexStrucDefGrad_ct0<KERNEL_Wendland>();
+  else if(TKernel==KERNEL_Cubic)CalcFlexStrucDefGrad_ct0<KERNEL_Cubic>   ();
+  if(CaseNflexstruc&&TMdbc2>=MDBC2_Std)CalcFlexStrucNormals();
+}
+
+
+
+
 
 //==============================================================================
 /// Saves particle IDs and deformation gradients for flexible particles.
@@ -643,10 +891,61 @@ void JSphCpuSingle::LoadFlexDataRestart(){
 
   // Commit history only after every ID correspondence check succeeds.
   // Keep DefGradc as calculated from the new reference geometry.
-  User->FlexRestartHistory.Idp.swap(restoredid);
-  User->FlexRestartHistory.DefGrad.swap(restored);
+  // Build a complete restart state before committing it.
+  UserParameters::StFlexRestartHistory history;
+
+  history.Idp.swap(restoredid);
+  history.DefGrad.swap(restored);
+
+  history.Jstar.resize(nf);
+  history.VolN.resize(nf);
+  history.RhoN.resize(nf);
+  history.Vol0.resize(nf);
+  history.Rho0.resize(nf);
+  history.Mass.resize(nf);
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    const unsigned p=FlexStrucRidpc[pfs];
+
+    const unsigned body=
+        CODE_GetIbodyFlexStruc(Code_c->cptr()[p]);
+
+    const StFlexStrucData& material=FlexStrucDatac[body];
+
+    const float jstar=
+        fmath::Determinant3x3(history.DefGrad[pfs]);
+
+    // Original material inputs remain the natural properties.
+    const float voln=material.vol0;
+    const float rhon=material.rho0;
+
+    if(!std::isfinite(jstar) || jstar<=0.f ||
+      !std::isfinite(voln) || voln<=0.f ||
+      !std::isfinite(rhon) || rhon<=0.f)
+      Run_Exceptioon("Invalid flexible natural material state.");
+
+    history.Jstar[pfs]=jstar;
+
+    history.VolN[pfs]=voln;
+    history.RhoN[pfs]=rhon;
+
+    history.Vol0[pfs]=voln*jstar;
+    history.Rho0[pfs]=rhon/jstar;
+
+    history.Mass[pfs]=voln*rhon;
+
+    if(!std::isfinite(history.Vol0[pfs]) ||
+      history.Vol0[pfs]<=0.f ||
+      !std::isfinite(history.Rho0[pfs]) ||
+      history.Rho0[pfs]<=0.f ||
+      !std::isfinite(history.Mass[pfs]) ||
+      history.Mass[pfs]<=0.f)
+      Run_Exceptioon("Invalid flexible restart reference state.");
+  }
+
+  User->FlexRestartHistory=history;
 
   Log->Printf(
-      "Flexible deformation history loaded: %u particles. "
-      "Current deformation gradients remain unchanged.",nf);
+    "Flexible restart history and Xn/X0 material state loaded: "
+    "%u particles.",nf);
 }

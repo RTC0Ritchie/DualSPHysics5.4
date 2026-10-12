@@ -95,16 +95,45 @@ public:
   // Inner variables and functions, not directly accessible to users.
   // Runtime restart state, indexed by flexible-particle index.
   struct StFlexRestartHistory{
+    // All arrays use the flexible-particle index.
     std::vector<unsigned> Idp;
+
+    // F*: Xn -> this run's X0.
     std::vector<tmatrix3f> DefGrad;
+    std::vector<float> Jstar;
+
+    // Natural configuration Xn.
+    std::vector<float> VolN;
+    std::vector<float> RhoN;
+
+    // Fixed reference configuration X0 of this run.
+    std::vector<float> Vol0;
+    std::vector<float> Rho0;
+
+    // Invariant particle mass.
+    std::vector<float> Mass;
 
     void Clear(){
       Idp.clear();
       DefGrad.clear();
+      Jstar.clear();
+      VolN.clear();
+      RhoN.clear();
+      Vol0.clear();
+      Rho0.clear();
+      Mass.clear();
     }
 
     bool Available()const{
-      return !DefGrad.empty();
+      const size_t n=Idp.size();
+      return n &&
+          DefGrad.size()==n &&
+          Jstar.size()==n &&
+          VolN.size()==n &&
+          RhoN.size()==n &&
+          Vol0.size()==n &&
+          Rho0.size()==n &&
+          Mass.size()==n;
     }
   };
 
