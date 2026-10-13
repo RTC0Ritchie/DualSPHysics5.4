@@ -103,6 +103,17 @@ protected:
   void SaveFlexData();
   void LoadFlexDataRestart();
 
+  void SaveFlexReferenceOnce();
+  void LoadFlexReferenceRestart();
+
+  void RestoreFlexRestartPairs();
+
+  void PrepareFlexRestartPairCache();
+  void PrepareFlexRestartGradientCorrection();
+  void PrepareFlexRestartHourglassCorrection();
+
+  void InitFlexRestartReference();
+
   void SaveUserOutput(
     unsigned npsave,
     const unsigned* svidp,

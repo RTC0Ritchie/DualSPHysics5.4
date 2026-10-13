@@ -12,14 +12,98 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <algorithm>
+#include <limits>
+#include <memory>
 
 namespace {
-tmatrix3f ScaleFlexMatrix(tmatrix3f m,float s){
-  m.a11*=s; m.a12*=s; m.a13*=s;
-  m.a21*=s; m.a22*=s; m.a23*=s;
-  m.a31*=s; m.a32*=s; m.a33*=s;
-  return m;
+  tmatrix3f ScaleFlexMatrix(tmatrix3f m,float s){
+    m.a11*=s; m.a12*=s; m.a13*=s;
+    m.a21*=s; m.a22*=s; m.a23*=s;
+    m.a31*=s; m.a32*=s; m.a33*=s;
+    return m;
+  }
+
+  inline tfloat3 FlexMV(
+      const tmatrix3f& a,
+      const tfloat3& b)
+  {
+    return TFloat3(
+        a.a11*b.x+a.a12*b.y+a.a13*b.z,
+        a.a21*b.x+a.a22*b.y+a.a23*b.z,
+        a.a31*b.x+a.a32*b.y+a.a33*b.z);
+  }
+
+  inline tfloat3 FlexScale(
+      const tfloat3& a,
+      float s)
+  {
+    return TFloat3(a.x*s,a.y*s,a.z*s);
+  }
+
+  // a -= r tensor q
+  inline void FlexSubtractOuter(
+      tmatrix3f& a,
+      const tfloat3& r,
+      const tfloat3& q)
+  {
+    a.a11-=r.x*q.x;
+    a.a12-=r.x*q.y;
+    a.a13-=r.x*q.z;
+
+    a.a21-=r.y*q.x;
+    a.a22-=r.y*q.y;
+    a.a23-=r.y*q.z;
+
+    a.a31-=r.z*q.x;
+    a.a32-=r.z*q.y;
+    a.a33-=r.z*q.z;
+  }
 }
+
+namespace {
+  namespace FlexRestartTest {
+
+  inline bool ForceCacheReady(
+      const UserParameters::StFlexRestartHistory& history,
+      bool useGradient,
+      bool useHourglass);
+
+  inline bool GradientCacheReady(
+      const UserParameters::StFlexRestartHistory& history,
+      unsigned np);
+
+  template<bool simulate2d>
+  inline tmatrix3f DefGrad(
+      const UserParameters::StFlexRestartHistory& history,
+      unsigned pfs1,
+      const tdouble3* pos,
+      const unsigned* flexstrucridp);
+
+  inline void AddElastic(
+      const UserParameters::StFlexRestartHistory& history,
+      size_t k,
+      unsigned pfs1,
+      unsigned pfs2,
+      const tmatrix3f* flexPk1Reference,
+      float mass0p1,
+      tfloat3& acep1);
+
+  template<TpKernel tker>
+  inline void AddHourglass(
+      const UserParameters::StFlexRestartHistory& history,
+      size_t k,
+      const tmatrix3f& defgradp1,
+      const tmatrix3f& defgradp2,
+      const tfloat3& r,
+      float rr2,
+      const StCteSph& CSP,
+      float hgfactor,
+      float youngmod,
+      float mass0p1,
+      tfloat3& acep1);
+
+  }
 }
 
 using namespace std;
@@ -122,6 +206,18 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
     (!history.Available() || history.Idp.size()!=np))
     Run_Exceptioon("Flexible restart state is unavailable.");
 
+  const bool useGradient=
+      useHistory && User.UseFlexRestartGradientCorrection;
+
+  const bool useHourglass=
+      useHistory && User.UseFlexRestartHourglassCorrection;
+
+  if(!FlexRestartTest::ForceCacheReady(history,useGradient,useHourglass))
+    Run_Exceptioon("Flexible correction cache is unavailable.");
+
+  std::vector<tmatrix3f> flexPk1Reference(
+      useGradient ? np : 0);
+
   std::vector<tmatrix3f> flexForceMatrix(np);
   std::vector<float> flexDensity(np);
 
@@ -175,6 +271,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           fmath::MulMatrix3x3(
               pnatural,fmath::TrasMatrix3x3(fstar)),
           1.f/jstar);
+      if(useGradient) flexPk1Reference[pfs]=preference;
 
       // Current density from the X0 reference density.
       flexDensity[pfs]=history.Rho0[pfs]/jrelative;
@@ -404,31 +501,37 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
         const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
         //-Acceleration due to structure.
         const tmatrix3f defgradp2=defgrad[pfs2];
-        const tmatrix3f pk1kercorrp2=flexForceMatrix[pfs2];
-        tmatrix3f pk1kercorrp1p2;
-        pk1kercorrp1p2.a11=pk1kercorrp1.a11+pk1kercorrp2.a11; pk1kercorrp1p2.a12=pk1kercorrp1.a12+pk1kercorrp2.a12; pk1kercorrp1p2.a13=pk1kercorrp1.a13+pk1kercorrp2.a13;
-        pk1kercorrp1p2.a21=pk1kercorrp1.a21+pk1kercorrp2.a21; pk1kercorrp1p2.a22=pk1kercorrp1.a22+pk1kercorrp2.a22; pk1kercorrp1p2.a23=pk1kercorrp1.a23+pk1kercorrp2.a23;
-        pk1kercorrp1p2.a31=pk1kercorrp1.a31+pk1kercorrp2.a31; pk1kercorrp1p2.a32=pk1kercorrp1.a32+pk1kercorrp2.a32; pk1kercorrp1p2.a33=pk1kercorrp1.a33+pk1kercorrp2.a33;
-        tfloat3 pk1kercorrdw;
-        pk1kercorrdw.x=pk1kercorrp1p2.a11*frx0+pk1kercorrp1p2.a12*fry0+pk1kercorrp1p2.a13*frz0;
-        pk1kercorrdw.y=pk1kercorrp1p2.a21*frx0+pk1kercorrp1p2.a22*fry0+pk1kercorrp1p2.a23*frz0;
-        pk1kercorrdw.z=pk1kercorrp1p2.a31*frx0+pk1kercorrp1p2.a32*fry0+pk1kercorrp1p2.a33*frz0;
-        if(useHistory){
-          const float pairVolume=
-              history.Vol0[pfs1]*history.Vol0[pfs2];
-
-          const float forceToAcceleration=pairVolume/mass0p1;
-
-          acep1.x+=pk1kercorrdw.x*forceToAcceleration;
-          acep1.y+=pk1kercorrdw.y*forceToAcceleration;
-          acep1.z+=pk1kercorrdw.z*forceToAcceleration;
+        if(useGradient){
+          FlexRestartTest::AddElastic(history,history.CorrectionOffset[pfs1]+pair,pfs1,pfs2,flexPk1Reference.data(),mass0p1,acep1);
         }
         else{
-          // Ordinary branch already includes the original volume weights.
-          acep1.x+=pk1kercorrdw.x/mass0p1;
-          acep1.y+=pk1kercorrdw.y/mass0p1;
-          acep1.z+=pk1kercorrdw.z/mass0p1;
+          const tmatrix3f pk1kercorrp2=flexForceMatrix[pfs2];
+          tmatrix3f pk1kercorrp1p2;
+          pk1kercorrp1p2.a11=pk1kercorrp1.a11+pk1kercorrp2.a11; pk1kercorrp1p2.a12=pk1kercorrp1.a12+pk1kercorrp2.a12; pk1kercorrp1p2.a13=pk1kercorrp1.a13+pk1kercorrp2.a13;
+          pk1kercorrp1p2.a21=pk1kercorrp1.a21+pk1kercorrp2.a21; pk1kercorrp1p2.a22=pk1kercorrp1.a22+pk1kercorrp2.a22; pk1kercorrp1p2.a23=pk1kercorrp1.a23+pk1kercorrp2.a23;
+          pk1kercorrp1p2.a31=pk1kercorrp1.a31+pk1kercorrp2.a31; pk1kercorrp1p2.a32=pk1kercorrp1.a32+pk1kercorrp2.a32; pk1kercorrp1p2.a33=pk1kercorrp1.a33+pk1kercorrp2.a33;
+          tfloat3 pk1kercorrdw;
+          pk1kercorrdw.x=pk1kercorrp1p2.a11*frx0+pk1kercorrp1p2.a12*fry0+pk1kercorrp1p2.a13*frz0;
+          pk1kercorrdw.y=pk1kercorrp1p2.a21*frx0+pk1kercorrp1p2.a22*fry0+pk1kercorrp1p2.a23*frz0;
+          pk1kercorrdw.z=pk1kercorrp1p2.a31*frx0+pk1kercorrp1p2.a32*fry0+pk1kercorrp1p2.a33*frz0;
+          if(useHistory){
+            const float pairVolume=
+                history.Vol0[pfs1]*history.Vol0[pfs2];
+
+            const float forceToAcceleration=pairVolume/mass0p1;
+
+            acep1.x+=pk1kercorrdw.x*forceToAcceleration;
+            acep1.y+=pk1kercorrdw.y*forceToAcceleration;
+            acep1.z+=pk1kercorrdw.z*forceToAcceleration;
+          }
+          else{
+            // Ordinary branch already includes the original volume weights.
+            acep1.x+=pk1kercorrdw.x/mass0p1;
+            acep1.y+=pk1kercorrdw.y/mass0p1;
+            acep1.z+=pk1kercorrdw.z/mass0p1;
+          }
         }
+        
         //-Hourglass correction.
         if(hgfactor){
           const unsigned p2=flexstrucridp[pfs2];
@@ -437,23 +540,30 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           const float dry=float(posp1.y-posp2.y);
           const float drz=float(posp1.z-posp2.z);
           const float rr2=drx*drx+dry*dry+drz*drz;
-          const float wab=fsph::GetKernel_Wab<tker>(CSP,rr2);
-          const float xijbarx=defgradp1.a11*drx0+defgradp1.a12*dry0+defgradp1.a13*drz0;
-          const float xijbary=defgradp1.a21*drx0+defgradp1.a22*dry0+defgradp1.a23*drz0;
-          const float xijbarz=defgradp1.a31*drx0+defgradp1.a32*dry0+defgradp1.a33*drz0;
-          const float xjibarx=-(defgradp2.a11*drx0+defgradp2.a12*dry0+defgradp2.a13*drz0);
-          const float xjibary=-(defgradp2.a21*drx0+defgradp2.a22*dry0+defgradp2.a23*drz0);
-          const float xjibarz=-(defgradp2.a31*drx0+defgradp2.a32*dry0+defgradp2.a33*drz0);
-          const tfloat3 epsij=TFloat3(drx-xijbarx,dry-xijbary,drz-xijbarz);
-          const tfloat3 epsji=TFloat3(-drx-xjibarx,-dry-xjibary,-drz-xjibarz);
-          const float rr=sqrt(rr2);
-          const float deltaij=(epsij.x*drx+epsij.y*dry+epsij.z*drz)/rr;
-          const float deltaji=-(epsji.x*drx+epsji.y*dry+epsji.z*drz)/rr;
-          const float hgPairVolume = useHistory
-            ? history.Vol0[pfs1]*history.Vol0[pfs2]
-            : vol0p1*vol0p1;
-          const float mulfac = hgfactor*hgPairVolume*wab*youngmod/(rr20*rr*mass0p1)*0.5f*(deltaij+deltaji);
-          acep1.x-=mulfac*drx; acep1.y-=mulfac*dry; acep1.z-=mulfac*drz;
+          if(useHourglass){
+            FlexRestartTest::AddHourglass<tker>(history,history.CorrectionOffset[pfs1]+pair,defgradp1,defgradp2,
+              TFloat3(drx,dry,drz),rr2,CSP,hgfactor,youngmod,mass0p1,acep1);
+          }
+          else{
+            const float wab=fsph::GetKernel_Wab<tker>(CSP,rr2);
+            const float xijbarx=defgradp1.a11*drx0+defgradp1.a12*dry0+defgradp1.a13*drz0;
+            const float xijbary=defgradp1.a21*drx0+defgradp1.a22*dry0+defgradp1.a23*drz0;
+            const float xijbarz=defgradp1.a31*drx0+defgradp1.a32*dry0+defgradp1.a33*drz0;
+            const float xjibarx=-(defgradp2.a11*drx0+defgradp2.a12*dry0+defgradp2.a13*drz0);
+            const float xjibary=-(defgradp2.a21*drx0+defgradp2.a22*dry0+defgradp2.a23*drz0);
+            const float xjibarz=-(defgradp2.a31*drx0+defgradp2.a32*dry0+defgradp2.a33*drz0);
+            const tfloat3 epsij=TFloat3(drx-xijbarx,dry-xijbary,drz-xijbarz);
+            const tfloat3 epsji=TFloat3(-drx-xjibarx,-dry-xjibary,-drz-xjibarz);
+            const float rr=sqrt(rr2);
+            const float deltaij=(epsij.x*drx+epsij.y*dry+epsij.z*drz)/rr;
+            const float deltaji=-(epsji.x*drx+epsji.y*dry+epsji.z*drz)/rr;
+            const float hgPairVolume = useHistory
+              ? history.Vol0[pfs1]*history.Vol0[pfs2]
+              : vol0p1*vol0p1;
+            const float mulfac = hgfactor*hgPairVolume*wab*youngmod/(rr20*rr*mass0p1)*0.5f*(deltaij+deltaji);
+            acep1.x-=mulfac*drx; acep1.y-=mulfac*dry; acep1.z-=mulfac*drz;
+          }
+          
         }
       }
 
@@ -617,12 +727,19 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGrad(unsig
     ,const tdouble3* pos0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr
     ,tmatrix3f* defgrad)const
 {
-    const bool useHistory=(PartBegin!=0);
-    const auto& history=User->FlexRestartHistory;
+  const bool useHistory=(PartBegin!=0);
+  const auto& history=User->FlexRestartHistory;
 
-    if(useHistory &&
-      (!history.Available() || history.Idp.size()!=np))
-      Run_Exceptioon("Flexible restart state is unavailable.");
+  if(useHistory &&
+    (!history.Available() || history.Idp.size()!=np))
+    Run_Exceptioon("Flexible restart state is unavailable.");
+
+  const bool useGradient=
+    useHistory && User->UseFlexRestartGradientCorrection;
+
+  if(useGradient && !FlexRestartTest::GradientCacheReady(history,np))
+    Run_Exceptioon("Flexible gradient cache is unavailable.");
+
   //-Starts execution using OpenMP.
   const int n=int(np);
   #ifdef OMP_USE
@@ -633,6 +750,13 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGrad(unsig
 
     //-Get number of pairs for this particle.
     const unsigned numpairsp1=numpairs[pfs1];
+
+    if(useGradient){
+      defgrad[pfs1]=FlexRestartTest::DefGrad<simulate2d>(
+          history,pfs1,pos,flexstrucridp);
+
+      continue;
+    }
 
     //-If this particle has pairs.
     if(numpairsp1){
@@ -716,6 +840,211 @@ void JSphCpu::UpdateFlexStrucGeometry()const{
   if(CaseNflexstruc&&TMdbc2>=MDBC2_Std)CalcFlexStrucNormals();
 }
 
+void JSphCpuSingle::PrepareFlexRestartPairCache()
+{
+  auto& h=User->FlexRestartHistory;
+  const unsigned n=CaseNflexstruc;
+
+  if(!h.Available() ||
+     !h.ReferenceAvailable() ||
+     h.Idp.size()!=n)
+  {
+    Run_Exceptioon(
+        "Flexible correction history is unavailable.");
+  }
+
+  // Both corrections share the same active pair layout.
+  if(!h.CorrectionOffset.empty())
+    return;
+
+  h.CorrectionOffset.resize(size_t(n)+1);
+  h.CorrectionOffset[0]=0;
+
+  for(unsigned i=0;i<n;i++){
+    if(h.Idp[i]!=Idp_c->cptr()[FlexStrucRidpc[i]])
+      Run_Exceptioon(
+          "Flexible correction particle ID mismatch.");
+
+    if(User->UseFlexRestartGradientCorrection &&
+       !NumPairsc[i])
+    {
+      Run_Exceptioon(
+          "Gradient correction requires neighbours.");
+    }
+
+    h.CorrectionOffset[i+1]=
+        h.CorrectionOffset[i]+NumPairsc[i];
+
+    for(unsigned k=0;k<NumPairsc[i];k++){
+      const unsigned j=PairIdxc[i][k];
+
+      if(j>=n || j==i)
+        Run_Exceptioon("Invalid correction neighbour.");
+
+      if(User->UseFlexRestartGradientCorrection){
+        const unsigned a=h.PairOffset[i];
+        const unsigned b=h.PairOffset[i+1];
+
+        if(b-a!=NumPairsc[i] ||
+           h.PairIdp[a+k]!=h.Idp[j])
+        {
+          Run_Exceptioon(
+              "Gradient correction requires "
+              "the original ordered pairs.");
+        }
+      }
+
+      h.CorrectionNeighbour.push_back(j);
+    }
+  }
+}
+
+void JSphCpuSingle::PrepareFlexRestartGradientCorrection()
+{
+  if(!User->UseFlexRestartGradientCorrection)
+    return;
+
+  PrepareFlexRestartPairCache();
+
+  auto& h=User->FlexRestartHistory;
+  const unsigned n=CaseNflexstruc;
+
+  if(TKernel!=KERNEL_Wendland &&
+     TKernel!=KERNEL_Cubic)
+  {
+    Run_Exceptioon(
+        "Unsupported flexible correction kernel.");
+  }
+
+  std::vector<tmatrix3f> transform(n);
+
+  for(unsigned i=0;i<n;i++){
+    const tmatrix3f inv=
+        fmath::InverseMatrix3x3(h.DefGrad[i]);
+
+    // q0 = F*^{-T} Bn^T Gn Vn.
+    transform[i]=fmath::MulMatrix3x3(
+        fmath::TrasMatrix3x3(inv),
+        fmath::TrasMatrix3x3(h.NaturalKerCorr[i]));
+  }
+
+  const size_t count=h.CorrectionNeighbour.size();
+
+  h.Grad0I.resize(count);
+  h.Grad0J.resize(count);
+
+  for(unsigned i=0;i<n;i++){
+    for(size_t k=h.CorrectionOffset[i];
+        k<h.CorrectionOffset[i+1];k++)
+    {
+      const unsigned j=h.CorrectionNeighbour[k];
+
+      const tdouble3 a=h.NaturalPos[i];
+      const tdouble3 b=h.NaturalPos[j];
+
+      const tfloat3 r=TFloat3(
+          float(a.x-b.x),
+          float(a.y-b.y),
+          float(a.z-b.z));
+
+      const float rr=
+          r.x*r.x+r.y*r.y+r.z*r.z;
+
+      if(!std::isfinite(rr) || rr<=0)
+        Run_Exceptioon(
+            "Invalid natural pair distance.");
+
+      const float fac=
+          TKernel==KERNEL_Wendland
+          ? fsph::GetKernel_Fac<KERNEL_Wendland>(CSP,rr)
+          : fsph::GetKernel_Fac<KERNEL_Cubic>(CSP,rr);
+
+      const tfloat3 g=FlexScale(r,fac);
+
+      // Both coefficients use the SAME i-minus-j direction.
+      h.Grad0I[k]=FlexScale(
+          FlexMV(transform[i],g),h.VolN[i]);
+
+      h.Grad0J[k]=FlexScale(
+          FlexMV(transform[j],g),h.VolN[j]);
+    }
+  }
+
+  h.GradientReady=true;
+
+  Log->Print(
+      "User.FlexRestartGradientCorrection: "
+      "transformed gradients prepared.");
+}
+
+void JSphCpuSingle::PrepareFlexRestartHourglassCorrection()
+{
+  if(!User->UseFlexRestartHourglassCorrection)
+    return;
+
+  PrepareFlexRestartPairCache();
+
+  auto& h=User->FlexRestartHistory;
+  const size_t count=h.CorrectionNeighbour.size();
+
+  h.HgMappedI.resize(count);
+  h.HgMappedJ.resize(count);
+  h.HgWeight.resize(count);
+
+  for(unsigned i=0;i<CaseNflexstruc;i++){
+    for(size_t k=h.CorrectionOffset[i];
+        k<h.CorrectionOffset[i+1];k++)
+    {
+      const unsigned j=h.CorrectionNeighbour[k];
+
+      const tdouble3 a=h.NaturalPos[i];
+      const tdouble3 b=h.NaturalPos[j];
+
+      const tfloat3 r=TFloat3(
+          float(a.x-b.x),
+          float(a.y-b.y),
+          float(a.z-b.z));
+
+      const float rr=
+          r.x*r.x+r.y*r.y+r.z*r.z;
+
+      if(!std::isfinite(rr) || rr<=0)
+        Run_Exceptioon(
+            "Invalid natural HG pair distance.");
+
+      // Fixed throughout this restart.
+      h.HgMappedI[k]=FlexMV(h.DefGrad[i],r);
+      h.HgMappedJ[k]=FlexMV(h.DefGrad[j],r);
+
+      // Match the original ordinary HG branch.
+      h.HgWeight[k]=h.VolN[i]*h.VolN[i]/rr;
+    }
+  }
+
+  h.HourglassReady=true;
+
+  Log->Print(
+      "User.FlexRestartHourglassCorrection: "
+      "history and penalty weights prepared.");
+}
+
+void JSphCpuSingle::InitFlexRestartReference()
+{
+  if(!PartBegin || !FlexStruc || !CaseNflexstruc)
+    return;
+
+  LoadFlexReferenceRestart();
+
+  if(User->UseFlexRestartRestorePairs)
+    RestoreFlexRestartPairs();
+
+  if(User->UseFlexRestartGradientCorrection)
+    PrepareFlexRestartGradientCorrection();
+
+  if(User->UseFlexRestartHourglassCorrection)
+    PrepareFlexRestartHourglassCorrection();
+}
+
 
 
 
@@ -740,8 +1069,10 @@ void JSphCpuSingle::SaveFlexData(){
       fun::GetDirWithSlash(DirDataOut)
       +fun::PrintStr("PartFlex_%04u.bi4",unsigned(Part));
 
+  SaveFlexReferenceOnce();
   JBinaryData data("JPartFlexBi4");
-  data.SetvUint("FormatVer",1);
+  data.SetvUint("FormatVer",2);
+  data.SetvText("ReferenceId",User->FlexReferenceId);
   data.SetvUint("Cpart",unsigned(Part));
   data.SetvDouble("TimeStep",TimeStep);
   data.SetvUint("Nflex",nf);
@@ -792,6 +1123,7 @@ void JSphCpuSingle::SaveFlexData(){
 //==============================================================================
 void JSphCpuSingle::LoadFlexDataRestart(){
   User->FlexRestartHistory.Clear();
+  User->FlexReferenceId.clear();
 
   if(!PartBegin || !FlexStruc)
     return;
@@ -811,8 +1143,13 @@ void JSphCpuSingle::LoadFlexDataRestart(){
   JBinaryData data;
   data.LoadFile(file);
 
-  if(data.GetvUint("FormatVer")!=1)
+  const unsigned format=data.GetvUint("FormatVer");
+
+  if(format!=1 && format!=2)
     Run_ExceptioonFile("Unsupported PartFlex format.",file);
+
+  const std::string referenceId=
+      format==2 ? data.GetvText("ReferenceId") : "";
 
   if(data.GetvUint("Cpart")!=unsigned(PartBegin))
     Run_ExceptioonFile("PartFlex frame number does not match.",file);
@@ -947,8 +1284,601 @@ void JSphCpuSingle::LoadFlexDataRestart(){
   }
 
   User->FlexRestartHistory=history;
+  User->FlexReferenceId=referenceId;
 
   Log->Printf(
     "Flexible restart history and Xn/X0 material state loaded: "
     "%u particles.",nf);
 }
+
+void JSphCpuSingle::SaveFlexReferenceOnce()
+{
+  if(User->FlexReferenceWritten)
+    return;
+
+  UserParameters::StFlexRestartHistory reference;
+
+  if(PartBegin){
+    if(!User->FlexRestartHistory.ReferenceAvailable()){
+      // Legacy restart without original reference history.
+      // Do not fabricate Xn from the new restart geometry.
+      User->FlexReferenceId.clear();
+      User->FlexReferenceWritten=true;
+      return;
+    }
+
+    reference=User->FlexRestartHistory;
+  }
+  else{
+    const unsigned nf=CaseNflexstruc;
+
+    reference.Idp.resize(nf);
+    reference.NaturalPos.resize(nf);
+    reference.NaturalKerCorr.resize(nf);
+    reference.VolN.resize(nf);
+    reference.RhoN.resize(nf);
+    reference.PairOffset.resize(size_t(nf)+1);
+
+    reference.ReferenceKernel=unsigned(TKernel);
+    reference.ReferenceH=KernelH;
+    reference.Reference2D=Simulate2D;
+
+    reference.PairOffset[0]=0;
+
+    for(unsigned pfs=0;pfs<nf;pfs++){
+      const unsigned p=FlexStrucRidpc[pfs];
+
+      if(p>=Np)
+        Run_Exceptioon("Invalid flexible particle index.");
+
+      const unsigned body=
+          CODE_GetIbodyFlexStruc(Code_c->cptr()[p]);
+
+      reference.Idp[pfs]=Idp_c->cptr()[p];
+      reference.NaturalPos[pfs]=Pos0c[pfs];
+      reference.NaturalKerCorr[pfs]=KerCorrc[pfs];
+      reference.VolN[pfs]=FlexStrucDatac[body].vol0;
+      reference.RhoN[pfs]=FlexStrucDatac[body].rho0;
+
+      const unsigned previous=reference.PairOffset[pfs];
+      const unsigned count=NumPairsc[pfs];
+
+      if(count>std::numeric_limits<unsigned>::max()-previous)
+        Run_Exceptioon("Too many flexible reference pairs.");
+
+      reference.PairOffset[pfs+1]=previous+count;
+    }
+
+    reference.PairIdp.resize(reference.PairOffset[nf]);
+
+    for(unsigned pfs=0;pfs<nf;pfs++){
+      for(unsigned k=0;k<NumPairsc[pfs];k++){
+        const unsigned neighbour=PairIdxc[pfs][k];
+
+        if(neighbour>=nf)
+          Run_Exceptioon("Invalid flexible neighbour index.");
+
+        reference.PairIdp[reference.PairOffset[pfs]+k]=
+            Idp_c->cptr()[FlexStrucRidpc[neighbour]];
+      }
+    }
+
+    reference.HasReferenceHistory=true;
+
+    // Existing solver run identifier.
+    User->FlexReferenceId=RunCode;
+  }
+
+  if(User->FlexReferenceId.empty())
+    Run_Exceptioon("Flexible reference identifier is unavailable.");
+
+  const unsigned nf=unsigned(reference.Idp.size());
+
+  const std::string file=
+      fun::GetDirWithSlash(DirDataOut)+"FlexReference.ibi4";
+
+  JBinaryData data("JFlexReferenceBi4");
+
+  data.SetvUint("FormatVer",1);
+  data.SetvText("ReferenceId",User->FlexReferenceId);
+
+  data.SetvUint("Nflex",nf);
+  data.SetvUint(
+      "Npairs",unsigned(reference.PairIdp.size()));
+
+  data.SetvUint("Kernel",reference.ReferenceKernel);
+  data.SetvFloat("H",reference.ReferenceH);
+  data.SetvBool("Simulate2D",reference.Reference2D);
+
+  unsigned* ids=data.CreateArrayUint("Idp",nf,false);
+
+  tdouble3* xn=
+      data.CreateArrayDouble3("NaturalPos",nf,false);
+
+  float* vn=data.CreateArrayFloat("NaturalVol",nf,false);
+  float* rn=data.CreateArrayFloat("NaturalRho",nf,false);
+
+  tfloat3* b1=data.CreateArrayFloat3("Brow1",nf,false);
+  tfloat3* b2=data.CreateArrayFloat3("Brow2",nf,false);
+  tfloat3* b3=data.CreateArrayFloat3("Brow3",nf,false);
+
+  unsigned* offsets=data.CreateArrayUint(
+      "PairOffset",size_t(nf)+1,false);
+
+  unsigned* pairs=data.CreateArrayUint(
+      "PairIdp",reference.PairIdp.size(),false);
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    ids[pfs]=reference.Idp[pfs];
+    xn[pfs]=reference.NaturalPos[pfs];
+    vn[pfs]=reference.VolN[pfs];
+    rn[pfs]=reference.RhoN[pfs];
+
+    const tmatrix3f& b=reference.NaturalKerCorr[pfs];
+
+    b1[pfs]=TFloat3(b.a11,b.a12,b.a13);
+    b2[pfs]=TFloat3(b.a21,b.a22,b.a23);
+    b3[pfs]=TFloat3(b.a31,b.a32,b.a33);
+  }
+
+  std::copy(
+      reference.PairOffset.begin(),
+      reference.PairOffset.end(),
+      offsets);
+
+  std::copy(
+      reference.PairIdp.begin(),
+      reference.PairIdp.end(),
+      pairs);
+
+  data.SaveFile(file,false,true);
+
+  // Mark only after successful writing.
+  User->FlexReferenceWritten=true;
+}
+
+void JSphCpuSingle::LoadFlexReferenceRestart()
+{
+  if(!PartBegin || !FlexStruc)
+    return;
+
+  const bool required=
+      User->UseFlexRestartRestorePairs ||
+      User->UseFlexRestartGradientCorrection ||
+      User->UseFlexRestartHourglassCorrection;
+
+  if(User->FlexReferenceId.empty()){
+    if(required)
+      Run_Exceptioon(
+          "Requested flexible restart correction requires "
+          "a PartFlex file linked to FlexReference.ibi4.");
+
+    // Legacy PartFlex remains usable with corrections disabled.
+    return;
+  }
+
+  const std::string file=
+      fun::GetDirWithSlash(PartBeginDir)+"FlexReference.ibi4";
+
+  if(!fun::FileExists(file)){
+    if(required)
+      Run_ExceptioonFile(
+          "Missing flexible reference history.",file);
+
+    // The current restart remains usable without correction.
+    // Later outputs must not claim that reference history exists.
+    User->FlexReferenceId.clear();
+    return;
+  }
+
+  JBinaryData data;
+  data.LoadFile(file);
+
+  if(data.GetvUint("FormatVer")!=1)
+    Run_ExceptioonFile(
+        "Unsupported flexible reference format.",file);
+
+  if(data.GetvText("ReferenceId")!=User->FlexReferenceId)
+    Run_ExceptioonFile(
+        "PartFlex and reference history do not belong together.",
+        file);
+
+  const unsigned nf=CaseNflexstruc;
+  const unsigned count=data.GetvUint("Npairs");
+
+  if(data.GetvUint("Nflex")!=nf)
+    Run_ExceptioonFile(
+        "Flexible reference particle count differs.",file);
+
+  const auto get=
+      [&](const char* name,JBinaryDataDef::TpData type,size_t n)
+  {
+    return data.GetArrayTpSize(name,type,n,file)
+        ->GetDataPointer();
+  };
+
+  const auto ids=static_cast<const unsigned*>(
+      get("Idp",JBinaryDataDef::DatUint,nf));
+
+  const auto xn=static_cast<const tdouble3*>(
+      get("NaturalPos",JBinaryDataDef::DatDouble3,nf));
+
+  const auto vn=static_cast<const float*>(
+      get("NaturalVol",JBinaryDataDef::DatFloat,nf));
+
+  const auto rn=static_cast<const float*>(
+      get("NaturalRho",JBinaryDataDef::DatFloat,nf));
+
+  const auto b1=static_cast<const tfloat3*>(
+      get("Brow1",JBinaryDataDef::DatFloat3,nf));
+
+  const auto b2=static_cast<const tfloat3*>(
+      get("Brow2",JBinaryDataDef::DatFloat3,nf));
+
+  const auto b3=static_cast<const tfloat3*>(
+      get("Brow3",JBinaryDataDef::DatFloat3,nf));
+
+  const auto offsets=static_cast<const unsigned*>(
+      get("PairOffset",JBinaryDataDef::DatUint,size_t(nf)+1));
+
+  const auto pairs=static_cast<const unsigned*>(
+      get("PairIdp",JBinaryDataDef::DatUint,count));
+
+  std::unordered_map<unsigned,unsigned> savedIndex;
+  savedIndex.reserve(nf);
+
+  for(unsigned k=0;k<nf;k++){
+    if(!savedIndex.emplace(ids[k],k).second)
+      Run_ExceptioonFile(
+          "Duplicated ID in flexible reference history.",file);
+  }
+
+  if(offsets[0]!=0 || offsets[nf]!=count)
+    Run_ExceptioonFile("Invalid reference pair offsets.",file);
+
+  for(unsigned k=0;k<nf;k++){
+    if(offsets[k]>offsets[k+1] || offsets[k+1]>count)
+      Run_ExceptioonFile("Invalid reference pair offsets.",file);
+
+    std::unordered_set<unsigned> seen;
+
+    for(unsigned q=offsets[k];q<offsets[k+1];q++){
+      if(pairs[q]==ids[k] ||
+         savedIndex.find(pairs[q])==savedIndex.end() ||
+         !seen.insert(pairs[q]).second)
+      {
+        Run_ExceptioonFile(
+            "Invalid reference neighbour ID.",file);
+      }
+    }
+  }
+
+  // Transactional update: commit after validation.
+  auto history=User->FlexRestartHistory;
+
+  history.ReferenceKernel=data.GetvUint("Kernel");
+  history.ReferenceH=data.GetvFloat("H");
+  history.Reference2D=data.GetvBool("Simulate2D");
+
+  if(!std::isfinite(history.ReferenceH) ||
+     history.ReferenceH<=0)
+  {
+    Run_ExceptioonFile("Invalid reference smoothing length.",file);
+  }
+
+  const bool needsKernel=
+      User->UseFlexRestartGradientCorrection ||
+      User->UseFlexRestartHourglassCorrection;
+
+  if(needsKernel &&
+     (history.ReferenceKernel!=unsigned(TKernel) ||
+      history.ReferenceH!=KernelH ||
+      history.Reference2D!=Simulate2D))
+  {
+    Run_ExceptioonFile(
+        "Kernel settings differ from flexible reference history.",
+        file);
+  }
+
+  history.NaturalPos.resize(nf);
+  history.NaturalKerCorr.resize(nf);
+  history.PairOffset.resize(size_t(nf)+1);
+  history.PairIdp.clear();
+  history.PairIdp.reserve(count);
+  history.PairOffset[0]=0;
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    const auto it=savedIndex.find(history.Idp[pfs]);
+
+    if(it==savedIndex.end())
+      Run_ExceptioonFile(
+          "Current flexible ID is absent from reference history.",
+          file);
+
+    const unsigned k=it->second;
+
+    if(!std::isfinite(xn[k].x) ||
+       !std::isfinite(xn[k].y) ||
+       !std::isfinite(xn[k].z))
+    {
+      Run_ExceptioonFile("Invalid natural position.",file);
+    }
+
+    if(!std::isfinite(vn[k]) || vn[k]<=0 ||
+       !std::isfinite(rn[k]) || rn[k]<=0 ||
+       vn[k]!=history.VolN[pfs] ||
+       rn[k]!=history.RhoN[pfs])
+    {
+      Run_ExceptioonFile(
+          "Natural volume/density differs from reference history.",
+          file);
+    }
+
+    const tmatrix3f b={
+      b1[k].x,b1[k].y,b1[k].z,
+      b2[k].x,b2[k].y,b2[k].z,
+      b3[k].x,b3[k].y,b3[k].z
+    };
+
+    const float values[]={
+      b.a11,b.a12,b.a13,
+      b.a21,b.a22,b.a23,
+      b.a31,b.a32,b.a33
+    };
+
+    for(float value:values){
+      if(!std::isfinite(value))
+        Run_ExceptioonFile(
+            "Invalid natural kernel correction matrix.",file);
+    }
+
+    history.NaturalPos[pfs]=xn[k];
+    history.NaturalKerCorr[pfs]=b;
+
+    for(unsigned q=offsets[k];q<offsets[k+1];q++)
+      history.PairIdp.push_back(pairs[q]);
+
+    history.PairOffset[pfs+1]=
+        unsigned(history.PairIdp.size());
+  }
+
+  history.HasReferenceHistory=true;
+  User->FlexRestartHistory=history;
+}
+
+void JSphCpuSingle::RestoreFlexRestartPairs()
+{
+  const auto& history=User->FlexRestartHistory;
+
+  if(!history.ReferenceAvailable())
+    Run_Exceptioon("Flexible reference pairs are unavailable.");
+
+  const unsigned nf=CaseNflexstruc;
+  const size_t count=history.PairIdp.size();
+
+  std::unordered_map<unsigned,unsigned> currentIndex;
+  currentIndex.reserve(nf);
+
+  size_t oldCount=0;
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    const unsigned p=FlexStrucRidpc[pfs];
+    const unsigned id=Idp_c->cptr()[p];
+
+    if(id!=history.Idp[pfs] ||
+       !currentIndex.emplace(id,pfs).second)
+    {
+      Run_Exceptioon("Flexible reference ID mapping is invalid.");
+    }
+
+    oldCount+=NumPairsc[pfs];
+  }
+
+  // Build new storage before replacing the active buffer.
+  std::unique_ptr<unsigned[]> buffer(new unsigned[count]);
+
+  for(size_t q=0;q<count;q++){
+    const auto it=currentIndex.find(history.PairIdp[q]);
+
+    if(it==currentIndex.end())
+      Run_Exceptioon("Reference neighbour is absent from this run.");
+
+    buffer[q]=it->second;
+  }
+
+  delete[] PairIdxBufferc;
+  PairIdxBufferc=buffer.release();
+
+  MemCpuFixed-=sizeof(unsigned)*oldCount;
+  MemCpuFixed+=sizeof(unsigned)*count;
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    const unsigned begin=history.PairOffset[pfs];
+    const unsigned end=history.PairOffset[pfs+1];
+
+    NumPairsc[pfs]=end-begin;
+    PairIdxc[pfs]=PairIdxBufferc+begin;
+  }
+
+  Log->Printf(
+      "User.FlexRestartRestorePairs: restored %u directed pairs.",
+      unsigned(count));
+}
+
+//==============================================================================
+// Optional restart discretization corrections.
+// Runtime calculations only; no file I/O or persistent state.
+//==============================================================================
+namespace {
+  namespace FlexRestartTest {
+
+  //------------------------------------------------------------------------------
+  // Checks the caches required by the optional force corrections.
+  //------------------------------------------------------------------------------
+  inline bool ForceCacheReady(
+      const UserParameters::StFlexRestartHistory& history,
+      bool useGradient,
+      bool useHourglass)
+  {
+    const size_t count=history.CorrectionNeighbour.size();
+
+    if(useGradient){
+      if(!history.GradientReady ||
+        history.Grad0I.size()!=count ||
+        history.Grad0J.size()!=count)
+      {
+        return false;
+      }
+    }
+
+    if(useHourglass){
+      if(!history.HourglassReady ||
+        history.HgWeight.size()!=count ||
+        history.HgMappedI.size()!=count ||
+        history.HgMappedJ.size()!=count)
+      {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  //------------------------------------------------------------------------------
+  // Checks the cache used to compute the relative deformation gradient.
+  //------------------------------------------------------------------------------
+  inline bool GradientCacheReady(
+      const UserParameters::StFlexRestartHistory& history,
+      unsigned np)
+  {
+    return history.GradientReady &&
+        history.CorrectionOffset.size()==size_t(np)+1 &&
+        history.Grad0I.size()==history.CorrectionNeighbour.size();
+  }
+
+  //------------------------------------------------------------------------------
+  // Computes F_t/0 using the transported discrete gradient operator.
+  // The cached coefficient already includes the kernel correction.
+  //------------------------------------------------------------------------------
+  template<bool simulate2d>
+  inline tmatrix3f DefGrad(
+      const UserParameters::StFlexRestartHistory& history,
+      unsigned pfs1,
+      const tdouble3* pos,
+      const unsigned* flexstrucridp)
+  {
+    tmatrix3f f={0};
+
+    const tdouble3 a=pos[flexstrucridp[pfs1]];
+
+    for(size_t k=history.CorrectionOffset[pfs1];
+        k<history.CorrectionOffset[pfs1+1];k++)
+    {
+      const unsigned j=history.CorrectionNeighbour[k];
+      const tdouble3 b=pos[flexstrucridp[j]];
+
+      const tfloat3 r=TFloat3(
+          float(a.x-b.x),
+          float(a.y-b.y),
+          float(a.z-b.z));
+
+      FlexSubtractOuter(f,r,history.Grad0I[k]);
+    }
+
+    if(simulate2d){
+      f.a12=f.a21=f.a23=f.a32=0.f;
+      f.a22=1.f;
+    }
+
+    return f;
+  }
+
+  //------------------------------------------------------------------------------
+  // Adds elastic acceleration using the transported gradient coefficients.
+  // flexPk1Reference contains P_t/0 without kernel or volume factors.
+  //------------------------------------------------------------------------------
+  inline void AddElastic(
+      const UserParameters::StFlexRestartHistory& history,
+      size_t k,
+      unsigned pfs1,
+      unsigned pfs2,
+      const tmatrix3f* flexPk1Reference,
+      float mass0p1,
+      tfloat3& acep1)
+  {
+    const tfloat3 fi=FlexMV(
+        flexPk1Reference[pfs1],
+        history.Grad0I[k]);
+
+    const tfloat3 fj=FlexMV(
+        flexPk1Reference[pfs2],
+        history.Grad0J[k]);
+
+    const float vi=history.Vol0[pfs1];
+    const float vj=history.Vol0[pfs2];
+
+    acep1.x+=(vi*fi.x+vj*fj.x)/mass0p1;
+    acep1.y+=(vi*fi.y+vj*fj.y)/mass0p1;
+    acep1.z+=(vi*fi.z+vj*fj.z)/mass0p1;
+  }
+
+  //------------------------------------------------------------------------------
+  // Adds HG acceleration with historical residuals and reference weights.
+  // Both cached mapped vectors use the same i-minus-j direction.
+  //------------------------------------------------------------------------------
+  template<TpKernel tker>
+  inline void AddHourglass(
+      const UserParameters::StFlexRestartHistory& history,
+      size_t k,
+      const tmatrix3f& defgradp1,
+      const tmatrix3f& defgradp2,
+      const tfloat3& r,
+      float rr2,
+      const StCteSph& CSP,
+      float hgfactor,
+      float youngmod,
+      float mass0p1,
+      tfloat3& acep1)
+  {
+    const float drx=r.x;
+    const float dry=r.y;
+    const float drz=r.z;
+
+    const tfloat3 bi=FlexMV(
+        defgradp1,
+        history.HgMappedI[k]);
+
+    const tfloat3 bj=FlexMV(
+        defgradp2,
+        history.HgMappedJ[k]);
+
+    if(rr2>0.f){
+      const float rr=sqrt(rr2);
+
+      // Average projected residual:
+      // r - F_t/0,i F*_i Rn
+      // r - F_t/0,j F*_j Rn
+      const float delta=
+          0.5f*(
+            (2.f*drx-bi.x-bj.x)*drx+
+            (2.f*dry-bi.y-bj.y)*dry+
+            (2.f*drz-bi.z-bj.z)*drz
+          )/rr;
+
+      // Keep the existing current-distance kernel evaluation.
+      const float wab=
+          fsph::GetKernel_Wab<tker>(CSP,rr2);
+
+      const float mulfac=
+          hgfactor*youngmod*wab*
+          history.HgWeight[k]*delta/
+          (rr*mass0p1);
+
+      acep1.x-=mulfac*drx;
+      acep1.y-=mulfac*dry;
+      acep1.z-=mulfac*drz;
+    }
+  }
+
+  } // namespace FlexRestartTest
+} // anonymous namespace

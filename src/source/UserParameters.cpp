@@ -30,10 +30,21 @@ void UserParameters::Reset(){
 
   SaveFlexData=false;
 
+  FlexRestartRestorePairs=false;
+  FlexRestartGradientCorrection=false;
+  FlexRestartHourglassCorrection=false;
+
   OutputObjects.clear();
 
 
   FlexRestartHistory.Clear();
+  
+  UseFlexRestartRestorePairs=false;
+  UseFlexRestartGradientCorrection=false;
+  UseFlexRestartHourglassCorrection=false;
+
+  FlexReferenceWritten=false;
+  FlexReferenceId.clear();
 }
 
 void UserParameters::LoadXml(const JXml* xml,JLog2* log){
@@ -283,6 +294,32 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
   }
 
   SaveFlexData=(saveflexdata==1);
+
+  const auto readbool=[&](const std::string& key) -> bool {
+    const std::string value=
+        parameters.GetValueStr(key,true,"false");
+
+    if(value=="true" || value=="1")
+      return true;
+
+    if(value=="false" || value=="0")
+      return false;
+
+    Run_Exceptioon(
+        std::string("User.")+key+
+        " must be true/false or 1/0.");
+
+    return false;
+  };
+
+  FlexRestartRestorePairs=
+      readbool("FlexRestartRestorePairs");
+
+  FlexRestartGradientCorrection=
+      readbool("FlexRestartGradientCorrection");
+
+  FlexRestartHourglassCorrection=
+      readbool("FlexRestartHourglassCorrection");
 
   LoadOutputXml(xml,root);
   // Print only after all checks succeed.
@@ -698,6 +735,58 @@ void UserParameters::VisuConfig(JLog2* log)const{
 
   log->Printf("  SaveFlexData: %s",
             SaveFlexData ? "true" : "false");
+}
+
+void UserParameters::ConfigFlexRestartCorrections(
+    bool restart,
+    bool hasflex,
+    JLog2* log)
+{
+  const bool applicable=restart && hasflex;
+
+  UseFlexRestartRestorePairs=
+      applicable && FlexRestartRestorePairs;
+
+  UseFlexRestartGradientCorrection=
+      applicable && FlexRestartGradientCorrection;
+
+  UseFlexRestartHourglassCorrection=
+      applicable && FlexRestartHourglassCorrection;
+
+  const auto reportUnused=
+      [&](const char* key,bool requested)
+  {
+    if(!requested || applicable || !log)
+      return;
+
+    log->Printf(
+        "User.%s: unused (%s%s%s).",
+        key,
+        !restart ? "not a restart" : "",
+        !restart && !hasflex ? "; " : "",
+        !hasflex ? "no flexible particles" : "");
+  };
+
+  reportUnused(
+      "FlexRestartRestorePairs",
+      FlexRestartRestorePairs);
+
+  reportUnused(
+      "FlexRestartGradientCorrection",
+      FlexRestartGradientCorrection);
+
+  reportUnused(
+      "FlexRestartHourglassCorrection",
+      FlexRestartHourglassCorrection);
+
+  // Check dependencies only when these options actually apply.
+  if(UseFlexRestartGradientCorrection &&
+     !UseFlexRestartRestorePairs)
+  {
+    Run_Exceptioon(
+        "User.FlexRestartGradientCorrection requires "
+        "User.FlexRestartRestorePairs=true.");
+  }
 }
 
 const tmatrix3f& UserParameters::GetFlexRestartDefGrad(
