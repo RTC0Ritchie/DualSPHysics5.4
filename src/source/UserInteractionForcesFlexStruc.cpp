@@ -449,7 +449,10 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           const float rr=sqrt(rr2);
           const float deltaij=(epsij.x*drx+epsij.y*dry+epsij.z*drz)/rr;
           const float deltaji=-(epsji.x*drx+epsji.y*dry+epsji.z*drz)/rr;
-          const float mulfac=(hgfactor*vol0p1*vol0p1*wab*youngmod/(rr20*rr*mass0p1)*0.5f*(deltaij+deltaji));
+          const float hgPairVolume = useHistory
+            ? history.Vol0[pfs1]*history.Vol0[pfs2]
+            : vol0p1*vol0p1;
+          const float mulfac = hgfactor*hgPairVolume*wab*youngmod/(rr20*rr*mass0p1)*0.5f*(deltaij+deltaji);
           acep1.x-=mulfac*drx; acep1.y-=mulfac*dry; acep1.z-=mulfac*drz;
         }
       }
