@@ -480,9 +480,35 @@ void JSphCpuSingle::SaveUserOutput(
         const StFlexStrucData& material=FlexStrucDatac[body];
 
         // Reference mass does not require F.
+        double naturalDensity=double(material.rho0);
+        double naturalVolume=double(material.vol0);
+        double particleMass=naturalDensity*naturalVolume;
+
+        if(User.IsFlexRestart() && (outputMaterial || needParticleMass)){
+          const auto& state=User.FlexRestartState;
+
+          if(!state.HasRestartStateLayout() ||
+             pfs>=state.Idp.size() || state.Idp[pfs]!=id)
+          {
+            Run_Exceptioon(
+                "Invalid restart material state for output.");
+          }
+
+          naturalDensity=double(state.NaturalDensity[pfs]);
+          naturalVolume=double(state.NaturalVolume[pfs]);
+          particleMass=double(state.ParticleMass[pfs]);
+
+          if(!std::isfinite(naturalDensity) || naturalDensity<=0.0 ||
+             !std::isfinite(naturalVolume) || naturalVolume<=0.0 ||
+             !std::isfinite(particleMass) || particleMass<=0.0)
+          {
+            Run_Exceptioon(
+                "Invalid restart density, volume or mass for output.");
+          }
+        }
+
         if(needParticleMass){
-          particle.Mass=
-            double(material.rho0)*double(material.vol0);
+          particle.Mass=particleMass;
         }
 
         if(outputMaterial){
@@ -519,11 +545,11 @@ void JSphCpuSingle::SaveUserOutput(
           }
 
           if(dynamic.DensityMaterial){
-            particle.DensityMaterial=double(material.rho0)/j;
+            particle.DensityMaterial=naturalDensity/j;
           }
 
           if(dynamic.VolumeMaterial){
-            particle.VolumeMaterial=double(material.vol0)*j;
+            particle.VolumeMaterial=naturalVolume*j;
           }
 
           if(outputStrain){

@@ -37,6 +37,8 @@ void UserParameters::Reset(){
   FlexRestartElasticFile.clear();
   FlexRestartFileVariableType=0;
   FlexRestartSpecialField=0;
+  FlexRestartConserveMass=true;
+  FlexRestartDensityIsNatural=true;
 
   FlexRestartRestorePairs=false;
   FlexRestartGradientCorrection=false;
@@ -323,7 +325,8 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
 
     xml->CheckAttributeNames(restart,"enabled comment");
     xml->CheckElementNames(
-        restart,true,"restartsource elasticinput");
+        restart,true,
+        "restartsource conservation densityreference elasticinput");
 
     FlexRestartRequested=
         xml->GetAttributeBool(
@@ -365,6 +368,38 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
           "restartsource: 1 (prescribed) or 2 (model_transfer).",
           xml->ErrGetFileRow(restart));
     }
+
+    const auto readRestartBool=
+        [&](const char* name,const char* attribute,bool defaultValue)->bool
+    {
+      const TiXmlElement* item=restart->FirstChildElement(name);
+
+      if(!item)return defaultValue;
+
+      if(item->NextSiblingElement(name)){
+        Run_ExceptioonFile(
+            std::string("Repeated User.restart.")+name+" node.",
+            xml->ErrGetFileRow(item));
+      }
+
+      xml->CheckAttributeNames(
+          item,std::string(attribute)+" comment");
+
+      if(item->FirstChildElement()){
+        Run_ExceptioonFile(
+            std::string("User.restart.")+name+
+            " does not accept child elements.",
+            xml->ErrGetFileRow(item));
+      }
+
+      return xml->GetAttributeBool(item,attribute);
+    };
+
+    FlexRestartConserveMass=
+        readRestartBool("conservation","mass",true);
+
+    FlexRestartDensityIsNatural=
+        readRestartBool("densityreference","natural",true);
     LoadRestartElasticInputXml(xml,restart);
   }
 
@@ -999,6 +1034,20 @@ void UserParameters::VisuConfig(JLog2* log)const{
       FlexRestartSourceRequested,
       requestedSource,
       FlexRestartRequested ? "enabled" : "inactive");
+
+  log->Printf(
+      "  FlexRestart.Conservation: %s (%s).",
+      FlexRestartConserveMass ? "mass" : "reference_volume",
+      FlexRestartRequested
+          ? "requested; irrelevant for undeformed field"
+          : "inactive");
+
+  log->Printf(
+      "  FlexRestart.DensityReference: %s (%s).",
+      FlexRestartDensityIsNatural ? "natural" : "reference",
+      FlexRestartRequested
+          ? "requested; irrelevant for undeformed field"
+          : "inactive");
 
   const char* elasticInput=
       FlexRestartElasticInput==1 ? "file" :

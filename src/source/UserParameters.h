@@ -64,6 +64,11 @@ public:
   // Special field: 0=unspecified, 1=undeformed, 2=hydrostatic_pressure.
   int FlexRestartSpecialField;
 
+  bool FlexRestartConserveMass;
+  bool FlexRestartDensityIsNatural;
+
+
+
   bool FlexRestartRestorePairs;
   bool FlexRestartGradientCorrection;
   bool FlexRestartHourglassCorrection;

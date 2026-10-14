@@ -103,9 +103,10 @@ protected:
   void InitFlexRestartState();
   void InitFlexRestartFromPrescribed();
   void InitFlexRestartFromModelTransfer();
-  void CompleteFlexRestartMaterialState();
+  void CompleteFlexRestartMaterialState(bool validateOnly=false);
   
   void InitFlexRestartUndeformed();
+  void InitFlexRestartHydrostatic();
   
   void SaveFlexData();
   void LoadFlexDirectContinuationState();
