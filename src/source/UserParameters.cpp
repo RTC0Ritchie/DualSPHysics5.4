@@ -33,6 +33,11 @@ void UserParameters::Reset(){
   FlexRestartRequested=false;
   FlexRestartSourceRequested=0;
 
+  FlexRestartElasticInput=0;
+  FlexRestartElasticFile.clear();
+  FlexRestartFileVariableType=0;
+  FlexRestartSpecialField=0;
+
   FlexRestartRestorePairs=false;
   FlexRestartGradientCorrection=false;
   FlexRestartHourglassCorrection=false;
@@ -317,7 +322,8 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     }
 
     xml->CheckAttributeNames(restart,"enabled comment");
-    xml->CheckElementNames(restart,true,"restartsource");
+    xml->CheckElementNames(
+        restart,true,"restartsource elasticinput");
 
     FlexRestartRequested=
         xml->GetAttributeBool(
@@ -359,6 +365,7 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
           "restartsource: 1 (prescribed) or 2 (model_transfer).",
           xml->ErrGetFileRow(restart));
     }
+    LoadRestartElasticInputXml(xml,restart);
   }
 
   // ------------------------------------------------------------
@@ -446,6 +453,130 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
   // Print only after all checks succeed.
   VisuConfig(log);
 
+}
+
+void UserParameters::LoadRestartElasticInputXml(
+    const JXml* xml,const TiXmlElement* restart)
+{
+  const TiXmlElement* input=
+      restart->FirstChildElement("elasticinput");
+
+  if(!input){
+    if(FlexRestartRequested){
+      Run_ExceptioonFile(
+          "User.restart enabled=true requires elasticinput.",
+          xml->ErrGetFileRow(restart));
+    }
+    return;
+  }
+
+  if(input->NextSiblingElement("elasticinput")){
+    Run_ExceptioonFile(
+        "Repeated User.restart.elasticinput node.",
+        xml->ErrGetFileRow(input));
+  }
+
+  xml->CheckAttributeNames(input,"source comment");
+
+  FlexRestartElasticInput=
+      xml->GetAttributeInt(input,"source");
+
+  if(FlexRestartElasticInput==1){
+    xml->CheckElementNames(input,true,"file");
+
+    const TiXmlElement* file=
+        input->FirstChildElement("file");
+
+    if(!file){
+      Run_ExceptioonFile(
+          "Elastic file input requires a file node.",
+          xml->ErrGetFileRow(input));
+      return;
+    }
+
+    if(file->NextSiblingElement("file")){
+      Run_ExceptioonFile(
+          "Repeated elastic input file node.",
+          xml->ErrGetFileRow(file));
+    }
+
+    xml->CheckAttributeNames(
+        file,"filename variabletype comment");
+
+    if(file->FirstChildElement()){
+      Run_ExceptioonFile(
+          "Elastic input file does not accept child elements.",
+          xml->ErrGetFileRow(file));
+    }
+
+    FlexRestartElasticFile=
+        xml->GetAttributeStr(file,"filename");
+
+    if(FlexRestartElasticFile.find_first_not_of(
+        " \t\r\n")==std::string::npos)
+    {
+      Run_ExceptioonFile(
+          "Elastic input filename must not be empty.",
+          xml->ErrGetFileRow(file));
+    }
+
+    FlexRestartFileVariableType=
+        xml->GetAttributeInt(file,"variabletype");
+
+    if(FlexRestartFileVariableType!=1 &&
+       FlexRestartFileVariableType!=2)
+    {
+      Run_ExceptioonFile(
+          "Elastic file variabletype must be "
+          "1 (deformation_gradient) or 2 (cauchy_stress).",
+          xml->ErrGetFileRow(file));
+    }
+  }
+  else if(FlexRestartElasticInput==2){
+    xml->CheckElementNames(input,true,"specialfield");
+
+    const TiXmlElement* field=
+        input->FirstChildElement("specialfield");
+
+    if(!field){
+      Run_ExceptioonFile(
+          "Special-field input requires a specialfield node.",
+          xml->ErrGetFileRow(input));
+      return;
+    }
+
+    if(field->NextSiblingElement("specialfield")){
+      Run_ExceptioonFile(
+          "Repeated specialfield node.",
+          xml->ErrGetFileRow(field));
+    }
+
+    xml->CheckAttributeNames(field,"value comment");
+
+    if(field->FirstChildElement()){
+      Run_ExceptioonFile(
+          "Specialfield does not accept child elements.",
+          xml->ErrGetFileRow(field));
+    }
+
+    FlexRestartSpecialField=
+        xml->GetAttributeInt(field,"value");
+
+    if(FlexRestartSpecialField!=1 &&
+       FlexRestartSpecialField!=2)
+    {
+      Run_ExceptioonFile(
+          "Specialfield must be "
+          "1 (undeformed) or 2 (hydrostatic_pressure).",
+          xml->ErrGetFileRow(field));
+    }
+  }
+  else{
+    Run_ExceptioonFile(
+        "Elasticinput source must be "
+        "1 (file) or 2 (special_field).",
+        xml->ErrGetFileRow(input));
+  }
 }
 
 void UserParameters::LoadOutputXml(
@@ -868,6 +999,44 @@ void UserParameters::VisuConfig(JLog2* log)const{
       FlexRestartSourceRequested,
       requestedSource,
       FlexRestartRequested ? "enabled" : "inactive");
+
+  const char* elasticInput=
+      FlexRestartElasticInput==1 ? "file" :
+      FlexRestartElasticInput==2 ? "special_field" :
+      "unspecified";
+
+  log->Printf(
+      "  FlexRestart.ElasticInput: %d (%s; %s)",
+      FlexRestartElasticInput,
+      elasticInput,
+      FlexRestartRequested ? "enabled" : "inactive");
+
+  if(FlexRestartElasticInput==1){
+    const char* variableType=
+        FlexRestartFileVariableType==1
+        ? "deformation_gradient"
+        : "cauchy_stress";
+
+    log->Printf(
+        "  FlexRestart.ElasticFile: %s",
+        FlexRestartElasticFile.c_str());
+
+    log->Printf(
+        "  FlexRestart.FileVariableType: %d (%s)",
+        FlexRestartFileVariableType,
+        variableType);
+  }
+  else if(FlexRestartElasticInput==2){
+    const char* specialField=
+        FlexRestartSpecialField==1
+        ? "undeformed"
+        : "hydrostatic_pressure";
+
+    log->Printf(
+        "  FlexRestart.SpecialField: %d (%s)",
+        FlexRestartSpecialField,
+        specialField);
+  }
 }
 
 void UserParameters::ConfigFlexRestartCorrections(

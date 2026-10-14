@@ -46,11 +46,23 @@ public:
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
 
+
   // Explicit User restart request; mutually exclusive with SPH restart.
   bool FlexRestartRequested;
   // XML restartsource: 0=unspecified, 1=prescribed, 2=model_transfer.
   // Required when FlexRestartRequested is true.
   int FlexRestartSourceRequested;
+
+
+  // Elastic information source: 0=unspecified, 1=file, 2=special_field.
+  int FlexRestartElasticInput;
+  // File input configuration.
+  std::string FlexRestartElasticFile;
+  // 0=unspecified, 1=deformation_gradient, 2=cauchy_stress.
+  int FlexRestartFileVariableType;
+
+  // Special field: 0=unspecified, 1=undeformed, 2=hydrostatic_pressure.
+  int FlexRestartSpecialField;
 
   bool FlexRestartRestorePairs;
   bool FlexRestartGradientCorrection;
@@ -289,6 +301,8 @@ public:
 
 private:
   void LoadOutputXml(const JXml* xml,const TiXmlElement* userNode);
+  void LoadRestartElasticInputXml(
+      const JXml* xml,const TiXmlElement* restart);
 
 };
 

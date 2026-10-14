@@ -105,6 +105,8 @@ protected:
   void InitFlexRestartFromModelTransfer();
   void CompleteFlexRestartMaterialState();
   
+  void InitFlexRestartUndeformed();
+  
   void SaveFlexData();
   void LoadFlexDirectContinuationState();
 
