@@ -1292,6 +1292,18 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   
   //<vs_flexstruc_ini>
   //-Checks invalid options for flexible structures.
+  if(User->FlexRestartRequested && PartBegin){
+    Run_Exceptioon(
+        "User restart and SPH restart are mutually exclusive. "
+        "Disable User.restart for direct continuation, "
+        "or remove -partbegin for User restart.");
+  }
+
+  if(User->FlexRestartRequested && !Cpu){
+    Run_Exceptioon(
+        "FlexRestart: User restart sources "
+        "are currently supported on CPU only.");
+  }
   if(FlexStruc){
     //if(PartBegin)   Run_Exceptioon("Simulation restart not allowed when flexible structures are used.");
     if(PeriActive)  Run_Exceptioon("Flexible structures are not allowed with periodic conditions.");

@@ -1167,7 +1167,7 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   //-Load parameters and input data.
   LoadConfig(cfg);
   LoadCaseParticles();
-  User->ConfigFlexRestartCorrections(
+  User->ConfigFlexRestartMode(
     PartBegin!=0,
     FlexStruc && FlexStruc->GetCount()>0,
     Log);
@@ -1472,9 +1472,9 @@ void JSphCpuSingle::FlexStrucInit(){
   //-Set the indices for each particle pair.
   JSphCpu::SetFlexStrucPairs(CaseNflexstruc,Pos0c,PairIdxc);
   // Load F* and Xn/X0 material quantities before kernel correction.
-  LoadFlexDataRestart();
+  InitFlexRestartState();
   //-Calculate kernel correction and update geometry.
-  InitFlexRestartReference();
+  InitFlexRestartReferenceAndCorrections();
   JSphCpu::CalcFlexStrucKerCorr();
   JSphCpu::UpdateFlexStrucGeometry();
   Log->Print("");

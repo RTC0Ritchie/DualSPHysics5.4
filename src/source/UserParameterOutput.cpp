@@ -493,8 +493,8 @@ void JSphCpuSingle::SaveUserOutput(
           }
 
           tmatrix3f fstar=TMatrix3f();
-          if(PartBegin){
-            fstar=User.GetFlexRestartDefGrad(pfs,id);
+          if(User.IsFlexRestart()){
+            fstar=User.GetFlexRestartFstar(pfs,id);
           }
 
           const tmatrix3f f=

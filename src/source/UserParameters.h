@@ -46,6 +46,12 @@ public:
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
 
+  // Explicit User restart request; mutually exclusive with SPH restart.
+  bool FlexRestartRequested;
+  // XML restartsource: 0=unspecified, 1=prescribed, 2=model_transfer.
+  // Required when FlexRestartRequested is true.
+  int FlexRestartSourceRequested;
+
   bool FlexRestartRestorePairs;
   bool FlexRestartGradientCorrection;
   bool FlexRestartHourglassCorrection;
@@ -98,28 +104,29 @@ public:
 
   // Inner variables and functions, not directly accessible to users.
   // Runtime restart state, indexed by flexible-particle index.
-  struct StFlexRestartHistory{
+  struct StFlexRestartState{
     // All per-particle arrays use the current flexible-particle index.
     std::vector<unsigned> Idp;
 
     // F*: Xn -> this run's fixed reference X0.
-    std::vector<tmatrix3f> DefGrad;
+    std::vector<tmatrix3f> Fstar;
     std::vector<float> Jstar;
 
     // Natural configuration Xn.
-    std::vector<float> VolN;
-    std::vector<float> RhoN;
+    std::vector<float> NaturalVolume;
+    std::vector<float> NaturalDensity;
 
     // Fixed reference configuration X0 of this run.
-    std::vector<float> Vol0;
-    std::vector<float> Rho0;
+    std::vector<float> ReferenceVolume;
+    std::vector<float> ReferenceDensity;
 
     // Invariant particle mass.
-    std::vector<float> Mass;
+    std::vector<float> ParticleMass;
 
-    // Original normal-run reference history.
-    // Never overwrite these arrays with a later restart's X0.
-    bool HasReferenceHistory=false;
+    // Natural-reference geometry and discretization data.
+    // Supplied by the selected restart source when available.
+    // Never replace these data with the current reference geometry X0.
+    bool HasNaturalReferenceData=false;
 
     unsigned ReferenceKernel=0;
     float ReferenceH=0;
@@ -159,16 +166,16 @@ public:
 
     void Clear(){
       Idp.clear();
-      DefGrad.clear();
+      Fstar.clear();
       Jstar.clear();
 
-      VolN.clear();
-      RhoN.clear();
-      Vol0.clear();
-      Rho0.clear();
-      Mass.clear();
+      NaturalVolume.clear();
+      NaturalDensity.clear();
+      ReferenceVolume.clear();
+      ReferenceDensity.clear();
+      ParticleMass.clear();
 
-      HasReferenceHistory=false;
+      HasNaturalReferenceData=false;
       ReferenceKernel=0;
       ReferenceH=0;
       Reference2D=false;
@@ -192,21 +199,23 @@ public:
       HourglassReady=false;
     }
 
-    bool Available()const{
+    // Checks array layout only; numerical validity is checked separately.
+    bool HasRestartStateLayout()const{
       const size_t n=Idp.size();
 
       return n &&
-          DefGrad.size()==n &&
+          Fstar.size()==n &&
           Jstar.size()==n &&
-          VolN.size()==n &&
-          RhoN.size()==n &&
-          Vol0.size()==n &&
-          Rho0.size()==n &&
-          Mass.size()==n;
+          NaturalVolume.size()==n &&
+          NaturalDensity.size()==n &&
+          ReferenceVolume.size()==n &&
+          ReferenceDensity.size()==n &&
+          ParticleMass.size()==n;
     }
 
-    bool ReferenceAvailable()const{
-      return HasReferenceHistory &&
+    // Checks reference layout only; this is not full reference validation.
+    bool HasNaturalReferenceLayout()const{
+      return HasNaturalReferenceData &&
           NaturalPos.size()==Idp.size() &&
           NaturalKerCorr.size()==Idp.size() &&
           PairOffset.size()==Idp.size()+1 &&
@@ -216,14 +225,14 @@ public:
     }
   };
 
-  StFlexRestartHistory FlexRestartHistory;
+  StFlexRestartState FlexRestartState;
 
-  // Retrieve history by flexible index and verify particle identity.
-  const tmatrix3f& GetFlexRestartDefGrad(
+  // Retrieve Fstar by flexible index and verify particle identity.
+  const tmatrix3f& GetFlexRestartFstar(
       unsigned pfs,unsigned idp)const;
 
   // Requests qualified by the current execution mode.
-  // These flags do not mean that the numerical correction is implemented yet.
+  // Enabled corrections still require suitable natural-reference data.
   bool UseFlexRestartRestorePairs;
   bool UseFlexRestartGradientCorrection;
   bool UseFlexRestartHourglassCorrection;
@@ -236,7 +245,43 @@ public:
   std::string FlexReferenceId;
 
   void ConfigFlexRestartCorrections(
-      bool restart,
+      bool isDirectContinuation,
+      bool hasflex,
+      JLog2* log);
+
+
+  // Resolved elastic restart source for this run.
+  // XML source values are mapped explicitly; do not cast them to this enum.
+  enum class TpFlexRestartSource{
+    None,
+    DirectContinuation,
+    Prescribed,
+    ModelTransfer
+  };
+
+  TpFlexRestartSource FlexRestartSource;
+
+  bool IsFlexRestart()const{
+    return FlexRestartSource!=TpFlexRestartSource::None;
+  }
+
+  bool IsFlexDirectContinuation()const{
+    return FlexRestartSource==
+        TpFlexRestartSource::DirectContinuation;
+  }
+
+  bool IsFlexPrescribedRestart()const{
+    return FlexRestartSource==
+        TpFlexRestartSource::Prescribed;
+  }
+
+  bool IsFlexModelTransferRestart()const{
+    return FlexRestartSource==
+        TpFlexRestartSource::ModelTransfer;
+  }
+
+  void ConfigFlexRestartMode(
+      bool particleContinuation,
       bool hasflex,
       JLog2* log);
 

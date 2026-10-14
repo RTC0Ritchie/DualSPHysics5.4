@@ -99,12 +99,17 @@ protected:
   void SaveData();
   void SaveExtraData();
   void FinishRun(bool stop);
-
+  
+  void InitFlexRestartState();
+  void InitFlexRestartFromPrescribed();
+  void InitFlexRestartFromModelTransfer();
+  void CompleteFlexRestartMaterialState();
+  
   void SaveFlexData();
-  void LoadFlexDataRestart();
+  void LoadFlexDirectContinuationState();
 
   void SaveFlexReferenceOnce();
-  void LoadFlexReferenceRestart();
+  void LoadFlexDirectContinuationReference();
 
   void RestoreFlexRestartPairs();
 
@@ -112,7 +117,7 @@ protected:
   void PrepareFlexRestartGradientCorrection();
   void PrepareFlexRestartHourglassCorrection();
 
-  void InitFlexRestartReference();
+  void InitFlexRestartReferenceAndCorrections();
 
   void SaveUserOutput(
     unsigned npsave,

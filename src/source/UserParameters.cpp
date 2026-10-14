@@ -30,6 +30,9 @@ void UserParameters::Reset(){
 
   SaveFlexData=false;
 
+  FlexRestartRequested=false;
+  FlexRestartSourceRequested=0;
+
   FlexRestartRestorePairs=false;
   FlexRestartGradientCorrection=false;
   FlexRestartHourglassCorrection=false;
@@ -37,7 +40,7 @@ void UserParameters::Reset(){
   OutputObjects.clear();
 
 
-  FlexRestartHistory.Clear();
+  FlexRestartState.Clear();
   
   UseFlexRestartRestorePairs=false;
   UseFlexRestartGradientCorrection=false;
@@ -45,6 +48,8 @@ void UserParameters::Reset(){
 
   FlexReferenceWritten=false;
   FlexReferenceId.clear();
+
+  FlexRestartSource=TpFlexRestartSource::None;
 }
 
 void UserParameters::LoadXml(const JXml* xml,JLog2* log){
@@ -60,7 +65,8 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     return;
   }
   const TiXmlElement* root=node->ToElement();
-  xml->CheckElementNames(root,true,"*parameter output");
+  xml->CheckElementNames(
+      root,true,"*parameter output restart directcontinuation");
 
   // Record active parameter nodes and reject duplicate keys.
   std::map<std::string,const TiXmlElement*> nodes;
@@ -295,32 +301,147 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
 
   SaveFlexData=(saveflexdata==1);
 
-  const auto readbool=[&](const std::string& key) -> bool {
-    const std::string value=
-        parameters.GetValueStr(key,true,"false");
 
-    if(value=="true" || value=="1")
-      return true;
+  // ------------------------------------------------------------
+  // Explicit elastic restart request.
+  // ------------------------------------------------------------
 
-    if(value=="false" || value=="0")
+  const TiXmlElement* restart=
+      root->FirstChildElement("restart");
+
+  if(restart){
+    if(restart->NextSiblingElement("restart")){
+      Run_ExceptioonFile(
+          "Repeated User.restart node.",
+          xml->ErrGetFileRow(restart));
+    }
+
+    xml->CheckAttributeNames(restart,"enabled comment");
+    xml->CheckElementNames(restart,true,"restartsource");
+
+    FlexRestartRequested=
+        xml->GetAttributeBool(
+            restart,"enabled",true,false);
+
+    const TiXmlElement* source=
+        restart->FirstChildElement("restartsource");
+
+    if(source){
+      if(source->NextSiblingElement("restartsource")){
+        Run_ExceptioonFile(
+            "Repeated User.restart.restartsource node.",
+            xml->ErrGetFileRow(source));
+      }
+
+      xml->CheckAttributeNames(source,"value comment");
+
+      if(source->FirstChildElement()){
+        Run_ExceptioonFile(
+            "User.restart.restartsource does not accept child elements.",
+            xml->ErrGetFileRow(source));
+      }
+
+      FlexRestartSourceRequested=
+          xml->GetAttributeInt(source,"value");
+
+      if(FlexRestartSourceRequested!=1 &&
+         FlexRestartSourceRequested!=2)
+      {
+        Run_ExceptioonFile(
+            "User.restart.restartsource must be "
+            "1 (prescribed) or 2 (model_transfer).",
+            xml->ErrGetFileRow(source));
+      }
+    }
+    else if(FlexRestartRequested){
+      Run_ExceptioonFile(
+          "User.restart enabled=true requires an explicit "
+          "restartsource: 1 (prescribed) or 2 (model_transfer).",
+          xml->ErrGetFileRow(restart));
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Direct-continuation corrections.
+  // Accept the new node or the legacy parameter keys, not both.
+  // ------------------------------------------------------------
+
+  const TiXmlElement* continuation=
+      root->FirstChildElement("directcontinuation");
+
+  const bool hasLegacyCorrections=
+      nodes.find("FlexRestartRestorePairs")!=nodes.end() ||
+      nodes.find("FlexRestartGradientCorrection")!=nodes.end() ||
+      nodes.find("FlexRestartHourglassCorrection")!=nodes.end();
+
+  if(continuation){
+    if(continuation->NextSiblingElement("directcontinuation")){
+      Run_ExceptioonFile(
+          "Repeated User.directcontinuation node.",
+          xml->ErrGetFileRow(continuation));
+    }
+
+    if(hasLegacyCorrections){
+      Run_ExceptioonFile(
+          "User.directcontinuation cannot be combined with "
+          "legacy FlexRestart correction parameters.",
+          xml->ErrGetFileRow(continuation));
+    }
+
+    xml->CheckAttributeNames(
+        continuation,
+        "restorepairs gradientcorrection hourglasscorrection comment");
+
+    if(continuation->FirstChildElement()){
+      Run_ExceptioonFile(
+          "User.directcontinuation does not accept child elements.",
+          xml->ErrGetFileRow(continuation));
+    }
+
+    FlexRestartRestorePairs=
+        xml->GetAttributeBool(
+            continuation,"restorepairs",true,false);
+
+    FlexRestartGradientCorrection=
+        xml->GetAttributeBool(
+            continuation,"gradientcorrection",true,false);
+
+    FlexRestartHourglassCorrection=
+        xml->GetAttributeBool(
+            continuation,"hourglasscorrection",true,false);
+  }
+  else{
+    // Compatibility with existing XML files.
+    const auto readbool=[&](const std::string& key) -> bool {
+      const std::string value=
+          parameters.GetValueStr(key,true,"false");
+
+      if(value=="true" || value=="1")
+        return true;
+
+      if(value=="false" || value=="0")
+        return false;
+
+      Run_Exceptioon(
+          std::string("User.")+key+
+          " must be true/false or 1/0.");
+
       return false;
+    };
 
-    Run_Exceptioon(
-        std::string("User.")+key+
-        " must be true/false or 1/0.");
+    FlexRestartRestorePairs=
+        readbool("FlexRestartRestorePairs");
 
-    return false;
-  };
+    FlexRestartGradientCorrection=
+        readbool("FlexRestartGradientCorrection");
 
-  FlexRestartRestorePairs=
-      readbool("FlexRestartRestorePairs");
+    FlexRestartHourglassCorrection=
+        readbool("FlexRestartHourglassCorrection");
+  }
 
-  FlexRestartGradientCorrection=
-      readbool("FlexRestartGradientCorrection");
-
-  FlexRestartHourglassCorrection=
-      readbool("FlexRestartHourglassCorrection");
-
+  // ------------------------------------------------------------
+  // Output configuration.
+  // ------------------------------------------------------------
   LoadOutputXml(xml,root);
   // Print only after all checks succeed.
   VisuConfig(log);
@@ -735,14 +856,26 @@ void UserParameters::VisuConfig(JLog2* log)const{
 
   log->Printf("  SaveFlexData: %s",
             SaveFlexData ? "true" : "false");
+  log->Printf("  FlexRestart.Requested: %s",
+      FlexRestartRequested ? "true" : "false");
+  const char* requestedSource=
+      FlexRestartSourceRequested==1 ? "prescribed" :
+      FlexRestartSourceRequested==2 ? "model_transfer" :
+      "unspecified";
+
+  log->Printf(
+      "  FlexRestart.SourceRequested: %d (%s; %s)",
+      FlexRestartSourceRequested,
+      requestedSource,
+      FlexRestartRequested ? "enabled" : "inactive");
 }
 
 void UserParameters::ConfigFlexRestartCorrections(
-    bool restart,
+    bool isDirectContinuation,
     bool hasflex,
     JLog2* log)
 {
-  const bool applicable=restart && hasflex;
+  const bool applicable=isDirectContinuation && hasflex;
 
   UseFlexRestartRestorePairs=
       applicable && FlexRestartRestorePairs;
@@ -754,50 +887,115 @@ void UserParameters::ConfigFlexRestartCorrections(
       applicable && FlexRestartHourglassCorrection;
 
   const auto reportUnused=
-      [&](const char* key,bool requested)
+      [&](const char* option,bool requested)
   {
     if(!requested || applicable || !log)
       return;
 
     log->Printf(
-        "User.%s: unused (%s%s%s).",
-        key,
-        !restart ? "not a restart" : "",
-        !restart && !hasflex ? "; " : "",
-        !hasflex ? "no flexible particles" : "");
+        "User.directcontinuation.%s: unused (%s%s%s).",
+        option,
+        !isDirectContinuation ? "not direct continuation" : "",
+        !isDirectContinuation && !hasflex ? "; " : "",
+        !hasflex ? "no flexible structures" : "");
   };
 
   reportUnused(
-      "FlexRestartRestorePairs",
+      "restorepairs",
       FlexRestartRestorePairs);
 
   reportUnused(
-      "FlexRestartGradientCorrection",
+      "gradientcorrection",
       FlexRestartGradientCorrection);
 
   reportUnused(
-      "FlexRestartHourglassCorrection",
+      "hourglasscorrection",
       FlexRestartHourglassCorrection);
 
-  // Check dependencies only when these options actually apply.
+  // Check dependencies only when direct-continuation corrections apply.
   if(UseFlexRestartGradientCorrection &&
      !UseFlexRestartRestorePairs)
   {
     Run_Exceptioon(
-        "User.FlexRestartGradientCorrection requires "
-        "User.FlexRestartRestorePairs=true.");
+        "Direct-continuation gradient correction requires "
+        "pair restoration: set restorepairs=true "
+        "(legacy parameter: FlexRestartRestorePairs).");
   }
 }
 
-const tmatrix3f& UserParameters::GetFlexRestartDefGrad(
+const tmatrix3f& UserParameters::GetFlexRestartFstar(
     unsigned pfs,unsigned idp)const
 {
-  if(pfs>=FlexRestartHistory.DefGrad.size() ||
-     pfs>=FlexRestartHistory.Idp.size())
-    Run_Exceptioon("Flexible restart history is unavailable.");
+  if(pfs>=FlexRestartState.Fstar.size() ||
+     pfs>=FlexRestartState.Idp.size())
+    Run_Exceptioon("FlexRestart: restart state is unavailable.");
 
-  if(FlexRestartHistory.Idp[pfs]!=idp)
-    Run_Exceptioon("Flexible restart history particle ID mismatch.");
+  if(FlexRestartState.Idp[pfs]!=idp)
+    Run_Exceptioon("FlexRestart: particle ID mismatch.");
 
-  return FlexRestartHistory.DefGrad[pfs];
+  return FlexRestartState.Fstar[pfs];
+}
+
+void UserParameters::ConfigFlexRestartMode(
+    bool particleContinuation,
+    bool hasflex,
+    JLog2* log)
+{
+  FlexRestartSource=TpFlexRestartSource::None;
+
+  if(FlexRestartRequested && particleContinuation){
+    Run_Exceptioon(
+        "User restart and SPH restart are mutually exclusive. "
+        "Disable User.restart for direct continuation, "
+        "or remove -partbegin for User restart.");
+  }
+
+  if(FlexRestartRequested && !hasflex){
+    Run_Exceptioon(
+        "User.restart requires flexible structures.");
+  }
+
+  if(hasflex){
+    if(particleContinuation){
+      FlexRestartSource=
+          TpFlexRestartSource::DirectContinuation;
+    }
+    else if(FlexRestartRequested){
+      switch(FlexRestartSourceRequested){
+        case 1:
+          FlexRestartSource=
+              TpFlexRestartSource::Prescribed;
+          break;
+
+        case 2:
+          FlexRestartSource=
+              TpFlexRestartSource::ModelTransfer;
+          break;
+
+        default:
+          Run_Exceptioon(
+              "User.restart requires restartsource "
+              "1 (prescribed) or 2 (model_transfer).");
+          break;
+      }
+    }
+  }
+
+  ConfigFlexRestartCorrections(
+      IsFlexDirectContinuation(),
+      hasflex,
+      log);
+
+  if(log){
+    const char* source=
+        IsFlexDirectContinuation() ? "direct_continuation" :
+        IsFlexPrescribedRestart() ? "prescribed" :
+        IsFlexModelTransferRestart() ? "model_transfer" :
+        "none";
+
+    log->Printf(
+        "FlexRestart: active=%s; source=%s.",
+        IsFlexRestart() ? "true" : "false",
+        source);
+  }
 }

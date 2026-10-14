@@ -62,26 +62,26 @@ namespace {
 }
 
 namespace {
-  namespace FlexRestartTest {
+  namespace FlexRestartCorrection {
 
   inline bool ForceCacheReady(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       bool useGradient,
       bool useHourglass);
 
   inline bool GradientCacheReady(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       unsigned np);
 
   template<bool simulate2d>
   inline tmatrix3f DefGrad(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       unsigned pfs1,
       const tdouble3* pos,
       const unsigned* flexstrucridp);
 
   inline void AddElastic(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       size_t k,
       unsigned pfs1,
       unsigned pfs2,
@@ -91,7 +91,7 @@ namespace {
 
   template<TpKernel tker>
   inline void AddHourglass(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       size_t k,
       const tmatrix3f& defgradp1,
       const tmatrix3f& defgradp2,
@@ -199,20 +199,20 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
 
   // Prepare constitutive quantities once per flexible particle.
   // Includes clamp particles, which can appear as neighbours.
-  const bool useHistory=(PartBegin!=0);
-  const auto& history=User.FlexRestartHistory;
+  const bool isRestart=User.IsFlexRestart();
+  const auto& state=User.FlexRestartState;
 
-  if(useHistory &&
-    (!history.Available() || history.Idp.size()!=np))
-    Run_Exceptioon("Flexible restart state is unavailable.");
+  if(isRestart &&
+    (!state.HasRestartStateLayout() || state.Idp.size()!=np))
+    Run_Exceptioon("FlexRestart: restart state is unavailable.");
 
   const bool useGradient=
-      useHistory && User.UseFlexRestartGradientCorrection;
+      isRestart && User.UseFlexRestartGradientCorrection;
 
   const bool useHourglass=
-      useHistory && User.UseFlexRestartHourglassCorrection;
+      isRestart && User.UseFlexRestartHourglassCorrection;
 
-  if(!FlexRestartTest::ForceCacheReady(history,useGradient,useHourglass))
+  if(!FlexRestartCorrection::ForceCacheReady(state,useGradient,useHourglass))
     Run_Exceptioon("Flexible correction cache is unavailable.");
 
   std::vector<tmatrix3f> flexPk1Reference(
@@ -235,7 +235,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
     if(!std::isfinite(jrelative) || jrelative<=0.f)
       Run_Exceptioon("Invalid relative deformation determinant.");
 
-    if(!useHistory){
+    if(!isRestart){
       // Ordinary simulation: use original material fields directly.
       const tmatrix3f pk1=
           CalcFlexStrucPK1Stress(frelative,material.cmat);
@@ -250,9 +250,9 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
     else{
       // Verify stable particle identity.
       const tmatrix3f& fstar=
-          User.GetFlexRestartDefGrad(pfs,id);
+          User.GetFlexRestartFstar(pfs,id);
 
-      const float jstar=history.Jstar[pfs];
+      const float jstar=state.Jstar[pfs];
 
       // Total deformation relative to Xn.
       const tmatrix3f ftotal=
@@ -274,7 +274,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       if(useGradient) flexPk1Reference[pfs]=preference;
 
       // Current density from the X0 reference density.
-      flexDensity[pfs]=history.Rho0[pfs]/jrelative;
+      flexDensity[pfs]=state.ReferenceDensity[pfs]/jrelative;
 
       /// Restart: store P_t/0 * B_0 without volume weights.
       // Vi*Vj is applied in the particle-pair loop.
@@ -316,8 +316,8 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
 
       //-Get current mass of flexible structure particle.
       const float mass0p1=
-        useHistory
-        ? history.Mass[pfs1]
+        isRestart
+        ? state.ParticleMass[pfs1]
         : vol0p1*rho0p1;
       const float rhop1=flexDensity[pfs1];
 
@@ -502,7 +502,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
         //-Acceleration due to structure.
         const tmatrix3f defgradp2=defgrad[pfs2];
         if(useGradient){
-          FlexRestartTest::AddElastic(history,history.CorrectionOffset[pfs1]+pair,pfs1,pfs2,flexPk1Reference.data(),mass0p1,acep1);
+          FlexRestartCorrection::AddElastic(state,state.CorrectionOffset[pfs1]+pair,pfs1,pfs2,flexPk1Reference.data(),mass0p1,acep1);
         }
         else{
           const tmatrix3f pk1kercorrp2=flexForceMatrix[pfs2];
@@ -514,9 +514,9 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           pk1kercorrdw.x=pk1kercorrp1p2.a11*frx0+pk1kercorrp1p2.a12*fry0+pk1kercorrp1p2.a13*frz0;
           pk1kercorrdw.y=pk1kercorrp1p2.a21*frx0+pk1kercorrp1p2.a22*fry0+pk1kercorrp1p2.a23*frz0;
           pk1kercorrdw.z=pk1kercorrp1p2.a31*frx0+pk1kercorrp1p2.a32*fry0+pk1kercorrp1p2.a33*frz0;
-          if(useHistory){
+          if(isRestart){
             const float pairVolume=
-                history.Vol0[pfs1]*history.Vol0[pfs2];
+                state.ReferenceVolume[pfs1]*state.ReferenceVolume[pfs2];
 
             const float forceToAcceleration=pairVolume/mass0p1;
 
@@ -541,7 +541,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
           const float drz=float(posp1.z-posp2.z);
           const float rr2=drx*drx+dry*dry+drz*drz;
           if(useHourglass){
-            FlexRestartTest::AddHourglass<tker>(history,history.CorrectionOffset[pfs1]+pair,defgradp1,defgradp2,
+            FlexRestartCorrection::AddHourglass<tker>(state,state.CorrectionOffset[pfs1]+pair,defgradp1,defgradp2,
               TFloat3(drx,dry,drz),rr2,CSP,hgfactor,youngmod,mass0p1,acep1);
           }
           else{
@@ -557,8 +557,8 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
             const float rr=sqrt(rr2);
             const float deltaij=(epsij.x*drx+epsij.y*dry+epsij.z*drz)/rr;
             const float deltaji=-(epsji.x*drx+epsji.y*dry+epsji.z*drz)/rr;
-            const float hgPairVolume = useHistory
-              ? history.Vol0[pfs1]*history.Vol0[pfs2]
+            const float hgPairVolume = isRestart
+              ? state.ReferenceVolume[pfs1]*state.ReferenceVolume[pfs2]
               : vol0p1*vol0p1;
             const float mulfac = hgfactor*hgPairVolume*wab*youngmod/(rr20*rr*mass0p1)*0.5f*(deltaij+deltaji);
             acep1.x-=mulfac*drx; acep1.y-=mulfac*dry; acep1.z-=mulfac*drz;
@@ -627,12 +627,12 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucKerCorr(unsig
         ,const unsigned* flexstrucridp,const tdouble3* pos0,const unsigned* numpairs,const unsigned* const* pairidx
         ,tmatrix3f* kercorr)const
 { 
-  const bool useHistory=(PartBegin!=0);
-  const auto& history=User->FlexRestartHistory;
+  const bool isRestart=User->IsFlexRestart();
+  const auto& state=User->FlexRestartState;
 
-  if(useHistory &&
-    (!history.Available() || history.Idp.size()!=np))
-    Run_Exceptioon("Flexible restart state is unavailable.");
+  if(isRestart &&
+    (!state.HasRestartStateLayout() || state.Idp.size()!=np))
+    Run_Exceptioon("FlexRestart: restart state is unavailable.");
 
   //-Starts execution using OpenMP.
   const int n=int(np);
@@ -659,7 +659,7 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucKerCorr(unsig
         // Restart: neighbour volume in X0.
         // Ordinary simulation: preserve the original central-volume weighting.
         const float pairWeightVolume=
-            useHistory ? history.Vol0[pfs2] : vol0p1;
+            isRestart ? state.ReferenceVolume[pfs2] : vol0p1;
         const tdouble3 pos0p2=pos0[pfs2];
         const float drx0=float(pos0p1.x-pos0p2.x);
         const float dry0=float(pos0p1.y-pos0p2.y);
@@ -727,17 +727,17 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGrad(unsig
     ,const tdouble3* pos0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr
     ,tmatrix3f* defgrad)const
 {
-  const bool useHistory=(PartBegin!=0);
-  const auto& history=User->FlexRestartHistory;
+  const bool isRestart=User->IsFlexRestart();
+  const auto& state=User->FlexRestartState;
 
-  if(useHistory &&
-    (!history.Available() || history.Idp.size()!=np))
-    Run_Exceptioon("Flexible restart state is unavailable.");
+  if(isRestart &&
+    (!state.HasRestartStateLayout() || state.Idp.size()!=np))
+    Run_Exceptioon("FlexRestart: restart state is unavailable.");
 
   const bool useGradient=
-    useHistory && User->UseFlexRestartGradientCorrection;
+    isRestart && User->UseFlexRestartGradientCorrection;
 
-  if(useGradient && !FlexRestartTest::GradientCacheReady(history,np))
+  if(useGradient && !FlexRestartCorrection::GradientCacheReady(state,np))
     Run_Exceptioon("Flexible gradient cache is unavailable.");
 
   //-Starts execution using OpenMP.
@@ -752,8 +752,8 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGrad(unsig
     const unsigned numpairsp1=numpairs[pfs1];
 
     if(useGradient){
-      defgrad[pfs1]=FlexRestartTest::DefGrad<simulate2d>(
-          history,pfs1,pos,flexstrucridp);
+      defgrad[pfs1]=FlexRestartCorrection::DefGrad<simulate2d>(
+          state,pfs1,pos,flexstrucridp);
 
       continue;
     }
@@ -775,7 +775,7 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGrad(unsig
         // Restart: neighbour volume in X0.
         // Ordinary simulation: preserve the original central-volume weighting.
         const float pairWeightVolume=
-            useHistory ? history.Vol0[pfs2] : vol0p1;
+            isRestart ? state.ReferenceVolume[pfs2] : vol0p1;
         const unsigned p2=flexstrucridp[pfs2];
         const tdouble3 posp2=pos[p2];
         const tdouble3 pos0p2=pos0[pfs2];
@@ -840,217 +840,179 @@ void JSphCpu::UpdateFlexStrucGeometry()const{
   if(CaseNflexstruc&&TMdbc2>=MDBC2_Std)CalcFlexStrucNormals();
 }
 
-void JSphCpuSingle::PrepareFlexRestartPairCache()
+//==============================================================================
+/// Initialises elastic restart state from the selected source.
+//==============================================================================
+
+void JSphCpuSingle::InitFlexRestartState()
 {
-  auto& h=User->FlexRestartHistory;
-  const unsigned n=CaseNflexstruc;
+  User->FlexRestartState.Clear();
+  User->FlexReferenceId.clear();
+  User->FlexReferenceWritten=false;
 
-  if(!h.Available() ||
-     !h.ReferenceAvailable() ||
-     h.Idp.size()!=n)
-  {
-    Run_Exceptioon(
-        "Flexible correction history is unavailable.");
-  }
-
-  // Both corrections share the same active pair layout.
-  if(!h.CorrectionOffset.empty())
+  if(!User->IsFlexRestart())
     return;
 
-  h.CorrectionOffset.resize(size_t(n)+1);
-  h.CorrectionOffset[0]=0;
+  if(!FlexStruc || !CaseNflexstruc){
+    Run_Exceptioon(
+        "FlexRestart: flexible particles are required.");
+  }
 
-  for(unsigned i=0;i<n;i++){
-    if(h.Idp[i]!=Idp_c->cptr()[FlexStrucRidpc[i]])
-      Run_Exceptioon(
-          "Flexible correction particle ID mismatch.");
+  if(User->IsFlexDirectContinuation()){
+    LoadFlexDirectContinuationState();
+  }
+  else if(User->IsFlexPrescribedRestart()){
+    InitFlexRestartFromPrescribed();
+  }
+  else if(User->IsFlexModelTransferRestart()){
+    InitFlexRestartFromModelTransfer();
+  }
+  else{
+    Run_Exceptioon(
+        "FlexRestart: unknown state initialisation source.");
+  }
 
-    if(User->UseFlexRestartGradientCorrection &&
-       !NumPairsc[i])
+  CompleteFlexRestartMaterialState();
+
+  const bool userRestart=
+      User->IsFlexPrescribedRestart() ||
+      User->IsFlexModelTransferRestart();
+
+  if(userRestart &&
+     User->FlexRestartState.HasNaturalReferenceLayout() &&
+     User->FlexReferenceId.empty())
+  {
+    User->FlexReferenceId=RunCode;
+  }
+}
+
+void JSphCpuSingle::InitFlexRestartFromPrescribed()
+{
+  // Future implementation:
+  //
+  // 1. Read the prescribed elastic field.
+  // 2. Map it to every flexible/clamp particle by stable Idp.
+  // 3. Fill FlexRestartState.Idp and Fstar.
+  // 4. Optionally fill validated natural-reference data
+  //    required by the requested corrections.
+  //
+  // Do not replace missing prescribed data with identity F.
+
+  Run_Exceptioon(
+      "FlexRestart.Prescribed: "
+      "initialisation is not implemented yet.");
+}
+
+void JSphCpuSingle::InitFlexRestartFromModelTransfer()
+{
+  // Future implementation:
+  //
+  // 1. Read particle-wise material information from the source model.
+  // 2. Map source particles to current flexible/clamp particles.
+  // 3. Convert source quantities to the target constitutive convention.
+  // 4. Build and validate the target elastic restart state.
+  // 5. Supply natural-reference data only when actually available.
+  //
+  // The current downstream path requires Idp and Fstar.
+  // Missing natural-reference information must not be fabricated.
+
+  Run_Exceptioon(
+      "FlexRestart.ModelTransfer: "
+      "initialisation is not implemented yet.");
+}
+
+void JSphCpuSingle::CompleteFlexRestartMaterialState()
+{
+  auto& state=User->FlexRestartState;
+  const unsigned nf=CaseNflexstruc;
+
+  if(state.Idp.size()!=nf ||
+     state.Fstar.size()!=nf)
+  {
+    Run_Exceptioon(
+        "FlexRestart: incomplete restart state.");
+  }
+
+  state.Jstar.resize(nf);
+  state.NaturalVolume.resize(nf);
+  state.NaturalDensity.resize(nf);
+  state.ReferenceVolume.resize(nf);
+  state.ReferenceDensity.resize(nf);
+  state.ParticleMass.resize(nf);
+
+  for(unsigned pfs=0;pfs<nf;pfs++){
+    const unsigned p=FlexStrucRidpc[pfs];
+
+    if(p>=Np ||
+       state.Idp[pfs]!=Idp_c->cptr()[p])
     {
       Run_Exceptioon(
-          "Gradient correction requires neighbours.");
+          "FlexRestart: particle ID mismatch.");
     }
 
-    h.CorrectionOffset[i+1]=
-        h.CorrectionOffset[i]+NumPairsc[i];
+    const typecode code=Code_c->cptr()[p];
 
-    for(unsigned k=0;k<NumPairsc[i];k++){
-      const unsigned j=PairIdxc[i][k];
+    if(!CODE_IsNormal(code) ||
+       !CODE_IsFlexStrucAny(code))
+    {
+      Run_Exceptioon(
+          "FlexRestart: invalid particle in restart state.");
+    }
 
-      if(j>=n || j==i)
-        Run_Exceptioon("Invalid correction neighbour.");
+    const tmatrix3f& f=state.Fstar[pfs];
 
-      if(User->UseFlexRestartGradientCorrection){
-        const unsigned a=h.PairOffset[i];
-        const unsigned b=h.PairOffset[i+1];
+    const float values[]={
+      f.a11,f.a12,f.a13,
+      f.a21,f.a22,f.a23,
+      f.a31,f.a32,f.a33
+    };
 
-        if(b-a!=NumPairsc[i] ||
-           h.PairIdp[a+k]!=h.Idp[j])
-        {
-          Run_Exceptioon(
-              "Gradient correction requires "
-              "the original ordered pairs.");
-        }
+    for(float value:values){
+      if(!std::isfinite(value)){
+        Run_Exceptioon(
+            "FlexRestart: non-finite Fstar.");
       }
-
-      h.CorrectionNeighbour.push_back(j);
     }
-  }
-}
 
-void JSphCpuSingle::PrepareFlexRestartGradientCorrection()
-{
-  if(!User->UseFlexRestartGradientCorrection)
-    return;
+    const unsigned body=CODE_GetIbodyFlexStruc(code);
+    const StFlexStrucData& material=FlexStrucDatac[body];
 
-  PrepareFlexRestartPairCache();
+    const float jstar=fmath::Determinant3x3(f);
+    const float voln=material.vol0;
+    const float rhon=material.rho0;
 
-  auto& h=User->FlexRestartHistory;
-  const unsigned n=CaseNflexstruc;
-
-  if(TKernel!=KERNEL_Wendland &&
-     TKernel!=KERNEL_Cubic)
-  {
-    Run_Exceptioon(
-        "Unsupported flexible correction kernel.");
-  }
-
-  std::vector<tmatrix3f> transform(n);
-
-  for(unsigned i=0;i<n;i++){
-    const tmatrix3f inv=
-        fmath::InverseMatrix3x3(h.DefGrad[i]);
-
-    // q0 = F*^{-T} Bn^T Gn Vn.
-    transform[i]=fmath::MulMatrix3x3(
-        fmath::TrasMatrix3x3(inv),
-        fmath::TrasMatrix3x3(h.NaturalKerCorr[i]));
-  }
-
-  const size_t count=h.CorrectionNeighbour.size();
-
-  h.Grad0I.resize(count);
-  h.Grad0J.resize(count);
-
-  for(unsigned i=0;i<n;i++){
-    for(size_t k=h.CorrectionOffset[i];
-        k<h.CorrectionOffset[i+1];k++)
+    if(!std::isfinite(jstar) || jstar<=0.f ||
+       !std::isfinite(voln) || voln<=0.f ||
+       !std::isfinite(rhon) || rhon<=0.f)
     {
-      const unsigned j=h.CorrectionNeighbour[k];
-
-      const tdouble3 a=h.NaturalPos[i];
-      const tdouble3 b=h.NaturalPos[j];
-
-      const tfloat3 r=TFloat3(
-          float(a.x-b.x),
-          float(a.y-b.y),
-          float(a.z-b.z));
-
-      const float rr=
-          r.x*r.x+r.y*r.y+r.z*r.z;
-
-      if(!std::isfinite(rr) || rr<=0)
-        Run_Exceptioon(
-            "Invalid natural pair distance.");
-
-      const float fac=
-          TKernel==KERNEL_Wendland
-          ? fsph::GetKernel_Fac<KERNEL_Wendland>(CSP,rr)
-          : fsph::GetKernel_Fac<KERNEL_Cubic>(CSP,rr);
-
-      const tfloat3 g=FlexScale(r,fac);
-
-      // Both coefficients use the SAME i-minus-j direction.
-      h.Grad0I[k]=FlexScale(
-          FlexMV(transform[i],g),h.VolN[i]);
-
-      h.Grad0J[k]=FlexScale(
-          FlexMV(transform[j],g),h.VolN[j]);
+      Run_Exceptioon(
+          "FlexRestart: invalid Fstar or natural material properties.");
     }
-  }
 
-  h.GradientReady=true;
+    state.Jstar[pfs]=jstar;
 
-  Log->Print(
-      "User.FlexRestartGradientCorrection: "
-      "transformed gradients prepared.");
-}
+    state.NaturalVolume[pfs]=voln;
+    state.NaturalDensity[pfs]=rhon;
 
-void JSphCpuSingle::PrepareFlexRestartHourglassCorrection()
-{
-  if(!User->UseFlexRestartHourglassCorrection)
-    return;
+    state.ReferenceVolume[pfs]=voln*jstar;
+    state.ReferenceDensity[pfs]=rhon/jstar;
+    state.ParticleMass[pfs]=voln*rhon;
 
-  PrepareFlexRestartPairCache();
-
-  auto& h=User->FlexRestartHistory;
-  const size_t count=h.CorrectionNeighbour.size();
-
-  h.HgMappedI.resize(count);
-  h.HgMappedJ.resize(count);
-  h.HgWeight.resize(count);
-
-  for(unsigned i=0;i<CaseNflexstruc;i++){
-    for(size_t k=h.CorrectionOffset[i];
-        k<h.CorrectionOffset[i+1];k++)
+    if(!std::isfinite(state.ReferenceVolume[pfs]) ||
+       state.ReferenceVolume[pfs]<=0.f ||
+       !std::isfinite(state.ReferenceDensity[pfs]) ||
+       state.ReferenceDensity[pfs]<=0.f ||
+       !std::isfinite(state.ParticleMass[pfs]) ||
+       state.ParticleMass[pfs]<=0.f)
     {
-      const unsigned j=h.CorrectionNeighbour[k];
-
-      const tdouble3 a=h.NaturalPos[i];
-      const tdouble3 b=h.NaturalPos[j];
-
-      const tfloat3 r=TFloat3(
-          float(a.x-b.x),
-          float(a.y-b.y),
-          float(a.z-b.z));
-
-      const float rr=
-          r.x*r.x+r.y*r.y+r.z*r.z;
-
-      if(!std::isfinite(rr) || rr<=0)
-        Run_Exceptioon(
-            "Invalid natural HG pair distance.");
-
-      // Fixed throughout this restart.
-      h.HgMappedI[k]=FlexMV(h.DefGrad[i],r);
-      h.HgMappedJ[k]=FlexMV(h.DefGrad[j],r);
-
-      // Match the original ordinary HG branch.
-      h.HgWeight[k]=h.VolN[i]*h.VolN[i]/rr;
+      Run_Exceptioon(
+          "FlexRestart: invalid reference material properties.");
     }
   }
-
-  h.HourglassReady=true;
-
-  Log->Print(
-      "User.FlexRestartHourglassCorrection: "
-      "history and penalty weights prepared.");
 }
-
-void JSphCpuSingle::InitFlexRestartReference()
-{
-  if(!PartBegin || !FlexStruc || !CaseNflexstruc)
-    return;
-
-  LoadFlexReferenceRestart();
-
-  if(User->UseFlexRestartRestorePairs)
-    RestoreFlexRestartPairs();
-
-  if(User->UseFlexRestartGradientCorrection)
-    PrepareFlexRestartGradientCorrection();
-
-  if(User->UseFlexRestartHourglassCorrection)
-    PrepareFlexRestartHourglassCorrection();
-}
-
-
-
-
 
 //==============================================================================
-/// Saves particle IDs and deformation gradients for flexible particles.
+/// Saves particle IDs and total deformation gradients relative to Xn.
 //==============================================================================
 void JSphCpuSingle::SaveFlexData(){
   if(!User->SaveFlexData || !FlexStruc)
@@ -1104,9 +1066,9 @@ void JSphCpuSingle::SaveFlexData(){
 
     tmatrix3f f=DefGradc[pfs];
 
-    if(PartBegin){
+    if(User->IsFlexRestart()){
       const tmatrix3f& fstar=
-          User->GetFlexRestartDefGrad(pfs,id);
+          User->GetFlexRestartFstar(pfs,id);
 
       f=fmath::MulMatrix3x3(f,fstar);
     }
@@ -1118,11 +1080,8 @@ void JSphCpuSingle::SaveFlexData(){
   data.SaveFile(file,false,true);
 }
 
-//==============================================================================
-/// Restores flexible deformation gradients by stable particle ID.
-//==============================================================================
-void JSphCpuSingle::LoadFlexDataRestart(){
-  User->FlexRestartHistory.Clear();
+void JSphCpuSingle::LoadFlexDirectContinuationState(){
+  User->FlexRestartState.Clear();
   User->FlexReferenceId.clear();
 
   if(!PartBegin || !FlexStruc)
@@ -1132,7 +1091,7 @@ void JSphCpuSingle::LoadFlexDataRestart(){
   if(!nf)
     return;
 
-  // Loading history does not require writing to DefGradc.
+  // Loading restart state does not overwrite the relative DefGradc.
   if(!FlexStrucRidpc)
     Run_Exceptioon("Flexible particle indices are unavailable.");
 
@@ -1229,85 +1188,40 @@ void JSphCpuSingle::LoadFlexDataRestart(){
       Run_ExceptioonFile("Unmatched particle ID in PartFlex.",file);
   }
 
-  // Commit history only after every ID correspondence check succeeds.
-  // Keep DefGradc as calculated from the new reference geometry.
-  // Build a complete restart state before committing it.
-  UserParameters::StFlexRestartHistory history;
+  UserParameters::StFlexRestartState state;
 
-  history.Idp.swap(restoredid);
-  history.DefGrad.swap(restored);
+  state.Idp.swap(restoredid);
+  state.Fstar.swap(restored);
 
-  history.Jstar.resize(nf);
-  history.VolN.resize(nf);
-  history.RhoN.resize(nf);
-  history.Vol0.resize(nf);
-  history.Rho0.resize(nf);
-  history.Mass.resize(nf);
-
-  for(unsigned pfs=0;pfs<nf;pfs++){
-    const unsigned p=FlexStrucRidpc[pfs];
-
-    const unsigned body=
-        CODE_GetIbodyFlexStruc(Code_c->cptr()[p]);
-
-    const StFlexStrucData& material=FlexStrucDatac[body];
-
-    const float jstar=
-        fmath::Determinant3x3(history.DefGrad[pfs]);
-
-    // Original material inputs remain the natural properties.
-    const float voln=material.vol0;
-    const float rhon=material.rho0;
-
-    if(!std::isfinite(jstar) || jstar<=0.f ||
-      !std::isfinite(voln) || voln<=0.f ||
-      !std::isfinite(rhon) || rhon<=0.f)
-      Run_Exceptioon("Invalid flexible natural material state.");
-
-    history.Jstar[pfs]=jstar;
-
-    history.VolN[pfs]=voln;
-    history.RhoN[pfs]=rhon;
-
-    history.Vol0[pfs]=voln*jstar;
-    history.Rho0[pfs]=rhon/jstar;
-
-    history.Mass[pfs]=voln*rhon;
-
-    if(!std::isfinite(history.Vol0[pfs]) ||
-      history.Vol0[pfs]<=0.f ||
-      !std::isfinite(history.Rho0[pfs]) ||
-      history.Rho0[pfs]<=0.f ||
-      !std::isfinite(history.Mass[pfs]) ||
-      history.Mass[pfs]<=0.f)
-      Run_Exceptioon("Invalid flexible restart reference state.");
-  }
-
-  User->FlexRestartHistory=history;
+  User->FlexRestartState=state;
   User->FlexReferenceId=referenceId;
 
   Log->Printf(
-    "Flexible restart history and Xn/X0 material state loaded: "
-    "%u particles.",nf);
+      "FlexRestart.DirectContinuation: deformation state loaded for "
+      "%u particles.",nf);
 }
+
+//==============================================================================
+/// Saves available natural-reference geometry and discretization data.
+//==============================================================================
 
 void JSphCpuSingle::SaveFlexReferenceOnce()
 {
   if(User->FlexReferenceWritten)
     return;
 
-  UserParameters::StFlexRestartHistory reference;
+  UserParameters::StFlexRestartState reference;
 
-  if(PartBegin){
-    if(!User->FlexRestartHistory.ReferenceAvailable()){
-      // Legacy restart without original reference history.
+  if(User->IsFlexRestart()){
+    if(!User->FlexRestartState.HasNaturalReferenceLayout()){
+      // Restart state without natural-reference data.
       // Do not fabricate Xn from the new restart geometry.
       User->FlexReferenceId.clear();
       User->FlexReferenceWritten=true;
       return;
     }
 
-    reference=User->FlexRestartHistory;
+    reference=User->FlexRestartState;
   }
   else{
     const unsigned nf=CaseNflexstruc;
@@ -1315,8 +1229,8 @@ void JSphCpuSingle::SaveFlexReferenceOnce()
     reference.Idp.resize(nf);
     reference.NaturalPos.resize(nf);
     reference.NaturalKerCorr.resize(nf);
-    reference.VolN.resize(nf);
-    reference.RhoN.resize(nf);
+    reference.NaturalVolume.resize(nf);
+    reference.NaturalDensity.resize(nf);
     reference.PairOffset.resize(size_t(nf)+1);
 
     reference.ReferenceKernel=unsigned(TKernel);
@@ -1337,8 +1251,8 @@ void JSphCpuSingle::SaveFlexReferenceOnce()
       reference.Idp[pfs]=Idp_c->cptr()[p];
       reference.NaturalPos[pfs]=Pos0c[pfs];
       reference.NaturalKerCorr[pfs]=KerCorrc[pfs];
-      reference.VolN[pfs]=FlexStrucDatac[body].vol0;
-      reference.RhoN[pfs]=FlexStrucDatac[body].rho0;
+      reference.NaturalVolume[pfs]=FlexStrucDatac[body].vol0;
+      reference.NaturalDensity[pfs]=FlexStrucDatac[body].rho0;
 
       const unsigned previous=reference.PairOffset[pfs];
       const unsigned count=NumPairsc[pfs];
@@ -1363,7 +1277,7 @@ void JSphCpuSingle::SaveFlexReferenceOnce()
       }
     }
 
-    reference.HasReferenceHistory=true;
+    reference.HasNaturalReferenceData=true;
 
     // Existing solver run identifier.
     User->FlexReferenceId=RunCode;
@@ -1411,8 +1325,8 @@ void JSphCpuSingle::SaveFlexReferenceOnce()
   for(unsigned pfs=0;pfs<nf;pfs++){
     ids[pfs]=reference.Idp[pfs];
     xn[pfs]=reference.NaturalPos[pfs];
-    vn[pfs]=reference.VolN[pfs];
-    rn[pfs]=reference.RhoN[pfs];
+    vn[pfs]=reference.NaturalVolume[pfs];
+    rn[pfs]=reference.NaturalDensity[pfs];
 
     const tmatrix3f& b=reference.NaturalKerCorr[pfs];
 
@@ -1437,7 +1351,7 @@ void JSphCpuSingle::SaveFlexReferenceOnce()
   User->FlexReferenceWritten=true;
 }
 
-void JSphCpuSingle::LoadFlexReferenceRestart()
+void JSphCpuSingle::LoadFlexDirectContinuationReference()
 {
   if(!PartBegin || !FlexStruc)
     return;
@@ -1450,10 +1364,10 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
   if(User->FlexReferenceId.empty()){
     if(required)
       Run_Exceptioon(
-          "Requested flexible restart correction requires "
+          "FlexRestart.DirectContinuation: requested corrections require "
           "a PartFlex file linked to FlexReference.ibi4.");
 
-    // Legacy PartFlex remains usable with corrections disabled.
+    // Direct continuation without natural-reference data requires corrections disabled.
     return;
   }
 
@@ -1463,10 +1377,10 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
   if(!fun::FileExists(file)){
     if(required)
       Run_ExceptioonFile(
-          "Missing flexible reference history.",file);
+          "FlexRestart.DirectContinuation: missing natural-reference data.",file);
 
     // The current restart remains usable without correction.
-    // Later outputs must not claim that reference history exists.
+    // Later outputs must not claim that natural-reference data exist.
     User->FlexReferenceId.clear();
     return;
   }
@@ -1480,7 +1394,7 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
 
   if(data.GetvText("ReferenceId")!=User->FlexReferenceId)
     Run_ExceptioonFile(
-        "PartFlex and reference history do not belong together.",
+        "FlexRestart.DirectContinuation: PartFlex and natural-reference data do not belong together.",
         file);
 
   const unsigned nf=CaseNflexstruc;
@@ -1530,7 +1444,7 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
   for(unsigned k=0;k<nf;k++){
     if(!savedIndex.emplace(ids[k],k).second)
       Run_ExceptioonFile(
-          "Duplicated ID in flexible reference history.",file);
+          "FlexRestart.DirectContinuation: duplicated natural-reference particle ID.",file);
   }
 
   if(offsets[0]!=0 || offsets[nf]!=count)
@@ -1554,14 +1468,14 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
   }
 
   // Transactional update: commit after validation.
-  auto history=User->FlexRestartHistory;
+  auto state=User->FlexRestartState;
 
-  history.ReferenceKernel=data.GetvUint("Kernel");
-  history.ReferenceH=data.GetvFloat("H");
-  history.Reference2D=data.GetvBool("Simulate2D");
+  state.ReferenceKernel=data.GetvUint("Kernel");
+  state.ReferenceH=data.GetvFloat("H");
+  state.Reference2D=data.GetvBool("Simulate2D");
 
-  if(!std::isfinite(history.ReferenceH) ||
-     history.ReferenceH<=0)
+  if(!std::isfinite(state.ReferenceH) ||
+     state.ReferenceH<=0)
   {
     Run_ExceptioonFile("Invalid reference smoothing length.",file);
   }
@@ -1571,28 +1485,28 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
       User->UseFlexRestartHourglassCorrection;
 
   if(needsKernel &&
-     (history.ReferenceKernel!=unsigned(TKernel) ||
-      history.ReferenceH!=KernelH ||
-      history.Reference2D!=Simulate2D))
+     (state.ReferenceKernel!=unsigned(TKernel) ||
+      state.ReferenceH!=KernelH ||
+      state.Reference2D!=Simulate2D))
   {
     Run_ExceptioonFile(
-        "Kernel settings differ from flexible reference history.",
+        "FlexRestart: kernel settings differ from natural-reference data.",
         file);
   }
 
-  history.NaturalPos.resize(nf);
-  history.NaturalKerCorr.resize(nf);
-  history.PairOffset.resize(size_t(nf)+1);
-  history.PairIdp.clear();
-  history.PairIdp.reserve(count);
-  history.PairOffset[0]=0;
+  state.NaturalPos.resize(nf);
+  state.NaturalKerCorr.resize(nf);
+  state.PairOffset.resize(size_t(nf)+1);
+  state.PairIdp.clear();
+  state.PairIdp.reserve(count);
+  state.PairOffset[0]=0;
 
   for(unsigned pfs=0;pfs<nf;pfs++){
-    const auto it=savedIndex.find(history.Idp[pfs]);
+    const auto it=savedIndex.find(state.Idp[pfs]);
 
     if(it==savedIndex.end())
       Run_ExceptioonFile(
-          "Current flexible ID is absent from reference history.",
+          "FlexRestart.DirectContinuation: particle ID is absent from natural-reference data.",
           file);
 
     const unsigned k=it->second;
@@ -1606,11 +1520,11 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
 
     if(!std::isfinite(vn[k]) || vn[k]<=0 ||
        !std::isfinite(rn[k]) || rn[k]<=0 ||
-       vn[k]!=history.VolN[pfs] ||
-       rn[k]!=history.RhoN[pfs])
+       vn[k]!=state.NaturalVolume[pfs] ||
+       rn[k]!=state.NaturalDensity[pfs])
     {
       Run_ExceptioonFile(
-          "Natural volume/density differs from reference history.",
+          "FlexRestart: natural volume/density differs from natural-reference data.",
           file);
     }
 
@@ -1632,29 +1546,82 @@ void JSphCpuSingle::LoadFlexReferenceRestart()
             "Invalid natural kernel correction matrix.",file);
     }
 
-    history.NaturalPos[pfs]=xn[k];
-    history.NaturalKerCorr[pfs]=b;
+    state.NaturalPos[pfs]=xn[k];
+    state.NaturalKerCorr[pfs]=b;
 
     for(unsigned q=offsets[k];q<offsets[k+1];q++)
-      history.PairIdp.push_back(pairs[q]);
+      state.PairIdp.push_back(pairs[q]);
 
-    history.PairOffset[pfs+1]=
-        unsigned(history.PairIdp.size());
+    state.PairOffset[pfs+1]=
+        unsigned(state.PairIdp.size());
   }
 
-  history.HasReferenceHistory=true;
-  User->FlexRestartHistory=history;
+  state.HasNaturalReferenceData=true;
+  User->FlexRestartState=state;
 }
 
+void JSphCpuSingle::InitFlexRestartReferenceAndCorrections()
+{
+  if(!User->IsFlexRestart() ||
+     !FlexStruc || !CaseNflexstruc)
+  {
+    return;
+  }
+
+  if(User->IsFlexDirectContinuation()){
+    LoadFlexDirectContinuationReference();
+  }
+
+  const bool required=
+      User->UseFlexRestartRestorePairs ||
+      User->UseFlexRestartGradientCorrection ||
+      User->UseFlexRestartHourglassCorrection;
+
+  const auto& state=User->FlexRestartState;
+
+  if(required && !state.HasNaturalReferenceLayout()){
+    Run_Exceptioon(
+        "FlexRestart: requested corrections require "
+        "natural-reference data.");
+  }
+
+  const bool needsKernel=
+      User->UseFlexRestartGradientCorrection ||
+      User->UseFlexRestartHourglassCorrection;
+
+  if(needsKernel &&
+     (state.ReferenceKernel!=unsigned(TKernel) ||
+      state.ReferenceH!=KernelH ||
+      state.Reference2D!=Simulate2D))
+  {
+    Run_Exceptioon(
+        "FlexRestart: kernel settings differ from "
+        "natural-reference data.");
+  }
+
+  if(User->UseFlexRestartRestorePairs)
+    RestoreFlexRestartPairs();
+
+  if(User->UseFlexRestartGradientCorrection)
+    PrepareFlexRestartGradientCorrection();
+
+  if(User->UseFlexRestartHourglassCorrection)
+    PrepareFlexRestartHourglassCorrection();
+}
+
+//==============================================================================
+// Optional restart discretization corrections.
+// Builds runtime corrections from available natural-reference data.
+//==============================================================================
 void JSphCpuSingle::RestoreFlexRestartPairs()
 {
-  const auto& history=User->FlexRestartHistory;
+  const auto& state=User->FlexRestartState;
 
-  if(!history.ReferenceAvailable())
+  if(!state.HasNaturalReferenceLayout())
     Run_Exceptioon("Flexible reference pairs are unavailable.");
 
   const unsigned nf=CaseNflexstruc;
-  const size_t count=history.PairIdp.size();
+  const size_t count=state.PairIdp.size();
 
   std::unordered_map<unsigned,unsigned> currentIndex;
   currentIndex.reserve(nf);
@@ -1665,7 +1632,7 @@ void JSphCpuSingle::RestoreFlexRestartPairs()
     const unsigned p=FlexStrucRidpc[pfs];
     const unsigned id=Idp_c->cptr()[p];
 
-    if(id!=history.Idp[pfs] ||
+    if(id!=state.Idp[pfs] ||
        !currentIndex.emplace(id,pfs).second)
     {
       Run_Exceptioon("Flexible reference ID mapping is invalid.");
@@ -1678,7 +1645,7 @@ void JSphCpuSingle::RestoreFlexRestartPairs()
   std::unique_ptr<unsigned[]> buffer(new unsigned[count]);
 
   for(size_t q=0;q<count;q++){
-    const auto it=currentIndex.find(history.PairIdp[q]);
+    const auto it=currentIndex.find(state.PairIdp[q]);
 
     if(it==currentIndex.end())
       Run_Exceptioon("Reference neighbour is absent from this run.");
@@ -1693,8 +1660,8 @@ void JSphCpuSingle::RestoreFlexRestartPairs()
   MemCpuFixed+=sizeof(unsigned)*count;
 
   for(unsigned pfs=0;pfs<nf;pfs++){
-    const unsigned begin=history.PairOffset[pfs];
-    const unsigned end=history.PairOffset[pfs+1];
+    const unsigned begin=state.PairOffset[pfs];
+    const unsigned end=state.PairOffset[pfs+1];
 
     NumPairsc[pfs]=end-begin;
     PairIdxc[pfs]=PairIdxBufferc+begin;
@@ -1705,37 +1672,222 @@ void JSphCpuSingle::RestoreFlexRestartPairs()
       unsigned(count));
 }
 
-//==============================================================================
-// Optional restart discretization corrections.
-// Runtime calculations only; no file I/O or persistent state.
-//==============================================================================
+void JSphCpuSingle::PrepareFlexRestartPairCache()
+{
+  auto& h=User->FlexRestartState;
+  const unsigned n=CaseNflexstruc;
+
+  if(!h.HasRestartStateLayout() ||
+     !h.HasNaturalReferenceLayout() ||
+     h.Idp.size()!=n)
+  {
+    Run_Exceptioon(
+        "FlexRestart: natural-reference correction data are unavailable.");
+  }
+
+  // Both corrections share the same active pair layout.
+  if(!h.CorrectionOffset.empty())
+    return;
+
+  h.CorrectionOffset.resize(size_t(n)+1);
+  h.CorrectionOffset[0]=0;
+
+  for(unsigned i=0;i<n;i++){
+    if(h.Idp[i]!=Idp_c->cptr()[FlexStrucRidpc[i]])
+      Run_Exceptioon(
+          "Flexible correction particle ID mismatch.");
+
+    if(User->UseFlexRestartGradientCorrection &&
+       !NumPairsc[i])
+    {
+      Run_Exceptioon(
+          "Gradient correction requires neighbours.");
+    }
+
+    h.CorrectionOffset[i+1]=
+        h.CorrectionOffset[i]+NumPairsc[i];
+
+    for(unsigned k=0;k<NumPairsc[i];k++){
+      const unsigned j=PairIdxc[i][k];
+
+      if(j>=n || j==i)
+        Run_Exceptioon("Invalid correction neighbour.");
+
+      if(User->UseFlexRestartGradientCorrection){
+        const unsigned a=h.PairOffset[i];
+        const unsigned b=h.PairOffset[i+1];
+
+        if(b-a!=NumPairsc[i] ||
+           h.PairIdp[a+k]!=h.Idp[j])
+        {
+          Run_Exceptioon(
+              "Gradient correction requires "
+              "the original ordered pairs.");
+        }
+      }
+
+      h.CorrectionNeighbour.push_back(j);
+    }
+  }
+}
+
+void JSphCpuSingle::PrepareFlexRestartGradientCorrection()
+{
+  if(!User->UseFlexRestartGradientCorrection)
+    return;
+
+  PrepareFlexRestartPairCache();
+
+  auto& h=User->FlexRestartState;
+  const unsigned n=CaseNflexstruc;
+
+  if(TKernel!=KERNEL_Wendland &&
+     TKernel!=KERNEL_Cubic)
+  {
+    Run_Exceptioon(
+        "Unsupported flexible correction kernel.");
+  }
+
+  std::vector<tmatrix3f> transform(n);
+
+  for(unsigned i=0;i<n;i++){
+    const tmatrix3f inv=
+        fmath::InverseMatrix3x3(h.Fstar[i]);
+
+    // q0 = F*^{-T} Bn^T Gn Vn.
+    transform[i]=fmath::MulMatrix3x3(
+        fmath::TrasMatrix3x3(inv),
+        fmath::TrasMatrix3x3(h.NaturalKerCorr[i]));
+  }
+
+  const size_t count=h.CorrectionNeighbour.size();
+
+  h.Grad0I.resize(count);
+  h.Grad0J.resize(count);
+
+  for(unsigned i=0;i<n;i++){
+    for(size_t k=h.CorrectionOffset[i];
+        k<h.CorrectionOffset[i+1];k++)
+    {
+      const unsigned j=h.CorrectionNeighbour[k];
+
+      const tdouble3 a=h.NaturalPos[i];
+      const tdouble3 b=h.NaturalPos[j];
+
+      const tfloat3 r=TFloat3(
+          float(a.x-b.x),
+          float(a.y-b.y),
+          float(a.z-b.z));
+
+      const float rr=
+          r.x*r.x+r.y*r.y+r.z*r.z;
+
+      if(!std::isfinite(rr) || rr<=0)
+        Run_Exceptioon(
+            "Invalid natural pair distance.");
+
+      const float fac=
+          TKernel==KERNEL_Wendland
+          ? fsph::GetKernel_Fac<KERNEL_Wendland>(CSP,rr)
+          : fsph::GetKernel_Fac<KERNEL_Cubic>(CSP,rr);
+
+      const tfloat3 g=FlexScale(r,fac);
+
+      // Both coefficients use the SAME i-minus-j direction.
+      h.Grad0I[k]=FlexScale(
+          FlexMV(transform[i],g),h.NaturalVolume[i]);
+
+      h.Grad0J[k]=FlexScale(
+          FlexMV(transform[j],g),h.NaturalVolume[j]);
+    }
+  }
+
+  h.GradientReady=true;
+
+  Log->Print(
+      "User.FlexRestartGradientCorrection: "
+      "transformed gradients prepared.");
+}
+
+void JSphCpuSingle::PrepareFlexRestartHourglassCorrection()
+{
+  if(!User->UseFlexRestartHourglassCorrection)
+    return;
+
+  PrepareFlexRestartPairCache();
+
+  auto& h=User->FlexRestartState;
+  const size_t count=h.CorrectionNeighbour.size();
+
+  h.HgMappedI.resize(count);
+  h.HgMappedJ.resize(count);
+  h.HgWeight.resize(count);
+
+  for(unsigned i=0;i<CaseNflexstruc;i++){
+    for(size_t k=h.CorrectionOffset[i];
+        k<h.CorrectionOffset[i+1];k++)
+    {
+      const unsigned j=h.CorrectionNeighbour[k];
+
+      const tdouble3 a=h.NaturalPos[i];
+      const tdouble3 b=h.NaturalPos[j];
+
+      const tfloat3 r=TFloat3(
+          float(a.x-b.x),
+          float(a.y-b.y),
+          float(a.z-b.z));
+
+      const float rr=
+          r.x*r.x+r.y*r.y+r.z*r.z;
+
+      if(!std::isfinite(rr) || rr<=0)
+        Run_Exceptioon(
+            "Invalid natural HG pair distance.");
+
+      // Fixed throughout this restart.
+      h.HgMappedI[k]=FlexMV(h.Fstar[i],r);
+      h.HgMappedJ[k]=FlexMV(h.Fstar[j],r);
+
+      // Match the original ordinary HG branch.
+      h.HgWeight[k]=h.NaturalVolume[i]*h.NaturalVolume[i]/rr;
+    }
+  }
+
+  h.HourglassReady=true;
+
+  Log->Print(
+      "User.FlexRestartHourglassCorrection: "
+      "natural-reference mappings and penalty weights prepared.");
+}
+
+
 namespace {
-  namespace FlexRestartTest {
+  namespace FlexRestartCorrection {
 
   //------------------------------------------------------------------------------
   // Checks the caches required by the optional force corrections.
   //------------------------------------------------------------------------------
   inline bool ForceCacheReady(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       bool useGradient,
       bool useHourglass)
   {
-    const size_t count=history.CorrectionNeighbour.size();
+    const size_t count=state.CorrectionNeighbour.size();
 
     if(useGradient){
-      if(!history.GradientReady ||
-        history.Grad0I.size()!=count ||
-        history.Grad0J.size()!=count)
+      if(!state.GradientReady ||
+        state.Grad0I.size()!=count ||
+        state.Grad0J.size()!=count)
       {
         return false;
       }
     }
 
     if(useHourglass){
-      if(!history.HourglassReady ||
-        history.HgWeight.size()!=count ||
-        history.HgMappedI.size()!=count ||
-        history.HgMappedJ.size()!=count)
+      if(!state.HourglassReady ||
+        state.HgWeight.size()!=count ||
+        state.HgMappedI.size()!=count ||
+        state.HgMappedJ.size()!=count)
       {
         return false;
       }
@@ -1748,12 +1900,12 @@ namespace {
   // Checks the cache used to compute the relative deformation gradient.
   //------------------------------------------------------------------------------
   inline bool GradientCacheReady(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       unsigned np)
   {
-    return history.GradientReady &&
-        history.CorrectionOffset.size()==size_t(np)+1 &&
-        history.Grad0I.size()==history.CorrectionNeighbour.size();
+    return state.GradientReady &&
+        state.CorrectionOffset.size()==size_t(np)+1 &&
+        state.Grad0I.size()==state.CorrectionNeighbour.size();
   }
 
   //------------------------------------------------------------------------------
@@ -1762,7 +1914,7 @@ namespace {
   //------------------------------------------------------------------------------
   template<bool simulate2d>
   inline tmatrix3f DefGrad(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       unsigned pfs1,
       const tdouble3* pos,
       const unsigned* flexstrucridp)
@@ -1771,10 +1923,10 @@ namespace {
 
     const tdouble3 a=pos[flexstrucridp[pfs1]];
 
-    for(size_t k=history.CorrectionOffset[pfs1];
-        k<history.CorrectionOffset[pfs1+1];k++)
+    for(size_t k=state.CorrectionOffset[pfs1];
+        k<state.CorrectionOffset[pfs1+1];k++)
     {
-      const unsigned j=history.CorrectionNeighbour[k];
+      const unsigned j=state.CorrectionNeighbour[k];
       const tdouble3 b=pos[flexstrucridp[j]];
 
       const tfloat3 r=TFloat3(
@@ -1782,7 +1934,7 @@ namespace {
           float(a.y-b.y),
           float(a.z-b.z));
 
-      FlexSubtractOuter(f,r,history.Grad0I[k]);
+      FlexSubtractOuter(f,r,state.Grad0I[k]);
     }
 
     if(simulate2d){
@@ -1798,7 +1950,7 @@ namespace {
   // flexPk1Reference contains P_t/0 without kernel or volume factors.
   //------------------------------------------------------------------------------
   inline void AddElastic(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       size_t k,
       unsigned pfs1,
       unsigned pfs2,
@@ -1808,14 +1960,14 @@ namespace {
   {
     const tfloat3 fi=FlexMV(
         flexPk1Reference[pfs1],
-        history.Grad0I[k]);
+        state.Grad0I[k]);
 
     const tfloat3 fj=FlexMV(
         flexPk1Reference[pfs2],
-        history.Grad0J[k]);
+        state.Grad0J[k]);
 
-    const float vi=history.Vol0[pfs1];
-    const float vj=history.Vol0[pfs2];
+    const float vi=state.ReferenceVolume[pfs1];
+    const float vj=state.ReferenceVolume[pfs2];
 
     acep1.x+=(vi*fi.x+vj*fj.x)/mass0p1;
     acep1.y+=(vi*fi.y+vj*fj.y)/mass0p1;
@@ -1828,7 +1980,7 @@ namespace {
   //------------------------------------------------------------------------------
   template<TpKernel tker>
   inline void AddHourglass(
-      const UserParameters::StFlexRestartHistory& history,
+      const UserParameters::StFlexRestartState& state,
       size_t k,
       const tmatrix3f& defgradp1,
       const tmatrix3f& defgradp2,
@@ -1846,11 +1998,11 @@ namespace {
 
     const tfloat3 bi=FlexMV(
         defgradp1,
-        history.HgMappedI[k]);
+        state.HgMappedI[k]);
 
     const tfloat3 bj=FlexMV(
         defgradp2,
-        history.HgMappedJ[k]);
+        state.HgMappedJ[k]);
 
     if(rr2>0.f){
       const float rr=sqrt(rr2);
@@ -1871,7 +2023,7 @@ namespace {
 
       const float mulfac=
           hgfactor*youngmod*wab*
-          history.HgWeight[k]*delta/
+          state.HgWeight[k]*delta/
           (rr*mass0p1);
 
       acep1.x-=mulfac*drx;
@@ -1880,5 +2032,5 @@ namespace {
     }
   }
 
-  } // namespace FlexRestartTest
+  } // namespace FlexRestartCorrection
 } // anonymous namespace
