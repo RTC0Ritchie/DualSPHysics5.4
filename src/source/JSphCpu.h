@@ -439,6 +439,11 @@ protected:
   void CalcFlexStrucNormals()const;
   void UpdateFlexStrucGeometry()const;
   inline tmatrix3f CalcFlexStrucPK1Stress(const tmatrix3f& defgrad,const tmatrix6f& cmat)const;
+  void InitFlexRestartBoundaryCorrection();
+  tmatrix3f BuildFlexRestartBoundaryForceMatrix(
+      unsigned pfs,unsigned body,
+      const tmatrix3f& frelative,const tmatrix3f& preference,
+      const tmatrix3f& kercorr)const;
   template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void InteractionForcesFlexStruc(unsigned np,float visco
       ,StDivDataCpu divdata,const unsigned* dcell
       ,const tdouble3* pos,const tfloat4* velrhop,const float* press,const typecode* code

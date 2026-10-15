@@ -15,6 +15,7 @@ public:
   struct StVtkParticle{
     unsigned Idp=0;
     unsigned Mk=0;
+    unsigned Boundary=0;
 
     tdouble3 Pos=TDouble3(0);
     tfloat3 Velocity=TFloat3(0);

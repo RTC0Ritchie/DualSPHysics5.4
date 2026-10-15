@@ -1476,6 +1476,7 @@ void JSphCpuSingle::FlexStrucInit(){
   //-Calculate kernel correction and update geometry.
   InitFlexRestartReferenceAndCorrections();
   JSphCpu::CalcFlexStrucKerCorr();
+  JSphCpu::InitFlexRestartBoundaryCorrection();
   JSphCpu::UpdateFlexStrucGeometry();
   Log->Print("");
   Timersc->TmStop(TMC_SuFlexStruc);

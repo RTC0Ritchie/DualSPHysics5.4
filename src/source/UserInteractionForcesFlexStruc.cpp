@@ -278,8 +278,9 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
 
       /// Restart: store P_t/0 * B_0 without volume weights.
       // Vi*Vj is applied in the particle-pair loop.
-      flexForceMatrix[pfs]=
-          fmath::MulMatrix3x3(preference,kercorr[pfs]);
+      flexForceMatrix[pfs]=BuildFlexRestartBoundaryForceMatrix(
+          pfs,CODE_GetIbodyFlexStruc(code[p]),
+          frelative,preference,kercorr[pfs]);
     }
   }
   // --------------------------------------------------------------------------------------
@@ -840,7 +841,374 @@ void JSphCpu::UpdateFlexStrucGeometry()const{
   if(CaseNflexstruc&&TMdbc2>=MDBC2_Std)CalcFlexStrucNormals();
 }
 
+//============================================================================
+/// Correct the boundary forces for flexible structure particles.
+//=============================================================================
+void JSphCpu::InitFlexRestartBoundaryCorrection()
+{
+  auto& data=User->FlexRestartBoundaryData;
+  data=UserParameters::StFlexRestartBoundaryData{};
 
+  if(!User->IsFlexPrescribedRestart() &&
+     !User->IsFlexModelTransferRestart())return;
+
+  const int mode=User->FlexRestartBoundaryCorrectionMode;
+  if(mode==0)return;
+
+  if(mode<1 || mode>3)
+    Run_Exceptioon("Invalid restart boundary correction mode.");
+
+  if(User->UseFlexRestartGradientCorrection)
+    Run_Exceptioon(
+        "Boundary correction cannot use transported direct-continuation gradients.");
+
+  const unsigned np=CaseNflexstruc;
+  if(!np || !Pos0c || !KerCorrc || !NumPairsc || !PairIdxc)
+    Run_Exceptioon(
+        "Boundary correction: reference geometry is unavailable.");
+
+  data.Body.resize(np);
+  data.Selected.assign(np,1);
+
+  for(unsigned i=0;i<np;i++){
+    data.Body[i]=CODE_GetIbodyFlexStruc(
+        Code_c->cptr()[FlexStrucRidpc[i]]);
+
+    if(data.Body[i]>=FlexStrucCount)
+      Run_Exceptioon(
+          "Boundary correction: invalid elastic body.");
+  }
+
+  const int layers=User->FlexRestartBoundaryCorrectionLayers;
+
+  if(layers>0){
+    // Peel geometric shells in X0, independently for each elastic body.
+    // A missing angular sector identifies an exposed particle.
+    const double cutoff2=1.8*1.8*Dp*Dp;
+    const double pi=std::acos(-1.0);
+    const double angleTolerance=1.e-10;
+
+    std::vector<std::vector<unsigned>> neighbours(np);
+    for(unsigned i=0;i<np;i++){
+      for(unsigned k=0;k<NumPairsc[i];k++){
+        const unsigned j=PairIdxc[i][k];
+        if(j>=np || j==i || data.Body[i]!=data.Body[j])continue;
+
+        const tdouble3 r=Pos0c[j]-Pos0c[i];
+        const double rr2=r.x*r.x+r.z*r.z+
+            (Simulate2D ? 0.0 : r.y*r.y);
+        if(rr2>0.0 && rr2<=cutoff2)
+          neighbours[i].push_back(j);
+      }
+    }
+
+    // 98 approximately distributed directions for the 3D empty-cone test.
+    std::vector<tdouble3> probeDirections;
+    if(!Simulate2D){
+      for(int x=-2;x<=2;x++)
+        for(int y=-2;y<=2;y++)
+          for(int z=-2;z<=2;z++){
+            if(std::max(std::abs(x),
+                std::max(std::abs(y),std::abs(z)))!=2)continue;
+            const double length=std::sqrt(double(x*x+y*y+z*z));
+            probeDirections.push_back(
+                TDouble3(x/length,y/length,z/length));
+          }
+    }
+
+    data.Selected.assign(np,0);
+    std::vector<byte> queued(np,0);
+    std::vector<unsigned> candidates(np),shell,next;
+    for(unsigned i=0;i<np;i++)candidates[i]=i;
+
+    std::vector<double> angles;
+    std::vector<tdouble3> directions;
+    angles.reserve(64);
+    directions.reserve(64);
+
+    for(int layer=0;layer<layers && !candidates.empty();layer++){
+      shell.clear();
+
+      // Evaluate the complete shell before removing any of its particles.
+      for(const unsigned i:candidates){
+        angles.clear();
+        directions.clear();
+
+        for(const unsigned j:neighbours[i]){
+          if(data.Selected[j])continue;
+          const tdouble3 r=Pos0c[j]-Pos0c[i];
+
+          if(Simulate2D)angles.push_back(std::atan2(r.z,r.x));
+          else{
+            const double length=std::sqrt(
+                r.x*r.x+r.y*r.y+r.z*r.z);
+            directions.push_back(
+                TDouble3(r.x/length,r.y/length,r.z/length));
+          }
+        }
+
+        bool exposed=false;
+        if(Simulate2D){
+          if(angles.size()<2)exposed=true;
+          else{
+            std::sort(angles.begin(),angles.end());
+            double gap=angles.front()+2.0*pi-angles.back();
+            for(size_t k=1;k<angles.size();k++)
+              gap=std::max(gap,angles[k]-angles[k-1]);
+
+            // A >=120 degree empty sector tolerates sloped/staircase edges.
+            exposed=(gap>=2.0*pi/3.0-angleTolerance);
+          }
+        }
+        else{
+          // An empty cone with a 60 degree half-angle marks a 3D surface.
+          for(const tdouble3& probe:probeDirections){
+            bool occupied=false;
+            for(const tdouble3& direction:directions){
+              const double dot=probe.x*direction.x+
+                  probe.y*direction.y+probe.z*direction.z;
+              if(dot>=0.5-angleTolerance){
+                occupied=true;
+                break;
+              }
+            }
+            if(!occupied){
+              exposed=true;
+              break;
+            }
+          }
+        }
+
+        if(exposed)shell.push_back(i);
+      }
+
+      if(shell.empty())break;
+      for(const unsigned i:shell)data.Selected[i]=1;
+
+      // Only neighbours of the removed shell can become newly exposed.
+      next.clear();
+      for(const unsigned i:shell){
+        for(const unsigned j:neighbours[i]){
+          if(!data.Selected[j] && !queued[j]){
+            queued[j]=1;
+            next.push_back(j);
+          }
+        }
+      }
+      for(const unsigned i:next)queued[i]=0;
+      candidates.swap(next);
+    }
+  }
+
+  const auto capKernel=[&](const tmatrix3f& input)->tmatrix3f
+  {
+    double a[3][3]={
+      {input.a11,
+       0.5*(double(input.a12)+input.a21),
+       0.5*(double(input.a13)+input.a31)},
+      {0.5*(double(input.a21)+input.a12),
+       input.a22,
+       0.5*(double(input.a23)+input.a32)},
+      {0.5*(double(input.a31)+input.a13),
+       0.5*(double(input.a32)+input.a23),
+       input.a33}
+    };
+
+    double v[3][3]={{1,0,0},{0,1,0},{0,0,1}};
+
+    for(int i=0;i<3;i++)
+      for(int j=0;j<3;j++)
+        if(!std::isfinite(a[i][j]))
+          Run_Exceptioon(
+              "Boundary correction: non-finite kernel matrix.");
+
+    // Symmetric Jacobi eigensolver; valid for 2D and 3D.
+    for(int iter=0;iter<32;iter++){
+      int p=0,q=1;
+
+      if(std::fabs(a[0][2])>std::fabs(a[p][q])){
+        p=0;
+        q=2;
+      }
+      if(std::fabs(a[1][2])>std::fabs(a[p][q])){
+        p=1;
+        q=2;
+      }
+
+      const double scale=std::max(1.0,
+          std::max(std::fabs(a[0][0]),
+          std::max(std::fabs(a[1][1]),std::fabs(a[2][2]))));
+
+      if(std::fabs(a[p][q])<=1.e-12*scale)break;
+
+      const double angle=0.5*std::atan2(
+          2.0*a[p][q],a[q][q]-a[p][p]);
+
+      const double c=std::cos(angle),s=std::sin(angle);
+      const double app=a[p][p],aqq=a[q][q],apq=a[p][q];
+
+      for(int k=0;k<3;k++)if(k!=p && k!=q){
+        const double akp=a[k][p],akq=a[k][q];
+        a[k][p]=a[p][k]=c*akp-s*akq;
+        a[k][q]=a[q][k]=s*akp+c*akq;
+      }
+
+      a[p][p]=c*c*app-2.0*c*s*apq+s*s*aqq;
+      a[q][q]=s*s*app+2.0*c*s*apq+c*c*aqq;
+      a[p][q]=a[q][p]=0.0;
+
+      for(int k=0;k<3;k++){
+        const double vkp=v[k][p],vkq=v[k][q];
+        v[k][p]=c*vkp-s*vkq;
+        v[k][q]=s*vkp+c*vkq;
+      }
+    }
+
+    bool changed=false;
+    const double limit=User->FlexRestartBoundaryCorrectionLimit;
+
+    // Upper clipping only; smaller eigenvalues are retained.
+    for(int k=0;k<3;k++){
+      if(!std::isfinite(a[k][k]))
+        Run_Exceptioon(
+            "Boundary correction: non-finite kernel eigenvalue.");
+
+      if(a[k][k]>limit){
+        a[k][k]=limit;
+        changed=true;
+      }
+    }
+
+    if(!changed)return input;
+
+    double b[3][3]={};
+
+    for(int i=0;i<3;i++)
+      for(int j=0;j<3;j++)
+        for(int k=0;k<3;k++)
+          b[i][j]+=v[i][k]*a[k][k]*v[j][k];
+
+    return TMatrix3f(
+        float(b[0][0]),float(b[0][1]),float(b[0][2]),
+        float(b[1][0]),float(b[1][1]),float(b[1][2]),
+        float(b[2][0]),float(b[2][1]),float(b[2][2]));
+  };
+
+  if(mode==2){
+    data.ForceKernel.resize(np);
+
+    for(unsigned i=0;i<np;i++)
+      data.ForceKernel[i]=data.Selected[i]
+          ? capKernel(KerCorrc[i]) : KerCorrc[i];
+  }
+
+  if(mode==3){
+    const auto& state=User->FlexRestartState;
+
+    if(!state.HasRestartStateLayout() || state.Idp.size()!=np)
+      Run_Exceptioon(
+          "Boundary correction: initial elastic state is unavailable.");
+
+    data.Prestress.assign(np,TMatrix3f(0));
+
+    for(unsigned i=0;i<np;i++)if(data.Selected[i]){
+      const unsigned id=Idp_c->cptr()[FlexStrucRidpc[i]];
+      const tmatrix3f& fs=User->GetFlexRestartFstar(i,id);
+
+      const tmatrix3f pn=CalcFlexStrucPK1Stress(
+          fs,FlexStrucDatac[data.Body[i]].cmat);
+
+      data.Prestress[i]=ScaleFlexMatrix(
+          fmath::MulMatrix3x3(pn,fmath::TrasMatrix3x3(fs)),
+          1.f/state.Jstar[i]);
+    }
+  }
+
+  std::vector<unsigned> total(FlexStrucCount,0);
+  std::vector<unsigned> selected(FlexStrucCount,0);
+
+  for(unsigned i=0;i<np;i++){
+    total[data.Body[i]]++;
+    if(data.Selected[i])selected[data.Body[i]]++;
+  }
+
+  for(unsigned b=0;b<FlexStrucCount;b++)
+    Log->Printf(
+        "  Restart boundary correction: mode=%d, body=%u, scope=%u/%u particles.",
+        mode,b,selected[b],total[b]);
+}
+
+tmatrix3f JSphCpu::BuildFlexRestartBoundaryForceMatrix(
+    unsigned pfs,unsigned body,
+    const tmatrix3f& frelative,const tmatrix3f& preference,
+    const tmatrix3f& kercorr)const
+{
+  const tmatrix3f original=
+      fmath::MulMatrix3x3(preference,kercorr);
+
+  if(!User->IsFlexPrescribedRestart() &&
+     !User->IsFlexModelTransferRestart())return original;
+
+  const int mode=User->FlexRestartBoundaryCorrectionMode;
+  if(mode==0)return original;
+
+  const auto& data=User->FlexRestartBoundaryData;
+
+  if(pfs>=data.Body.size() || pfs>=data.Selected.size() ||
+     data.Body[pfs]!=body)
+    Run_Exceptioon(
+        "Boundary correction: missing or inconsistent particle cache.");
+
+  switch(mode){
+    case 1:
+      // Selected particles use identity correction in force assembly.
+      return data.Selected[pfs] ? preference : original;
+
+    case 2:
+      if(pfs>=data.ForceKernel.size())
+        Run_Exceptioon(
+            "Boundary correction: force kernel cache is unavailable.");
+
+      return fmath::MulMatrix3x3(
+          preference,data.ForceKernel[pfs]);
+
+    case 3:{
+      if(!data.Selected[pfs])return original;
+
+      if(pfs>=data.Prestress.size())
+        Run_Exceptioon(
+            "Boundary correction: prestress cache is unavailable.");
+
+      // Q = P*B + F_relative*P_initial*(I-B).
+      const tmatrix3f transported=
+          fmath::MulMatrix3x3(frelative,data.Prestress[pfs]);
+
+      const tmatrix3f corrected=
+          fmath::MulMatrix3x3(transported,kercorr);
+
+      tmatrix3f result=original;
+
+      result.a11+=transported.a11-corrected.a11;
+      result.a12+=transported.a12-corrected.a12;
+      result.a13+=transported.a13-corrected.a13;
+
+      result.a21+=transported.a21-corrected.a21;
+      result.a22+=transported.a22-corrected.a22;
+      result.a23+=transported.a23-corrected.a23;
+
+      result.a31+=transported.a31-corrected.a31;
+      result.a32+=transported.a32-corrected.a32;
+      result.a33+=transported.a33-corrected.a33;
+
+      return result;
+    }
+
+    default:
+      Run_Exceptioon("Invalid restart boundary correction mode.");
+  }
+
+  return original;
+}
 
 
 

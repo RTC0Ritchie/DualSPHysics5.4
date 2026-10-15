@@ -67,6 +67,10 @@ public:
   bool FlexRestartConserveMass;
   bool FlexRestartDensityIsNatural;
 
+  int FlexRestartBoundaryCorrectionMode;
+  int FlexRestartBoundaryCorrectionLayers;
+  double FlexRestartBoundaryCorrectionLimit;
+
 
 
   bool FlexRestartRestorePairs;
@@ -92,6 +96,7 @@ public:
   // Time-invariant output configuration.
   struct StOutputStatic{
     bool Mass=false;
+    bool Boundary=false;
   };
 
   struct StOutputObject{
@@ -302,11 +307,22 @@ public:
       bool hasflex,
       JLog2* log);
 
+  struct StFlexRestartBoundaryData{
+    std::vector<unsigned> Body;
+    std::vector<byte> Selected;
+    std::vector<tmatrix3f> ForceKernel;
+    std::vector<tmatrix3f> Prestress;
+  };
+
+  StFlexRestartBoundaryData FlexRestartBoundaryData;
+
   
 
 private:
   void LoadOutputXml(const JXml* xml,const TiXmlElement* userNode);
   void LoadRestartElasticInputXml(
+      const JXml* xml,const TiXmlElement* restart);
+  void LoadRestartBoundaryCorrectionXml(
       const JXml* xml,const TiXmlElement* restart);
 
 };

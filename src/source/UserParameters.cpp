@@ -9,6 +9,7 @@
 #include <map>
 #include <string>
 #include <cmath>
+#include <limits>
 
 UserParameters::UserParameters(){
   ClassName="UserParameters";
@@ -39,6 +40,9 @@ void UserParameters::Reset(){
   FlexRestartSpecialField=0;
   FlexRestartConserveMass=true;
   FlexRestartDensityIsNatural=true;
+  FlexRestartBoundaryCorrectionMode=0;
+  FlexRestartBoundaryCorrectionLayers=0;
+  FlexRestartBoundaryCorrectionLimit=1.5;
 
   FlexRestartRestorePairs=false;
   FlexRestartGradientCorrection=false;
@@ -52,6 +56,8 @@ void UserParameters::Reset(){
   UseFlexRestartRestorePairs=false;
   UseFlexRestartGradientCorrection=false;
   UseFlexRestartHourglassCorrection=false;
+
+  FlexRestartBoundaryData=StFlexRestartBoundaryData{};
 
   FlexReferenceWritten=false;
   FlexReferenceId.clear();
@@ -326,7 +332,8 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     xml->CheckAttributeNames(restart,"enabled comment");
     xml->CheckElementNames(
         restart,true,
-        "restartsource conservation densityreference elasticinput");
+        "restartsource conservation densityreference elasticinput "
+        "boundarylayercorrection");
 
     FlexRestartRequested=
         xml->GetAttributeBool(
@@ -401,6 +408,7 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     FlexRestartDensityIsNatural=
         readRestartBool("densityreference","natural",true);
     LoadRestartElasticInputXml(xml,restart);
+    LoadRestartBoundaryCorrectionXml(xml,restart);
   }
 
   // ------------------------------------------------------------
@@ -612,6 +620,89 @@ void UserParameters::LoadRestartElasticInputXml(
         "1 (file) or 2 (special_field).",
         xml->ErrGetFileRow(input));
   }
+}
+
+void UserParameters::LoadRestartBoundaryCorrectionXml(
+    const JXml* xml,const TiXmlElement* restart)
+{
+  const TiXmlElement* node=
+      restart->FirstChildElement("boundarylayercorrection");
+  if(!node)return;
+
+  if(node->NextSiblingElement("boundarylayercorrection"))
+    Run_ExceptioonFile(
+        "Repeated User.restart.boundarylayercorrection node.",
+        xml->ErrGetFileRow(node));
+
+  xml->CheckAttributeNames(node,"mode comment");
+  xml->CheckElementNames(node,true,"layers limit");
+
+  const auto readInteger=
+      [&](const TiXmlElement* item,const char* attribute,
+          int maximum)->int
+  {
+    const double value=xml->GetAttributeDouble(item,attribute);
+    if(!std::isfinite(value) || value<0.0 ||
+       value>double(maximum) || std::floor(value)!=value)
+      Run_ExceptioonFile(
+          std::string("Boundary-layer correction: ")+attribute+
+          " must be an integer in [0, "+
+          std::to_string(maximum)+"].",
+          xml->ErrGetFileRow(item));
+    return int(value);
+  };
+
+  const auto readChild=[&](const char* name)->const TiXmlElement*
+  {
+    const TiXmlElement* item=node->FirstChildElement(name);
+    if(!item)return nullptr;
+
+    if(item->NextSiblingElement(name))
+      Run_ExceptioonFile(
+          std::string("Repeated boundary-layer correction child: ")+name,
+          xml->ErrGetFileRow(item));
+
+    xml->CheckAttributeNames(item,"value comment");
+
+    if(item->FirstChildElement())
+      Run_ExceptioonFile(
+          std::string("Boundary-layer correction child must be a leaf: ")+name,
+          xml->ErrGetFileRow(item));
+
+    return item;
+  };
+
+  FlexRestartBoundaryCorrectionMode=readInteger(node,"mode",3);
+
+  const TiXmlElement* layers=readChild("layers");
+  const TiXmlElement* limit=readChild("limit");
+
+  if(layers)
+    FlexRestartBoundaryCorrectionLayers=
+        readInteger(layers,"value",std::numeric_limits<int>::max());
+
+  if(limit){
+    const double value=xml->GetAttributeDouble(limit,"value");
+
+    if(!std::isfinite(value) || value<=1.0 || value>10.0)
+      Run_ExceptioonFile(
+          "Boundary-layer correction limit must satisfy 1 < value <= 10.",
+          xml->ErrGetFileRow(limit));
+
+    FlexRestartBoundaryCorrectionLimit=value;
+  }
+
+  if((FlexRestartBoundaryCorrectionMode==1 ||
+      FlexRestartBoundaryCorrectionMode==3) && !layers)
+    Run_ExceptioonFile(
+        "Boundary-layer correction modes 1/3 require layers; "
+        "use value=0 explicitly for all particles.",
+        xml->ErrGetFileRow(node));
+
+  if(FlexRestartBoundaryCorrectionMode==2 && !limit)
+    Run_ExceptioonFile(
+        "Boundary-layer correction mode 2 requires limit.",
+        xml->ErrGetFileRow(node));
 }
 
 void UserParameters::LoadOutputXml(
@@ -943,7 +1034,7 @@ void UserParameters::LoadOutputXml(
 
     if(statics){
       xml->CheckAttributeNames(statics,"comment");
-      xml->CheckElementNames(statics,true,"mass");
+      xml->CheckElementNames(statics,true,"mass boundary");
 
       const TiXmlElement* mass=
           statics->FirstChildElement("mass");
@@ -951,6 +1042,14 @@ void UserParameters::LoadOutputXml(
       if(mass){
         CheckLeaf(mass,"comment");
         config.Static.Mass=true;
+      }
+
+      const TiXmlElement* boundary=
+          statics->FirstChildElement("boundary");
+
+      if(boundary){
+        CheckLeaf(boundary,"comment");
+        config.Static.Boundary=true;
       }
     }
 
@@ -967,7 +1066,8 @@ void UserParameters::LoadOutputXml(
       || !d.StrainComponents.empty()
       || !d.StressComponents.empty()
       || !d.StressInvariants.empty()
-      || config.Static.Mass;
+      || config.Static.Mass
+      || config.Static.Boundary;
 
     if(!hasVariable){
       Fail(obj,"Output object has no selected variables: "
@@ -1049,6 +1149,22 @@ void UserParameters::VisuConfig(JLog2* log)const{
           ? "requested; irrelevant for undeformed field"
           : "inactive");
 
+  log->Printf(
+      "  FlexRestart.BoundaryLayerCorrection: mode=%d; %s",
+      FlexRestartBoundaryCorrectionMode,
+      !FlexRestartRequested ? "inactive" :
+      FlexRestartBoundaryCorrectionMode==0 ? "disabled" :
+      "enabled; force assembly only");
+
+  if(FlexRestartBoundaryCorrectionMode>=1 &&
+     FlexRestartBoundaryCorrectionMode<=3)
+    log->Printf("    Layers: %d (0=all; geometric shells per elastic body)",
+        FlexRestartBoundaryCorrectionLayers);
+
+  if(FlexRestartBoundaryCorrectionMode==2)
+    log->Printf("    Limit: %.17g (1 < value <= 10)",
+        FlexRestartBoundaryCorrectionLimit);
+        
   const char* elasticInput=
       FlexRestartElasticInput==1 ? "file" :
       FlexRestartElasticInput==2 ? "special_field" :

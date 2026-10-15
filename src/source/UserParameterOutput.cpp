@@ -73,6 +73,12 @@ void UserParameterOutput::SaveFiles(
     if(config.Static.Mass){
       AddScalar("Mass",&StVtkParticle::Mass);
     }
+
+    if(config.Static.Boundary){
+      unsigned* boundary=arrays.CreateArrayPtrUint("Boundary",n);
+      for(unsigned p=0;p<n;p++)
+        boundary[p]=particles[p].Boundary;
+    }
   }
   else{
     const auto& dynamic=config.Dynamic;
@@ -340,7 +346,7 @@ void JSphCpuSingle::SaveUserOutput(
 
     if(HasMaterialFields(config.Dynamic)
         || config.Dynamic.VolumeSPH
-        || (firstFrame && config.Static.Mass)){
+        || (firstFrame && (config.Static.Mass || config.Static.Boundary))){
       needFlexMap=true;
       break;
     }
@@ -390,11 +396,18 @@ void JSphCpuSingle::SaveUserOutput(
       || dynamic.Velocity;
 
     const bool outputMass=firstFrame && config.Static.Mass;
+    const bool outputBoundary=firstFrame && config.Static.Boundary;
+    const bool outputStatic=outputMass || outputBoundary;
+
+    const bool boundaryCorrectionActive=
+        outputBoundary &&
+        (User.IsFlexPrescribedRestart() || User.IsFlexModelTransferRestart()) &&
+        User.FlexRestartBoundaryCorrectionMode!=0;
 
     // SPH volume requires mass at every output frame.
     const bool needParticleMass=outputMass || dynamic.VolumeSPH;
 
-    if(!outputDynamic && !outputMass)continue;
+    if(!outputDynamic && !outputStatic)continue;
 
     for(unsigned mk:config.Mk){
       if(MkInfo->GetMkBlockByMk(word(mk))>=MkInfo->Size()){
@@ -453,6 +466,13 @@ void JSphCpuSingle::SaveUserOutput(
 
       const auto it=flexById.find(id);
 
+      if(outputBoundary && it==flexById.end()){
+        Run_Exceptioon(fun::PrintStr(
+          "Boundary output requires a flexible or clamp "
+          "particle: Idp=%u, MK=%u.",
+          id,mk));
+      }
+
       if(outputMaterial && it==flexById.end()){
         Run_Exceptioon(fun::PrintStr(
           "Material output requires a flexible or clamp "
@@ -470,6 +490,17 @@ void JSphCpuSingle::SaveUserOutput(
 
         const unsigned body=
           CODE_GetIbodyFlexStruc(Code_c->cptr()[p]);
+
+        if(boundaryCorrectionActive){
+          const auto& boundary=User.FlexRestartBoundaryData;
+          if(pfs>=boundary.Selected.size() ||
+             pfs>=boundary.Body.size() || boundary.Body[pfs]!=body)
+          {
+            Run_Exceptioon(
+                "Invalid boundary correction cache for output.");
+          }
+          particle.Boundary=boundary.Selected[pfs] ? 1u : 0u;
+        }
 
         const JSphFlexStrucBody* bodyData=FlexStruc->GetBody(body);
 
@@ -638,7 +669,7 @@ void JSphCpuSingle::SaveUserOutput(
         basename,TimeStep,config,particles,false);
     }
 
-    if(outputMass){
+    if(outputStatic){
       userOutput.SaveFiles(
         basename+"_static",TimeStep,config,particles,true);
     }
