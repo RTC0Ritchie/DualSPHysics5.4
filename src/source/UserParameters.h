@@ -310,6 +310,7 @@ public:
   struct StFlexRestartBoundaryData{
     std::vector<unsigned> Body;
     std::vector<byte> Selected;
+    std::vector<float> Beta; // Fixed geometry-only energy weights (mode 4).
     std::vector<tmatrix3f> ForceKernel;
     std::vector<tmatrix3f> Prestress;
   };

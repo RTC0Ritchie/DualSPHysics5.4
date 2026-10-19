@@ -672,7 +672,7 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
     return item;
   };
 
-  FlexRestartBoundaryCorrectionMode=readInteger(node,"mode",3);
+  FlexRestartBoundaryCorrectionMode=readInteger(node,"mode",4);
 
   const TiXmlElement* layers=readChild("layers");
   const TiXmlElement* limit=readChild("limit");
@@ -693,9 +693,10 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
   }
 
   if((FlexRestartBoundaryCorrectionMode==1 ||
-      FlexRestartBoundaryCorrectionMode==3) && !layers)
+      FlexRestartBoundaryCorrectionMode==3 ||
+      FlexRestartBoundaryCorrectionMode==4) && !layers)
     Run_ExceptioonFile(
-        "Boundary-layer correction modes 1/3 require layers; "
+        "Boundary-layer correction modes 1/3/4 require layers; "
         "use value=0 explicitly for all particles.",
         xml->ErrGetFileRow(node));
 
@@ -1154,10 +1155,12 @@ void UserParameters::VisuConfig(JLog2* log)const{
       FlexRestartBoundaryCorrectionMode,
       !FlexRestartRequested ? "inactive" :
       FlexRestartBoundaryCorrectionMode==0 ? "disabled" :
-      "enabled; force assembly only");
+      FlexRestartBoundaryCorrectionMode==4
+          ? "enabled; fixed geometric energy weights"
+          : "enabled; force assembly only");
 
   if(FlexRestartBoundaryCorrectionMode>=1 &&
-     FlexRestartBoundaryCorrectionMode<=3)
+     FlexRestartBoundaryCorrectionMode<=4)
     log->Printf("    Layers: %d (0=all; geometric shells per elastic body)",
         FlexRestartBoundaryCorrectionLayers);
 

@@ -855,7 +855,7 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
   const int mode=User->FlexRestartBoundaryCorrectionMode;
   if(mode==0)return;
 
-  if(mode<1 || mode>3)
+  if(mode<1 || mode>4)
     Run_Exceptioon("Invalid restart boundary correction mode.");
 
   if(User->UseFlexRestartGradientCorrection)
@@ -1124,6 +1124,157 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
     }
   }
 
+  if(mode==4){
+    // Geometry-only calibration. Material reference volumes are NOT used here.
+    // C maps scalar weights to the assembled constant-stress area vectors.
+    struct Entry{ unsigned row; tdouble3 c; };
+    std::vector<std::vector<Entry>> columns(np);
+    std::vector<tdouble3> target(np,TDouble3(0)),residual(np,TDouble3(0));
+    std::vector<double> beta(np,1.0),diagonal(np,0.0);
+    const double vg=Simulate2D ? Dp*Dp : Dp*Dp*Dp;
+    const double scale=vg*Dp; // vg^2 / dp^(dimension-1)
+    const double eta2=1.e-6,betaMin=0.05;
+
+    const auto dot=[](const tdouble3& a,const tdouble3& b){
+      return a.x*b.x+a.y*b.y+a.z*b.z;
+    };
+
+    const auto gradient=[&](unsigned i,unsigned j){
+      const tdouble3 r=Pos0c[i]-Pos0c[j];
+      const float x=float(r.x),y=Simulate2D ? 0.f : float(r.y),z=float(r.z);
+      const float rr=x*x+y*y+z*z;
+      const float fac=TKernel==KERNEL_Wendland
+          ? fsph::GetKernel_Fac<KERNEL_Wendland>(CSP,rr)
+          : fsph::GetKernel_Fac<KERNEL_Cubic>(CSP,rr);
+      return TDouble3(double(fac)*x,double(fac)*y,double(fac)*z);
+    };
+
+    for(unsigned i=0;i<np;i++){
+      double a[3][3]={};
+
+      for(unsigned k=0;k<NumPairsc[i];k++){
+        const unsigned j=PairIdxc[i][k];
+        if(j>=np || j==i || data.Body[i]!=data.Body[j])continue;
+
+        const tdouble3 r=Pos0c[j]-Pos0c[i],g=gradient(i,j);
+        const double rv[3]={r.x,Simulate2D ? 0.0 : r.y,r.z};
+        const double gv[3]={g.x,g.y,g.z};
+
+        for(unsigned u=0;u<3;u++)for(unsigned v=0;v<3;v++)
+          a[u][v]+=vg*rv[u]*gv[v];
+      }
+
+      if(Simulate2D)a[1][1]=1.0;
+
+      const tmatrix3d m=TMatrix3d(a[0][0],a[0][1],a[0][2],
+          a[1][0],a[1][1],a[1][2],a[2][0],a[2][1],a[2][2]);
+
+      const double det=fmath::Determinant3x3(m);
+      if(!std::isfinite(det) || det<=1.e-12)
+        Run_Exceptioon("Mode 4: singular geometric kernel moment.");
+
+      const tmatrix3d b=fmath::InverseMatrix3x3(m,det);
+      tdouble3 center=TDouble3(0);
+
+      for(unsigned k=0;k<NumPairsc[i];k++){
+        const unsigned j=PairIdxc[i][k];
+        if(j>=np || j==i || data.Body[i]!=data.Body[j])continue;
+
+        const tdouble3 g=gradient(i,j);
+        const tdouble3 raw=TDouble3(scale*g.x,scale*g.y,scale*g.z);
+
+        const tdouble3 q=TDouble3(
+            scale*(b.a11*g.x+b.a12*g.y+b.a13*g.z),
+            scale*(b.a21*g.x+b.a22*g.y+b.a23*g.z),
+            scale*(b.a31*g.x+b.a32*g.y+b.a33*g.z));
+
+        target[i]=target[i]-raw;
+        target[j]=target[j]+raw;
+        center=center-q;
+        columns[i].push_back(Entry{j,q});
+      }
+
+      columns[i].push_back(Entry{i,center});
+
+      for(const Entry& e:columns[i]){
+        residual[e.row]=residual[e.row]+e.c;
+        diagonal[i]+=dot(e.c,e.c);
+      }
+    }
+
+    double target2=0.0;
+    for(unsigned i=0;i<np;i++){
+      residual[i]=residual[i]-target[i];
+      target2+=dot(target[i],target[i]);
+    }
+
+    // Strictly convex bounded least squares; fixed particles stay at beta=1.
+    // Include ALL residual rows, including the unmodified transition region.
+    bool converged=false;
+    unsigned sweeps=0;
+    double projected=0.0;
+
+    for(;sweeps<200000;sweeps++){
+      for(unsigned i=0;i<np;i++)if(data.Selected[i]){
+        double grad=eta2*(beta[i]-1.0);
+        for(const Entry& e:columns[i])
+          grad+=dot(e.c,residual[e.row]);
+
+        const double next=std::max(betaMin,std::min(1.0,
+            beta[i]-grad/(diagonal[i]+eta2)));
+        const double change=next-beta[i];
+        beta[i]=next;
+
+        for(const Entry& e:columns[i])
+          residual[e.row]=residual[e.row]+TDouble3(
+              change*e.c.x,change*e.c.y,change*e.c.z);
+      }
+
+      projected=0.0;
+      for(unsigned i=0;i<np;i++)if(data.Selected[i]){
+        double grad=eta2*(beta[i]-1.0);
+        for(const Entry& e:columns[i])
+          grad+=dot(e.c,residual[e.row]);
+
+        const double next=std::max(betaMin,std::min(1.0,
+            beta[i]-grad/(diagonal[i]+eta2)));
+        projected=std::max(projected,std::fabs(next-beta[i]));
+      }
+
+      if(projected<1.e-9){
+        converged=true;
+        break;
+      }
+    }
+
+    if(!converged)
+      Run_Exceptioon(fun::PrintStr(
+          "Mode 4: geometric beta optimization did not converge "
+          "(projected=%.9g).",projected));
+
+    data.Beta.resize(np);
+    double r2=0.0,rmax=0.0,bmin=1.0,bmax=0.0;
+
+    for(unsigned i=0;i<np;i++){
+      data.Beta[i]=float(beta[i]);
+      const double rr=dot(residual[i],residual[i]);
+      r2+=rr;
+      rmax=std::max(rmax,std::sqrt(rr));
+      bmin=std::min(bmin,beta[i]);
+      bmax=std::max(bmax,beta[i]);
+    }
+
+    Log->Printf(
+        "  Mode 4: geometry-only beta, sweeps=%u, "
+        "range=[%.9g,%.9g], projected=%.3g.",
+        sweeps+1,bmin,bmax,projected);
+
+    Log->Printf(
+        "  Mode 4: area residual L2=%.6g, "
+        "max/dp^(d-1)=%.6g; eta=0.001, bounds=[0.05,1].",
+        std::sqrt(r2/std::max(target2,1.e-30)),rmax);
+  }
+
   std::vector<unsigned> total(FlexStrucCount,0);
   std::vector<unsigned> selected(FlexStrucCount,0);
 
@@ -1202,6 +1353,13 @@ tmatrix3f JSphCpu::BuildFlexRestartBoundaryForceMatrix(
 
       return result;
     }
+
+    case 4:
+      if(pfs>=data.Beta.size() || !std::isfinite(data.Beta[pfs]) ||
+         data.Beta[pfs]<=0.f)
+        Run_Exceptioon("Mode 4: invalid geometric energy weight.");
+
+      return ScaleFlexMatrix(original,data.Beta[pfs]);
 
     default:
       Run_Exceptioon("Invalid restart boundary correction mode.");
