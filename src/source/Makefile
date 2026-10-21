@@ -156,7 +156,7 @@ OBINOUT:=$(OBINOUT) JSphInOutPoints.o JSphInOutVel.o JSphInOutVelAwas.o JSphInOu
 OBINOUTGPU=JSphGpuSingle_InOut.o
 OBMESH=JMeshData.o JMeshTDatas.o JMeshTDatasLoad.o JMeshTDatasSave.o JMeshTDatasDsVel.o JMeshTDatasXml.o
 OBVRES=JSphVRes.o JSphVResZone.o JSphCpuSingle_VRes.o JSphGpuSingle_VRes.o JSphCpu_VRes.o JCaseVRes.o JVResDataLimits.o JDsVresData.o JBoxDef.o
-OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuation.o UserFlexRestartInitialization.o
+OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuation.o UserFlexRestartInitialization.o UserFlexBoundaryCorrection.o
 
 OBJECTS=$(OBJXML) $(OBJSPHMOTION) $(OBCOMMON) $(OBCOMMONDSPH) $(OBSPH) $(OBSPHSINGLE)
 OBJECTS:=$(OBJECTS) $(OBCOMMONGPU) $(OBSPHGPU) $(OBSPHSINGLEGPU) $(OBCUDA)

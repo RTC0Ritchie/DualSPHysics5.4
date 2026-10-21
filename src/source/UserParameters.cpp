@@ -3,6 +3,7 @@
 #include "JLog2.h"
 #include "JCaseEParms.h"
 #include "Functions.h"
+#include "UserFlexBoundaryCorrection.h"
 
 #include <algorithm>
 #include <set>
@@ -43,6 +44,9 @@ void UserParameters::Reset(){
   FlexRestartBoundaryCorrectionMode=0;
   FlexRestartBoundaryCorrectionLayers=0;
   FlexRestartBoundaryCorrectionLimit=1.5;
+  FlexRestartBoundaryCorrectionInwardReach=0.0;
+  FlexRestartBoundaryCorrectionQuadraticError=0.0;
+  FlexRestartBoundaryCorrectionBoundaryForm=1;
 
   FlexRestartRestorePairs=false;
   FlexRestartGradientCorrection=false;
@@ -635,7 +639,9 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
         xml->ErrGetFileRow(node));
 
   xml->CheckAttributeNames(node,"mode comment");
-  xml->CheckElementNames(node,true,"layers limit");
+  xml->CheckElementNames(
+      node,true,
+      "layers limit inwardreach quadraticerror boundaryform");
 
   const auto readInteger=
       [&](const TiXmlElement* item,const char* attribute,
@@ -672,10 +678,13 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
     return item;
   };
 
-  FlexRestartBoundaryCorrectionMode=readInteger(node,"mode",4);
+  FlexRestartBoundaryCorrectionMode=readInteger(node,"mode",5);
 
   const TiXmlElement* layers=readChild("layers");
   const TiXmlElement* limit=readChild("limit");
+  const TiXmlElement* inward=readChild("inwardreach");
+  const TiXmlElement* quadratic=readChild("quadraticerror");
+  const TiXmlElement* form=readChild("boundaryform");
 
   if(layers)
     FlexRestartBoundaryCorrectionLayers=
@@ -692,11 +701,36 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
     FlexRestartBoundaryCorrectionLimit=value;
   }
 
+  if(inward)
+    FlexRestartBoundaryCorrectionInwardReach=
+        xml->GetAttributeDouble(inward,"value");
+
+  if(quadratic)
+    FlexRestartBoundaryCorrectionQuadraticError=
+        xml->GetAttributeDouble(quadratic,"value");
+
+  if(form)
+    FlexRestartBoundaryCorrectionBoundaryForm=
+        readInteger(form,"value",3);
+
+  FlexBoundaryCorrection::Options options;
+  options.Layers=FlexRestartBoundaryCorrectionLayers;
+  options.InwardReach=FlexRestartBoundaryCorrectionInwardReach;
+  options.QuadraticError=FlexRestartBoundaryCorrectionQuadraticError;
+  options.BoundaryForm=FlexRestartBoundaryCorrectionBoundaryForm;
+
+  const std::string error=
+      FlexBoundaryCorrection::ValidateOptions(options);
+
+  if(!error.empty())
+    Run_ExceptioonFile(error,xml->ErrGetFileRow(node));
+
   if((FlexRestartBoundaryCorrectionMode==1 ||
       FlexRestartBoundaryCorrectionMode==3 ||
-      FlexRestartBoundaryCorrectionMode==4) && !layers)
+      FlexRestartBoundaryCorrectionMode==4 ||
+      FlexRestartBoundaryCorrectionMode==5) && !layers)
     Run_ExceptioonFile(
-        "Boundary-layer correction modes 1/3/4 require layers; "
+        "Boundary-layer correction modes 1/3/4/5 require layers; "
         "use value=0 explicitly for all particles.",
         xml->ErrGetFileRow(node));
 
@@ -1150,23 +1184,51 @@ void UserParameters::VisuConfig(JLog2* log)const{
           ? "requested; irrelevant for undeformed field"
           : "inactive");
 
+  const int boundaryMode=FlexRestartBoundaryCorrectionMode;
+
   log->Printf(
       "  FlexRestart.BoundaryLayerCorrection: mode=%d; %s",
-      FlexRestartBoundaryCorrectionMode,
+      boundaryMode,
       !FlexRestartRequested ? "inactive" :
-      FlexRestartBoundaryCorrectionMode==0 ? "disabled" :
-      FlexRestartBoundaryCorrectionMode==4
-          ? "enabled; fixed geometric energy weights"
-          : "enabled; force assembly only");
+      boundaryMode==0 ? "disabled" :
+      boundaryMode==5
+          ? "configured; static compatible gradients"
+          : boundaryMode==4
+              ? "enabled; fixed geometric energy weights"
+              : "enabled; force assembly only");
 
-  if(FlexRestartBoundaryCorrectionMode>=1 &&
-     FlexRestartBoundaryCorrectionMode<=4)
-    log->Printf("    Layers: %d (0=all; geometric shells per elastic body)",
+  if(boundaryMode>=1 && boundaryMode<=5)
+    log->Printf(
+        "    Layers: %d (0=all; geometric shells per elastic body)",
         FlexRestartBoundaryCorrectionLayers);
 
-  if(FlexRestartBoundaryCorrectionMode==2)
-    log->Printf("    Limit: %.17g (1 < value <= 10)",
+  if(boundaryMode==2)
+    log->Printf(
+        "    Limit: %.17g (1 < value <= 10)",
         FlexRestartBoundaryCorrectionLimit);
+
+  const char* boundaryForm=
+      FlexRestartBoundaryCorrectionBoundaryForm==1 ? "fluid" :
+      FlexRestartBoundaryCorrectionBoundaryForm==2 ? "solid" :
+      "mixed";
+
+  const char* mode5Status=
+      !FlexRestartRequested ? "inactive: User restart disabled" :
+      boundaryMode!=5 ? "inactive: mode 5 only" :
+      "mode 5 only";
+
+  log->Printf(
+      "    InwardReach: %.17g h (0=disabled; %s)",
+      FlexRestartBoundaryCorrectionInwardReach,mode5Status);
+
+  log->Printf(
+      "    QuadraticError: %.17g (0=disabled; %s)",
+      FlexRestartBoundaryCorrectionQuadraticError,mode5Status);
+
+  log->Printf(
+      "    BoundaryForm: %d (%s; %s)",
+      FlexRestartBoundaryCorrectionBoundaryForm,
+      boundaryForm,mode5Status);
         
   const char* elasticInput=
       FlexRestartElasticInput==1 ? "file" :

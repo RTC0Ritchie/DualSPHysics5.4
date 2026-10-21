@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <memory>
 
 #include "JObject.h"
 #include "TypesDef.h"
@@ -10,6 +11,10 @@
 class JXml;
 class JLog2;
 class TiXmlElement;
+
+namespace FlexBoundaryCorrection{
+  struct Cache;
+}
 
 class UserParameters : protected JObject
 {
@@ -68,8 +73,12 @@ public:
   bool FlexRestartDensityIsNatural;
 
   int FlexRestartBoundaryCorrectionMode;
+  
   int FlexRestartBoundaryCorrectionLayers;
   double FlexRestartBoundaryCorrectionLimit;
+  double FlexRestartBoundaryCorrectionInwardReach;
+  double FlexRestartBoundaryCorrectionQuadraticError;
+  int FlexRestartBoundaryCorrectionBoundaryForm;
 
 
 
@@ -313,6 +322,7 @@ public:
     std::vector<float> Beta; // Fixed geometry-only energy weights (mode 4).
     std::vector<tmatrix3f> ForceKernel;
     std::vector<tmatrix3f> Prestress;
+    std::shared_ptr<FlexBoundaryCorrection::Cache> Correction;
   };
 
   StFlexRestartBoundaryData FlexRestartBoundaryData;
