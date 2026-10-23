@@ -173,8 +173,6 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
     Run_Exceptioon("FlexRestart: restart state is unavailable.");
 
   const bool useBoundary=
-      (User.IsFlexPrescribedRestart() ||
-       User.IsFlexModelTransferRestart()) &&
       User.FlexRestartBoundaryCorrectionMode==5;
   const bool useGradient=
       isRestart && User.UseFlexRestartGradientCorrection;
@@ -213,9 +211,17 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
       flexDensity[pfs]=material.rho0/jrelative;
 
       // Keep the current force assembly convention.
-      flexForceMatrix[pfs]=ScaleFlexMatrix(
-          fmath::MulMatrix3x3(pk1,kercorr[pfs]),
-          material.vol0*material.vol0);
+      if(useBoundary){
+        flexPk1Reference[pfs]=pk1;
+        flexForceMatrix[pfs]=pk1;
+      }
+      else{
+        flexForceMatrix[pfs]=ScaleFlexMatrix(
+            BuildFlexRestartBoundaryForceMatrix(
+                pfs,CODE_GetIbodyFlexStruc(code[p]),
+                frelative,pk1,kercorr[pfs]),
+            material.vol0*material.vol0);
+      }
     }
     else{
       // Verify stable particle identity.
@@ -737,8 +743,6 @@ template<TpKernel tker,bool simulate2d> void JSphCpu::CalcFlexStrucDefGrad(unsig
     Run_Exceptioon("Flexible gradient cache is unavailable.");
 
   const bool useBoundary=
-      (User->IsFlexPrescribedRestart() ||
-       User->IsFlexModelTransferRestart()) &&
       User->FlexRestartBoundaryCorrectionMode==5;
 
   if(useBoundary){

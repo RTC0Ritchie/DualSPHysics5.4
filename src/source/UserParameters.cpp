@@ -83,7 +83,8 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
   }
   const TiXmlElement* root=node->ToElement();
   xml->CheckElementNames(
-      root,true,"*parameter output restart directcontinuation");
+      root,true,
+      "*parameter output restart directcontinuation boundarylayercorrection");
 
   // Record active parameter nodes and reject duplicate keys.
   std::map<std::string,const TiXmlElement*> nodes;
@@ -412,8 +413,24 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     FlexRestartDensityIsNatural=
         readRestartBool("densityreference","natural",true);
     LoadRestartElasticInputXml(xml,restart);
-    LoadRestartBoundaryCorrectionXml(xml,restart);
   }
+
+  const TiXmlElement* boundary=
+      root->FirstChildElement("boundarylayercorrection");
+
+  const TiXmlElement* legacyBoundary=restart
+      ? restart->FirstChildElement("boundarylayercorrection")
+      : nullptr;
+
+  if(boundary && legacyBoundary)
+    Run_ExceptioonFile(
+        "Specify boundarylayercorrection only once, preferably under User.",
+        xml->ErrGetFileRow(boundary));
+
+  if(boundary)
+    LoadRestartBoundaryCorrectionXml(xml,root);
+  else if(legacyBoundary)
+    LoadRestartBoundaryCorrectionXml(xml,restart);
 
   // ------------------------------------------------------------
   // Direct-continuation corrections.
@@ -635,7 +652,7 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
 
   if(node->NextSiblingElement("boundarylayercorrection"))
     Run_ExceptioonFile(
-        "Repeated User.restart.boundarylayercorrection node.",
+        "Repeated boundarylayercorrection node.",
         xml->ErrGetFileRow(node));
 
   xml->CheckAttributeNames(node,"mode comment");
@@ -1187,9 +1204,8 @@ void UserParameters::VisuConfig(JLog2* log)const{
   const int boundaryMode=FlexRestartBoundaryCorrectionMode;
 
   log->Printf(
-      "  FlexRestart.BoundaryLayerCorrection: mode=%d; %s",
+      "  BoundaryLayerCorrection: mode=%d; %s",
       boundaryMode,
-      !FlexRestartRequested ? "inactive" :
       boundaryMode==0 ? "disabled" :
       boundaryMode==5
           ? "configured; static compatible gradients"
@@ -1213,7 +1229,6 @@ void UserParameters::VisuConfig(JLog2* log)const{
       "mixed";
 
   const char* mode5Status=
-      !FlexRestartRequested ? "inactive: User restart disabled" :
       boundaryMode!=5 ? "inactive: mode 5 only" :
       "mode 5 only";
 
@@ -1310,6 +1325,17 @@ void UserParameters::ConfigFlexRestartCorrections(
   reportUnused(
       "hourglasscorrection",
       FlexRestartHourglassCorrection);
+
+  if(FlexRestartBoundaryCorrectionMode!=0 &&
+     UseFlexRestartGradientCorrection)
+    Run_Exceptioon(
+        "Boundary correction requires directcontinuation.gradientcorrection=false.");
+
+  if(FlexRestartBoundaryCorrectionMode==5 &&
+     UseFlexRestartHourglassCorrection)
+    Run_Exceptioon(
+        "Mode 5 requires directcontinuation.hourglasscorrection=false; "
+        "its own matched hourglass is used.");
 
   // Check dependencies only when direct-continuation corrections apply.
   if(UseFlexRestartGradientCorrection &&

@@ -3228,14 +3228,11 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
   auto& data=User->FlexRestartBoundaryData;
   data=UserParameters::StFlexRestartBoundaryData{};
 
-  if(!User->IsFlexPrescribedRestart() &&
-     !User->IsFlexModelTransferRestart())return;
-
   const int mode=User->FlexRestartBoundaryCorrectionMode;
   if(mode==0)return;
 
   if(mode<1 || mode>5)
-    Run_Exceptioon("Invalid restart boundary correction mode.");
+    Run_Exceptioon("Invalid boundary correction mode.");
 
   if(mode==5){
     if(FlexStrucCount!=1)
@@ -3411,14 +3408,26 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
     options.BoundaryForm=
         User->FlexRestartBoundaryCorrectionBoundaryForm;
 
-    if(User->FlexRestartState.ReferenceVolume.size()!=np)
-      Run_Exceptioon(
-          "Mode 5: reference volume is unavailable.");
-    const auto& particleMass=User->FlexRestartState.ParticleMass;
+    std::vector<float> referenceVolume(np),particleMass(np);
 
-    if(particleMass.size()!=np)
-      Run_Exceptioon(
-          "Mode 5: particle mass is unavailable.");
+    if(User->IsFlexRestart()){
+      const auto& state=User->FlexRestartState;
+
+      if(!state.HasRestartStateLayout() || state.Idp.size()!=np)
+        Run_Exceptioon(
+            "Mode 5: elastic restart state is unavailable.");
+
+      referenceVolume=state.ReferenceVolume;
+      particleMass=state.ParticleMass;
+    }
+    else{
+      for(unsigned i=0;i<np;i++){
+        const auto& material=FlexStrucDatac[data.Body[i]];
+
+        referenceVolume[i]=material.vol0;
+        particleMass[i]=material.vol0*material.rho0;
+      }
+    }
 
     options.ParticleMass=particleMass.data();
     options.ParticleMassCount=np;
@@ -3437,7 +3446,7 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
       const auto report=FlexBoundaryCorrection::Initialize(
           options,Simulate2D,Dp,np,
           Pos0c,data.Body.data(),data.Selected.data(),
-          User->FlexRestartState.ReferenceVolume.data(),
+          referenceVolume.data(),
           NumPairsc,PairIdxc,fac,data.Correction);
 
       Log->Printf(
@@ -3582,14 +3591,20 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
           ? capKernel(KerCorrc[i]) : KerCorrc[i];
   }
 
-  if(mode==3){
+  if(mode==3)
+    data.Prestress.assign(np,TMatrix3f(0));
+
+  if(mode==3 && !User->IsFlexRestart())
+    Log->Print(
+        "  Mode 3: ordinary stress-free reference; "
+        "prestress compensation is zero.");
+
+  if(mode==3 && User->IsFlexRestart()){
     const auto& state=User->FlexRestartState;
 
     if(!state.HasRestartStateLayout() || state.Idp.size()!=np)
       Run_Exceptioon(
           "Boundary correction: initial elastic state is unavailable.");
-
-    data.Prestress.assign(np,TMatrix3f(0));
 
     for(unsigned i=0;i<np;i++)if(data.Selected[i]){
       const unsigned id=Idp_c->cptr()[FlexStrucRidpc[i]];
@@ -3765,7 +3780,7 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
 
   for(unsigned b=0;b<FlexStrucCount;b++)
     Log->Printf(
-        "  Restart boundary correction: mode=%d, body=%u, scope=%u/%u particles.",
+        "  Boundary correction: mode=%d, body=%u, scope=%u/%u particles.",
         mode,b,selected[b],total[b]);
 }
 
@@ -3776,9 +3791,6 @@ tmatrix3f JSphCpu::BuildFlexRestartBoundaryForceMatrix(
 {
   const tmatrix3f original=
       fmath::MulMatrix3x3(preference,kercorr);
-
-  if(!User->IsFlexPrescribedRestart() &&
-     !User->IsFlexModelTransferRestart())return original;
 
   const int mode=User->FlexRestartBoundaryCorrectionMode;
   if(mode==0)return original;
@@ -3842,7 +3854,7 @@ tmatrix3f JSphCpu::BuildFlexRestartBoundaryForceMatrix(
       return ScaleFlexMatrix(original,data.Beta[pfs]);
 
     default:
-      Run_Exceptioon("Invalid restart boundary correction mode.");
+      Run_Exceptioon("Invalid boundary correction mode.");
   }
 
   return original;

@@ -401,7 +401,6 @@ void JSphCpuSingle::SaveUserOutput(
 
     const bool boundaryCorrectionActive=
         outputBoundary &&
-        (User.IsFlexPrescribedRestart() || User.IsFlexModelTransferRestart()) &&
         User.FlexRestartBoundaryCorrectionMode!=0;
 
     // SPH volume requires mass at every output frame.
