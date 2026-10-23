@@ -78,6 +78,7 @@ public:
   int FlexRestartBoundaryCorrectionLayers;
   double FlexRestartBoundaryCorrectionLimit;
   double FlexRestartBoundaryCorrectionInwardReach;
+  unsigned FlexRestartBoundaryCorrectionMaxIterations;
   double FlexRestartBoundaryCorrectionQuadraticError;
   int FlexRestartBoundaryCorrectionBoundaryForm;
 

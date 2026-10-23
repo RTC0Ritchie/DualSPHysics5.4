@@ -46,6 +46,7 @@ void UserParameters::Reset(){
   FlexRestartBoundaryCorrectionLayers=0;
   FlexRestartBoundaryCorrectionLimit=1.5;
   FlexRestartBoundaryCorrectionInwardReach=0.0;
+  FlexRestartBoundaryCorrectionMaxIterations=2000;
   FlexRestartBoundaryCorrectionQuadraticError=0.0;
   FlexRestartBoundaryCorrectionBoundaryForm=1;
 
@@ -692,7 +693,7 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
   xml->CheckAttributeNames(node,"mode comment");
   xml->CheckElementNames(
       node,true,
-      "layers limit inwardreach quadraticerror boundaryform");
+      "layers limit inwardreach quadraticerror boundaryform maxiterations");
 
   const auto readInteger=
       [&](const TiXmlElement* item,const char* attribute,
@@ -735,6 +736,7 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
   const TiXmlElement* limit=readChild("limit");
   const TiXmlElement* inward=readChild("inwardreach");
   const TiXmlElement* quadratic=readChild("quadraticerror");
+  const TiXmlElement* maximum=readChild("maxiterations");
   const TiXmlElement* form=readChild("boundaryform");
 
   if(layers)
@@ -757,8 +759,12 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
         xml->GetAttributeDouble(inward,"value");
 
   if(quadratic)
-    FlexRestartBoundaryCorrectionQuadraticError=
-        xml->GetAttributeDouble(quadratic,"value");
+    FlexRestartBoundaryCorrectionQuadraticError=xml->GetAttributeDouble(quadratic,"value");
+  if(maximum){
+    const int value=readInteger(maximum,"value",std::numeric_limits<int>::max());
+    if(value==0)Run_ExceptioonFile("Mode 5 maxiterations must be positive.",xml->ErrGetFileRow(maximum));
+    FlexRestartBoundaryCorrectionMaxIterations=unsigned(value);
+  }
 
   if(form)
     FlexRestartBoundaryCorrectionBoundaryForm=
@@ -767,6 +773,7 @@ void UserParameters::LoadRestartBoundaryCorrectionXml(
   FlexBoundaryCorrection::Options options;
   options.Layers=FlexRestartBoundaryCorrectionLayers;
   options.InwardReach=FlexRestartBoundaryCorrectionInwardReach;
+  options.MaxIterations=FlexRestartBoundaryCorrectionMaxIterations;
   options.QuadraticError=FlexRestartBoundaryCorrectionQuadraticError;
   options.BoundaryForm=FlexRestartBoundaryCorrectionBoundaryForm;
 
@@ -1242,7 +1249,7 @@ void UserParameters::VisuConfig(JLog2* log)const{
       boundaryMode,
       boundaryMode==0 ? "disabled" :
       boundaryMode==5
-          ? "configured; static compatible gradients"
+          ? "configured; regularized geometry and slow mixed projection"
           : boundaryMode==4
               ? "enabled; fixed geometric energy weights"
               : "enabled; force assembly only");
@@ -1271,7 +1278,10 @@ void UserParameters::VisuConfig(JLog2* log)const{
       FlexRestartBoundaryCorrectionInwardReach,mode5Status);
 
   log->Printf(
-      "    QuadraticError: %.17g (0=disabled; %s)",
+      "    MaxIterations: %u per component (%s)",
+      FlexRestartBoundaryCorrectionMaxIterations,mode5Status);
+
+  log->Printf("    QuadraticError: %.17g (0=disabled; initialization only; %s)",
       FlexRestartBoundaryCorrectionQuadraticError,mode5Status);
 
   log->Printf(

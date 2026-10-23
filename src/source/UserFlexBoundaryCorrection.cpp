@@ -9,6 +9,8 @@
 #include "UserFlexInline.h"
 
 #include <exception>
+#include <chrono>
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -28,7 +30,18 @@ struct Edge{
   Vec R,D,raw;
 };
 
+struct RegularizedState;
 struct Cache{
+  std::shared_ptr<RegularizedState> reg;
+  unsigned maxIterations=2000;
+  double quadraticError=0;
+  std::vector<tdouble3> quadraticReference;
+  std::vector<unsigned> quadraticBody;
+  std::vector<byte> quadraticSelected;
+  double kernelH=0,eventTime=0;
+  bool eventPending=false,localReady=false,stepClockReady=false;
+  ContactGeometry pendingContact;
+  std::vector<double> mass,referenceNorm2;
   AuxiliaryLoads loads;
   int dim=2;
 
@@ -38,21 +51,14 @@ struct Cache{
   bool mixed=false;
   double dp=0;
 
-  // Frozen fluid operator and solid-minus-fluid increment.
-  std::vector<std::vector<Vec>> base,delta;
 
   // Fixed positive interpolation weights onto existing surface particles.
   std::vector<std::vector<std::pair<unsigned,double>>> blend;
 
-  std::vector<std::array<double,9>> dF;
-  std::vector<Vec> gateGradient,current;
   std::vector<double> eta;
 
-  tdouble3 supportForce=TDouble3(0);
-  tdouble3 supportMoment=TDouble3(0);
 
   std::vector<byte> active;
-  std::vector<double> mobility;
 
   // Runtime graph and reusable work arrays.
   bool runtimeReady=false,hgReady=false,fixedReady=false;
@@ -60,12 +66,471 @@ struct Cache{
   std::vector<std::vector<size_t>> incoming;
   std::vector<tdouble3> flux,hgFlux;
   std::vector<Vec> hgR;
-  std::vector<double> hgWeight,gate,mixedB;
+  std::vector<double> hgWeight,gate;
   std::vector<tmatrix3f> totalPK;
-  std::vector<std::vector<std::pair<unsigned,double>>> blendIncoming;
   std::vector<byte> used;
   std::map<std::array<long long,3>,std::vector<Vec>> fixedCells;
   std::vector<tdouble3> fixedSaved;
+};
+
+namespace RegularizedMG{
+
+using Vector=std::vector<double>;
+using Basis=std::vector<Vector>;
+using Point=std::array<double,3>;
+using Row=std::vector<std::pair<unsigned,double>>;
+
+static void Require(bool ok,const char* message){
+  if(!ok)throw std::runtime_error(message);
+}
+
+static double Inner(const Vector& a,const Vector& b){
+  double s=0;
+
+  for(size_t i=0;i<a.size();i++)
+    s+=a[i]*b[i];
+
+  return s;
+}
+
+static void Remove(Vector& x,const Basis& q){
+  for(int pass=0;pass<2;pass++)
+    for(const auto& v:q){
+      const double a=Inner(x,v);
+
+      for(size_t i=0;i<x.size();i++)
+        x[i]-=a*v[i];
+    }
+}
+
+static Basis Orthonormal(const Basis& b){
+  Basis q;
+
+  for(auto x:b){
+    const double original=std::sqrt(Inner(x,x));
+
+    Remove(x,q);
+
+    const double length=std::sqrt(Inner(x,x));
+
+    if(length<=1.e-12*original || length==0)
+      continue;
+
+    for(double& v:x)
+      v/=length;
+
+    q.push_back(std::move(x));
+  }
+
+  return q;
+}
+
+struct Sparse{
+  unsigned cols=0;
+  std::vector<Row> row;
+  struct Packed{
+    std::vector<size_t> offset;
+    std::vector<unsigned> index;
+    std::vector<double> value;
+  };
+  std::shared_ptr<const Packed> packed;
+  // Rows are immutable after packing; copies share the contiguous storage.
+  void Pack(){
+    if(packed)return;
+    auto data=std::make_shared<Packed>();data->offset.reserve(row.size()+1);data->offset.push_back(0);
+    size_t count=0;for(const auto& r:row)count+=r.size();data->index.reserve(count);data->value.reserve(count);
+    for(const auto& r:row){for(const auto& e:r){data->index.push_back(e.first);data->value.push_back(e.second);}data->offset.push_back(data->index.size());}
+    packed=data;
+  }
+
+  Sparse()=default;
+
+  Sparse(unsigned n,unsigned m)
+    :cols(m),row(n){}
+
+  Vector Apply(const Vector& x)const{
+    Vector y(row.size(),0);
+    if(packed){
+      const auto& p=*packed;
+      for(size_t i=0;i<row.size();i++){
+        double sum=0;for(size_t e=p.offset[i];e<p.offset[i+1];e++)sum+=p.value[e]*x[p.index[e]];y[i]=sum;
+      }
+      return y;
+    }
+
+    for(size_t i=0;i<row.size();i++){
+      double sum=0;
+      for(const auto& e:row[i])sum+=e.second*x[e.first];
+      y[i]=sum;
+    }
+
+    return y;
+  }
+
+  Sparse Transpose()const{
+    Sparse t(cols,unsigned(row.size()));
+
+    for(unsigned i=0;i<row.size();i++)
+      for(const auto& e:row[i])
+        t.row[e.first].emplace_back(i,e.second);
+
+    return t;
+  }
+
+  Sparse Multiply(const Sparse& b)const{
+    Require(
+        cols==b.row.size(),
+        "MG sparse dimensions.");
+
+    Sparse c(unsigned(row.size()),b.cols);
+
+    Vector value(b.cols,0);
+    std::vector<size_t> mark(b.cols,row.size());
+    std::vector<unsigned> used;
+
+    for(size_t i=0;i<row.size();i++){
+      used.clear();
+
+      for(const auto& e:row[i])
+        for(const auto& f:b.row[e.first]){
+          const unsigned j=f.first;
+
+          if(mark[j]!=i){
+            mark[j]=i;
+            value[j]=0;
+            used.push_back(j);
+          }
+
+          value[j]+=e.second*f.second;
+        }
+
+      std::sort(used.begin(),used.end());
+
+      for(unsigned j:used)
+        if(value[j]!=0)
+          c.row[i].emplace_back(j,value[j]);
+    }
+
+    return c;
+  }
+};
+
+class Solver{
+  struct Level{
+    Sparse a,p,pt;
+    Vector weight,lower;
+    Basis nullspace;
+  };
+
+  std::vector<Level> levels;
+  Basis nullspace;
+
+  static void Partition(
+      const std::vector<Point>& x,int d,
+      std::vector<unsigned> ids,
+      std::vector<std::vector<unsigned>>& groups)
+  {
+    if(ids.size()<=32){
+      groups.push_back(std::move(ids));
+      return;
+    }
+
+    int axis=0;
+    double longest=-1;
+
+    for(int k=0;k<d;k++){
+      double lo=x[ids[0]][k],hi=lo;
+
+      for(unsigned i:ids){
+        lo=std::min(lo,x[i][k]);
+        hi=std::max(hi,x[i][k]);
+      }
+
+      if(hi-lo>longest){
+        longest=hi-lo;
+        axis=k;
+      }
+    }
+
+    const size_t mid=ids.size()/2;
+
+    std::nth_element(
+        ids.begin(),ids.begin()+mid,ids.end(),
+        [&](unsigned i,unsigned j){
+          return x[i][axis]<x[j][axis] ||
+              (x[i][axis]==x[j][axis] && i<j);
+        });
+
+    std::vector<unsigned> right(
+        ids.begin()+mid,ids.end());
+
+    ids.resize(mid);
+
+    Partition(x,d,std::move(ids),groups);
+    Partition(x,d,std::move(right),groups);
+  }
+
+  void Build(
+      Sparse a,Basis b,
+      std::vector<Point> x,int d)
+  {
+    const unsigned n=unsigned(a.row.size());
+
+    Level l;
+    l.a=std::move(a);
+    l.a.Pack();
+
+    Vector diag(n,0);
+
+    for(unsigned i=0;i<n;i++)
+      for(const auto& e:l.a.row[i])
+        if(e.first==i)
+          diag[i]=e.second;
+
+    for(double v:diag)
+      Require(
+          std::isfinite(v)&&v>0,
+          "MG invalid diagonal.");
+
+    if(n<128){
+      // The shifted system is positive definite; retain all coarse modes.
+      l.lower.assign(size_t(n)*n,0);
+
+      for(unsigned i=0;i<n;i++)
+        for(const auto& e:l.a.row[i])
+          l.lower[size_t(i)*n+e.first]=e.second;
+
+      const double scale=
+          *std::max_element(diag.begin(),diag.end());
+
+      // Stabilize affine gauge modes before Cholesky factorization.
+      for(unsigned i=0;i<n;i++)
+        for(unsigned j=0;j<=i;j++){
+          double v=.5*(
+              l.lower[size_t(i)*n+j]+
+              l.lower[size_t(j)*n+i]);
+
+          for(const auto& q:l.nullspace)
+            v+=scale*q[i]*q[j];
+
+          for(unsigned k=0;k<j;k++)
+            v-=l.lower[size_t(i)*n+k]*
+                l.lower[size_t(j)*n+k];
+
+          if(i==j){
+            Require(
+                std::isfinite(v)&&v>1.e-16*scale,
+                "MG coarse factorization failed.");
+
+            l.lower[size_t(i)*n+j]=std::sqrt(v);
+          }
+          else{
+            l.lower[size_t(i)*n+j]=
+                v/l.lower[size_t(j)*n+j];
+          }
+        }
+
+      levels.push_back(std::move(l));
+      return;
+    }
+
+    double bound=0;
+
+    for(unsigned i=0;i<n;i++){
+      double sum=0;
+
+      for(const auto& e:l.a.row[i])
+        sum+=std::abs(e.second)/
+            std::sqrt(diag[i]*diag[e.first]);
+
+      bound=std::max(bound,sum);
+    }
+
+    l.weight.resize(n);
+
+    for(unsigned i=0;i<n;i++)
+      l.weight[i]=1.4/(bound*diag[i]);
+
+    std::vector<unsigned> ids(n);
+
+    for(unsigned i=0;i<n;i++)
+      ids[i]=i;
+
+    std::vector<std::vector<unsigned>> groups;
+    Partition(x,d,std::move(ids),groups);
+
+    Sparse t(n,0);
+    Basis bc(b.size());
+    std::vector<Point> xc;
+
+    for(const auto& group:groups){
+      Basis local(b.size(),Vector(group.size()));
+      Point center={{0,0,0}};
+
+      for(size_t j=0;j<group.size();j++){
+        for(size_t k=0;k<b.size();k++)
+          local[k][j]=b[k][group[j]];
+
+        for(int k=0;k<d;k++)
+          center[k]+=x[group[j]][k]/group.size();
+      }
+
+      const Basis q=Orthonormal(local);
+
+      for(const auto& col:q){
+        for(size_t j=0;j<group.size();j++)
+          t.row[group[j]].emplace_back(t.cols,col[j]);
+
+        for(size_t k=0;k<b.size();k++)
+          bc[k].push_back(Inner(col,local[k]));
+
+        xc.push_back(center);
+        t.cols++;
+      }
+    }
+
+    Require(
+        t.cols>0 && t.cols<n,
+        "MG coarsening stalled.");
+
+    Sparse at=l.a.Multiply(t);
+    l.p=Sparse(n,t.cols);
+
+    // Smooth the tentative interpolation.
+    for(unsigned i=0;i<n;i++){
+      std::map<unsigned,double> values;
+
+      for(const auto& e:t.row[i])
+        values[e.first]+=e.second;
+
+      for(const auto& e:at.row[i])
+        values[e.first]-=l.weight[i]*e.second;
+
+      for(const auto& e:values)
+        if(e.second!=0)
+          l.p.row[i].push_back(e);
+    }
+
+    l.pt=l.p.Transpose();
+    l.p.Pack();l.pt.Pack();
+
+    Sparse coarse=
+        l.pt.Multiply(l.a.Multiply(l.p));
+
+    levels.push_back(std::move(l));
+
+    Build(
+        std::move(coarse),
+        std::move(bc),
+        std::move(xc),d);
+  }
+
+  Vector Cycle(size_t level,const Vector& rhs)const{
+    const auto& l=levels[level];
+    const size_t n=rhs.size();
+
+    Vector x(n,0);
+
+    if(!l.lower.empty()){
+      x=rhs;
+      // No gauge projection for the shifted system.
+
+      for(size_t i=0;i<n;i++){
+        for(size_t j=0;j<i;j++)
+          x[i]-=l.lower[i*n+j]*x[j];
+
+        x[i]/=l.lower[i*n+i];
+      }
+
+      for(size_t i=n;i-->0;){
+        for(size_t j=i+1;j<n;j++)
+          x[i]-=l.lower[j*n+i]*x[j];
+
+        x[i]/=l.lower[i*n+i];
+      }
+
+      // No gauge projection for the shifted system.
+      return x;
+    }
+
+    const auto smooth=[&](){
+      const auto ax=l.a.Apply(x);
+
+      for(size_t i=0;i<n;i++)
+        x[i]+=l.weight[i]*(rhs[i]-ax[i]);
+    };
+
+    for(int k=0;k<3;k++)
+      smooth();
+
+    Vector r=l.a.Apply(x);
+
+    for(size_t i=0;i<n;i++)
+      r[i]=rhs[i]-r[i];
+
+    const auto correction=
+        l.p.Apply(Cycle(level+1,l.pt.Apply(r)));
+
+    for(size_t i=0;i<n;i++)
+      x[i]+=correction[i];
+
+    for(int k=0;k<3;k++)
+      smooth();
+
+    return x;
+  }
+
+public:
+  Solver(
+      Sparse a,
+      const std::vector<Point>& x,int d)
+  {
+    Require(
+        !x.empty() && a.row.size()==x.size(),
+        "MG empty or invalid dimensions.");
+
+    Basis b(d+1,Vector(x.size(),1));
+
+    for(int k=0;k<d;k++){
+      double mean=0;
+
+      for(const auto& p:x)
+        mean+=p[k]/x.size();
+
+      for(size_t i=0;i<x.size();i++)
+        b[k+1][i]=x[i][k]-mean;
+    }
+
+    nullspace=Orthonormal(b);
+
+    Build(std::move(a),nullspace,x,d);
+  }
+
+  Vector Apply(Vector r)const{
+    // No gauge projection for the shifted system.
+    r=Cycle(0,r);
+    // No gauge projection for the shifted system.
+    return r;
+  }
+
+
+};
+
+}
+
+
+struct RegularizedState{
+  RegularizedMG::Sparse matrix;
+  std::vector<double> referenceDiagonal;
+  std::shared_ptr<RegularizedMG::Solver> solver;
+  std::vector<unsigned> ids;
+  std::vector<byte> active;
+  std::vector<Mat> inverse;
+  std::vector<Vec> fluid,solid,baseArea;
+  std::vector<std::vector<Vec>> particular;
+  RegularizedMG::Vector lambda[3];
+  double rhsNorm[3]={0,0,0};
+  double initialResidual=0,lastEvent=0;
 };
 
 namespace{
@@ -93,15 +558,12 @@ void PrepareRuntime(Cache& c){
   c.hgFlux.resize(ne);
   c.totalPK.resize(n);
   c.gate.assign(n,0);
-  c.mixedB.resize(n);
   c.used.assign(n,0);
-  c.blendIncoming.assign(n,{});
 
   if(c.mixed)
     for(unsigned i=0;i<n;i++)
       for(const auto& w:c.blend[i]){
         c.used[w.first]=1;
-        c.blendIncoming[w.first].push_back({i,w.second});
       }
 
   c.runtimeReady=true;
@@ -238,490 +700,6 @@ Mat Inverse(const Mat& a,int d){
   return inv;
 }
 
-// Standard-library-only geometry multigrid support.
-namespace GeometryMG{
-
-using Vector=std::vector<double>;
-using Basis=std::vector<Vector>;
-using Point=std::array<double,3>;
-using Row=std::vector<std::pair<unsigned,double>>;
-
-static void Require(bool ok,const char* message){
-  if(!ok)throw std::runtime_error(message);
-}
-
-static double Inner(const Vector& a,const Vector& b){
-  double s=0;
-
-  for(size_t i=0;i<a.size();i++)
-    s+=a[i]*b[i];
-
-  return s;
-}
-
-static void Remove(Vector& x,const Basis& q){
-  for(int pass=0;pass<2;pass++)
-    for(const auto& v:q){
-      const double a=Inner(x,v);
-
-      for(size_t i=0;i<x.size();i++)
-        x[i]-=a*v[i];
-    }
-}
-
-static Basis Orthonormal(const Basis& b){
-  Basis q;
-
-  for(auto x:b){
-    const double original=std::sqrt(Inner(x,x));
-
-    Remove(x,q);
-
-    const double length=std::sqrt(Inner(x,x));
-
-    if(length<=1.e-12*original || length==0)
-      continue;
-
-    for(double& v:x)
-      v/=length;
-
-    q.push_back(std::move(x));
-  }
-
-  return q;
-}
-
-struct Sparse{
-  unsigned cols=0;
-  std::vector<Row> row;
-
-  Sparse()=default;
-
-  Sparse(unsigned n,unsigned m)
-    :cols(m),row(n){}
-
-  Vector Apply(const Vector& x)const{
-    Vector y(row.size(),0);
-
-    for(size_t i=0;i<row.size();i++)
-      for(const auto& e:row[i])
-        y[i]+=e.second*x[e.first];
-
-    return y;
-  }
-
-  Sparse Transpose()const{
-    Sparse t(cols,unsigned(row.size()));
-
-    for(unsigned i=0;i<row.size();i++)
-      for(const auto& e:row[i])
-        t.row[e.first].emplace_back(i,e.second);
-
-    return t;
-  }
-
-  Sparse Multiply(const Sparse& b)const{
-    Require(
-        cols==b.row.size(),
-        "MG sparse dimensions.");
-
-    Sparse c(unsigned(row.size()),b.cols);
-
-    Vector value(b.cols,0);
-    std::vector<size_t> mark(b.cols,row.size());
-    std::vector<unsigned> used;
-
-    for(size_t i=0;i<row.size();i++){
-      used.clear();
-
-      for(const auto& e:row[i])
-        for(const auto& f:b.row[e.first]){
-          const unsigned j=f.first;
-
-          if(mark[j]!=i){
-            mark[j]=i;
-            value[j]=0;
-            used.push_back(j);
-          }
-
-          value[j]+=e.second*f.second;
-        }
-
-      std::sort(used.begin(),used.end());
-
-      for(unsigned j:used)
-        if(value[j]!=0)
-          c.row[i].emplace_back(j,value[j]);
-    }
-
-    return c;
-  }
-};
-
-class Solver{
-  struct Level{
-    Sparse a,p,pt;
-    Vector weight,lower;
-    Basis nullspace;
-  };
-
-  std::vector<Level> levels;
-  Basis nullspace;
-
-  static void Partition(
-      const std::vector<Point>& x,int d,
-      std::vector<unsigned> ids,
-      std::vector<std::vector<unsigned>>& groups)
-  {
-    if(ids.size()<=32){
-      groups.push_back(std::move(ids));
-      return;
-    }
-
-    int axis=0;
-    double longest=-1;
-
-    for(int k=0;k<d;k++){
-      double lo=x[ids[0]][k],hi=lo;
-
-      for(unsigned i:ids){
-        lo=std::min(lo,x[i][k]);
-        hi=std::max(hi,x[i][k]);
-      }
-
-      if(hi-lo>longest){
-        longest=hi-lo;
-        axis=k;
-      }
-    }
-
-    const size_t mid=ids.size()/2;
-
-    std::nth_element(
-        ids.begin(),ids.begin()+mid,ids.end(),
-        [&](unsigned i,unsigned j){
-          return x[i][axis]<x[j][axis] ||
-              (x[i][axis]==x[j][axis] && i<j);
-        });
-
-    std::vector<unsigned> right(
-        ids.begin()+mid,ids.end());
-
-    ids.resize(mid);
-
-    Partition(x,d,std::move(ids),groups);
-    Partition(x,d,std::move(right),groups);
-  }
-
-  void Build(
-      Sparse a,Basis b,
-      std::vector<Point> x,int d)
-  {
-    const unsigned n=unsigned(a.row.size());
-
-    Level l;
-    l.a=std::move(a);
-
-    Vector diag(n,0);
-
-    for(unsigned i=0;i<n;i++)
-      for(const auto& e:l.a.row[i])
-        if(e.first==i)
-          diag[i]=e.second;
-
-    for(double v:diag)
-      Require(
-          std::isfinite(v)&&v>0,
-          "MG invalid diagonal.");
-
-    if(n<128){
-      l.nullspace=Orthonormal(b);
-      l.lower.assign(size_t(n)*n,0);
-
-      for(unsigned i=0;i<n;i++)
-        for(const auto& e:l.a.row[i])
-          l.lower[size_t(i)*n+e.first]=e.second;
-
-      const double scale=
-          *std::max_element(diag.begin(),diag.end());
-
-      // Stabilize affine gauge modes before Cholesky factorization.
-      for(unsigned i=0;i<n;i++)
-        for(unsigned j=0;j<=i;j++){
-          double v=.5*(
-              l.lower[size_t(i)*n+j]+
-              l.lower[size_t(j)*n+i]);
-
-          for(const auto& q:l.nullspace)
-            v+=scale*q[i]*q[j];
-
-          for(unsigned k=0;k<j;k++)
-            v-=l.lower[size_t(i)*n+k]*
-                l.lower[size_t(j)*n+k];
-
-          if(i==j){
-            Require(
-                std::isfinite(v)&&v>1.e-16*scale,
-                "MG coarse factorization failed.");
-
-            l.lower[size_t(i)*n+j]=std::sqrt(v);
-          }
-          else{
-            l.lower[size_t(i)*n+j]=
-                v/l.lower[size_t(j)*n+j];
-          }
-        }
-
-      levels.push_back(std::move(l));
-      return;
-    }
-
-    double bound=0;
-
-    for(unsigned i=0;i<n;i++){
-      double sum=0;
-
-      for(const auto& e:l.a.row[i])
-        sum+=std::abs(e.second)/
-            std::sqrt(diag[i]*diag[e.first]);
-
-      bound=std::max(bound,sum);
-    }
-
-    l.weight.resize(n);
-
-    for(unsigned i=0;i<n;i++)
-      l.weight[i]=1.4/(bound*diag[i]);
-
-    std::vector<unsigned> ids(n);
-
-    for(unsigned i=0;i<n;i++)
-      ids[i]=i;
-
-    std::vector<std::vector<unsigned>> groups;
-    Partition(x,d,std::move(ids),groups);
-
-    Sparse t(n,0);
-    Basis bc(b.size());
-    std::vector<Point> xc;
-
-    for(const auto& group:groups){
-      Basis local(b.size(),Vector(group.size()));
-      Point center={{0,0,0}};
-
-      for(size_t j=0;j<group.size();j++){
-        for(size_t k=0;k<b.size();k++)
-          local[k][j]=b[k][group[j]];
-
-        for(int k=0;k<d;k++)
-          center[k]+=x[group[j]][k]/group.size();
-      }
-
-      const Basis q=Orthonormal(local);
-
-      for(const auto& col:q){
-        for(size_t j=0;j<group.size();j++)
-          t.row[group[j]].emplace_back(t.cols,col[j]);
-
-        for(size_t k=0;k<b.size();k++)
-          bc[k].push_back(Inner(col,local[k]));
-
-        xc.push_back(center);
-        t.cols++;
-      }
-    }
-
-    Require(
-        t.cols>0 && t.cols<n,
-        "MG coarsening stalled.");
-
-    Sparse at=l.a.Multiply(t);
-    l.p=Sparse(n,t.cols);
-
-    // Smooth the tentative interpolation.
-    for(unsigned i=0;i<n;i++){
-      std::map<unsigned,double> values;
-
-      for(const auto& e:t.row[i])
-        values[e.first]+=e.second;
-
-      for(const auto& e:at.row[i])
-        values[e.first]-=l.weight[i]*e.second;
-
-      for(const auto& e:values)
-        if(e.second!=0)
-          l.p.row[i].push_back(e);
-    }
-
-    l.pt=l.p.Transpose();
-
-    Sparse coarse=
-        l.pt.Multiply(l.a.Multiply(l.p));
-
-    levels.push_back(std::move(l));
-
-    Build(
-        std::move(coarse),
-        std::move(bc),
-        std::move(xc),d);
-  }
-
-  Vector Cycle(size_t level,const Vector& rhs)const{
-    const auto& l=levels[level];
-    const size_t n=rhs.size();
-
-    Vector x(n,0);
-
-    if(!l.lower.empty()){
-      x=rhs;
-      Remove(x,l.nullspace);
-
-      for(size_t i=0;i<n;i++){
-        for(size_t j=0;j<i;j++)
-          x[i]-=l.lower[i*n+j]*x[j];
-
-        x[i]/=l.lower[i*n+i];
-      }
-
-      for(size_t i=n;i-->0;){
-        for(size_t j=i+1;j<n;j++)
-          x[i]-=l.lower[j*n+i]*x[j];
-
-        x[i]/=l.lower[i*n+i];
-      }
-
-      Remove(x,l.nullspace);
-      return x;
-    }
-
-    const auto smooth=[&](){
-      const auto ax=l.a.Apply(x);
-
-      for(size_t i=0;i<n;i++)
-        x[i]+=l.weight[i]*(rhs[i]-ax[i]);
-    };
-
-    for(int k=0;k<3;k++)
-      smooth();
-
-    Vector r=l.a.Apply(x);
-
-    for(size_t i=0;i<n;i++)
-      r[i]=rhs[i]-r[i];
-
-    const auto correction=
-        l.p.Apply(Cycle(level+1,l.pt.Apply(r)));
-
-    for(size_t i=0;i<n;i++)
-      x[i]+=correction[i];
-
-    for(int k=0;k<3;k++)
-      smooth();
-
-    return x;
-  }
-
-public:
-  Solver(
-      Sparse a,
-      const std::vector<Point>& x,int d)
-  {
-    Require(
-        !x.empty() && a.row.size()==x.size(),
-        "MG empty or invalid dimensions.");
-
-    Basis b(d+1,Vector(x.size(),1));
-
-    for(int k=0;k<d;k++){
-      double mean=0;
-
-      for(const auto& p:x)
-        mean+=p[k]/x.size();
-
-      for(size_t i=0;i<x.size();i++)
-        b[k+1][i]=x[i][k]-mean;
-    }
-
-    nullspace=Orthonormal(b);
-
-    Build(std::move(a),nullspace,x,d);
-  }
-
-  Vector Apply(Vector r)const{
-    Remove(r,nullspace);
-    r=Cycle(0,r);
-    Remove(r,nullspace);
-    return r;
-  }
-
-  template<class Operator,class Accept>
-  unsigned Solve(
-      const Vector& b,Vector& lambda,
-      Operator apply,Accept accept,
-      unsigned maxiter=600)const
-  {
-    lambda.assign(b.size(),0);
-
-    Vector r=b;
-
-    for(double& v:r)
-      v=-v;
-
-    if(accept(r))
-      return 0;
-
-    r=b;
-    Remove(r,nullspace);
-
-    Vector z=Apply(r),p=z;
-    double rz=Inner(r,z);
-
-    for(unsigned it=1;it<=maxiter;it++){
-      Vector ap=apply(p);
-      Remove(ap,nullspace);
-
-      const double pap=Inner(p,ap);
-
-      Require(
-          pap>0 && rz>0 && std::isfinite(pap+rz),
-          "MG-CG breakdown.");
-
-      const double alpha=rz/pap;
-
-      for(size_t i=0;i<r.size();i++){
-        lambda[i]+=alpha*p[i];
-        r[i]-=alpha*ap[i];
-      }
-
-      if(it%10==0 || it==maxiter){
-        auto exact=apply(lambda);
-
-        for(size_t i=0;i<r.size();i++)
-          exact[i]-=b[i];
-
-        if(accept(exact))
-          return it;
-      }
-
-      z=Apply(r);
-
-      const double next=Inner(r,z);
-
-      for(size_t i=0;i<r.size();i++)
-        p[i]=z[i]+next/rz*p[i];
-
-      rz=next;
-    }
-
-    throw std::runtime_error(
-        "MG-CG geometry error budget exceeded.");
-  }
-};
-
-}
-
-// Positive face amplitudes.
-// No loading information enters this projection.
 struct Face{
   unsigned i;
   Vec normal;
@@ -892,9 +870,8 @@ std::string ValidateOptions(const Options& o){
         "and nonnegative.";
 
   if(!std::isfinite(o.QuadraticError)||o.QuadraticError<0)
-    return
-        "Boundary correction quadraticerror must be finite "
-        "and nonnegative.";
+    return "Mode 5 quadraticerror must be finite and nonnegative.";
+  if(o.MaxIterations==0)return "Mode 5 maxiterations must be positive.";
 
   if(o.BoundaryForm<1||o.BoundaryForm>3)
     return
@@ -904,8 +881,754 @@ std::string ValidateOptions(const Options& o){
 }
 
 namespace{
-
 using Array=std::vector<double>;
+// Expand along short same-body edges, rather than through empty gaps.
+Array InwardWeights(
+    const Options& o,int d,double dp,unsigned n,
+    const tdouble3* reference,const unsigned* body,
+    const byte* selected,const unsigned* count,
+    const unsigned* const* pairs)
+{
+  Array distance(
+      n,std::numeric_limits<double>::infinity());
+  Array weight(n,0);
+
+  using Item=std::pair<double,unsigned>;
+  std::priority_queue<
+      Item,std::vector<Item>,std::greater<Item>> queue;
+
+  for(unsigned i=0;i<n;i++)if(selected[i]){
+    distance[i]=0;
+    weight[i]=1;
+    queue.push({0,i});
+  }
+
+  if(o.InwardReach==0)return weight;
+
+  const double reach=o.InwardReach*o.KernelH;
+
+  while(!queue.empty()){
+    const auto item=queue.top();
+    queue.pop();
+
+    const unsigned i=item.second;
+
+    if(item.first!=distance[i]||item.first>=reach)
+      continue;
+
+    const Vec xi=Coordinates(reference[i],d);
+
+    for(unsigned e=0;e<count[i];e++){
+      const unsigned j=pairs[i][e];
+
+      if(j>=n||body[j]!=body[i])continue;
+
+      const Vec xj=Coordinates(reference[j],d);
+      double rr=0;
+
+      for(int k=0;k<d;k++)
+        rr+=(xj[k]-xi[k])*(xj[k]-xi[k]);
+
+      const double r=std::sqrt(rr);
+      if(!(r>0&&r<=1.8*dp))continue;
+
+      const double next=item.first+r;
+
+      if(next<reach&&next<distance[j]){
+        distance[j]=next;
+        queue.push({next,j});
+      }
+    }
+  }
+
+  for(unsigned i=0;i<n;i++)if(distance[i]<reach){
+    const double t=distance[i]/reach;
+    weight[i]=(1-t)*(1-t)*(1+2*t);
+  }
+
+  return weight;
+}
+
+}
+std::shared_ptr<Cache> BuildTemplate(
+    const Options& o,bool twoD,double dp,unsigned n,
+    const tdouble3* reference,const unsigned* body,
+    const byte* selected,const float* volume,
+    const unsigned* count,const unsigned* const* pairs,
+    const std::function<double(double)>& kernelFac,
+    std::vector<Vec>& physicalTarget)
+{
+
+
+  const auto error=ValidateOptions(o);
+  if(!error.empty())throw std::invalid_argument(error);
+
+  if(o.InwardReach>0 || o.QuadraticError>0)
+    Check(
+        std::isfinite(o.KernelH)&&o.KernelH>0,
+        "positive inwardreach requires "
+        "the solver kernel length.");
+
+  Check(
+      n && reference && body && selected && volume &&
+      count && pairs && kernelFac,
+      "incomplete initialization data.");
+
+  Check(
+      std::isfinite(dp)&&dp>0,
+      "invalid particle spacing.");
+  
+  Check(
+      o.ParticleMass && o.ParticleMassCount==n,
+      "particle mass is unavailable for geometry initialization.");
+
+  for(unsigned i=0;i<n;i++)
+    Check(
+        std::isfinite(double(o.ParticleMass[i])) &&
+        o.ParticleMass[i]>0,
+        "invalid particle mass for geometry initialization.");
+
+  auto c=std::make_shared<Cache>();
+  const int d=twoD?2:3;
+
+  c->dim=d;
+  c->volume.assign(volume,volume+n);
+  c->rows.resize(n);
+
+  const auto weights=InwardWeights(
+      o,d,dp,n,reference,body,selected,count,pairs);
+
+  c->active.resize(n);
+
+  for(unsigned i=0;i<n;i++){
+    c->active[i]=weights[i]>0 && count[i]>0;
+  }
+
+  std::vector<Vec> X(n);
+  std::vector<Vec> rawArea(n,Vec{{0,0,0}});
+  std::vector<Vec> target(n,Vec{{0,0,0}});
+  std::vector<double> v(n);
+  std::map<unsigned,std::vector<unsigned>> groups;
+
+  const double unitVolume=std::pow(dp,d);
+  const double unitGradient=std::pow(dp,d+1);
+
+  for(unsigned i=0;i<n;i++){
+    Check(
+        std::isfinite(volume[i])&&volume[i]>0,
+        "invalid reference volume.");
+
+    X[i]=Coordinates(reference[i],d);
+
+    for(int k=0;k<d;k++){
+      Check(
+          std::isfinite(X[i][k]),
+          "nonfinite reference coordinate.");
+      X[i][k]/=dp;
+    }
+
+    v[i]=volume[i]/unitVolume;
+
+    // Disconnected clamp markers have no reconstruction or elastic force.
+    if(count[i])groups[body[i]].push_back(i);
+  }
+
+  for(unsigned i=0;i<n;i++)if(count[i]){
+    Check(pairs[i],"missing neighbour row.");
+
+    Mat moment(d*d,0);
+
+    for(unsigned p=0;p<count[i];p++){
+      const unsigned j=pairs[i][p];
+
+      Check(
+          j<n && j!=i && body[i]==body[j],
+          "invalid same-body neighbour.");
+
+      Edge e;
+      e.j=j;
+      e.R={{0,0,0}};
+      e.D={{0,0,0}};
+      e.raw={{0,0,0}};
+
+      double rr=0;
+
+      for(int k=0;k<d;k++){
+        e.R[k]=X[j][k]-X[i][k];
+        rr+=e.R[k]*e.R[k];
+      }
+
+      Check(rr>0,"duplicate reference particles.");
+
+      const double fac=
+          -kernelFac(rr*dp*dp)*dp*unitGradient;
+
+      Check(
+          std::isfinite(fac),
+          "nonfinite kernel gradient.");
+
+      for(int k=0;k<d;k++)
+        e.raw[k]=fac*e.R[k];
+
+      for(int a=0;a<d;a++)
+        for(int b=0;b<d;b++){
+          moment[a*d+b]+=
+              v[j]*e.R[a]*e.raw[b];
+
+        }
+
+      c->rows[i].push_back(e);
+    }
+
+    const Mat inv=Inverse(moment,d);
+
+
+    for(auto& e:c->rows[i])
+      for(int b=0;b<d;b++)
+        for(int a=0;a<d;a++)
+          e.D[b]+=e.raw[a]*inv[a*d+b];
+  }
+
+  // Each directed row contributes to both endpoints.
+  // Reciprocity of the supplied neighbour list is not assumed.
+  for(unsigned i=0;i<n;i++)
+    for(const auto& e:c->rows[i])
+      for(int k=0;k<d;k++){
+        const double a=v[i]*v[e.j]*e.raw[k];
+        rawArea[i][k]-=a;
+        rawArea[e.j][k]+=a;
+      }
+
+  for(const auto& group:groups){
+    const auto& ids=group.second;
+    std::vector<Face> faces;
+
+    if(o.BoundaryForm==1){
+      for(unsigned i:ids)
+        for(int k=0;k<d;k++)
+          if(std::abs(rawArea[i][k])>1.e-12){
+            Face f;
+            f.i=i;
+            f.normal={{0,0,0}};
+            f.normal[k]=rawArea[i][k]>0?1:-1;
+            f.area=std::abs(rawArea[i][k]);
+            faces.push_back(f);
+          }
+    }
+    else{
+      using Key=std::array<long long,3>;
+      std::map<Key,std::vector<unsigned>> occupied;
+
+      std::array<Vec,3> frame={
+          Vec{{1,0,0}},Vec{{0,1,0}},Vec{{0,0,1}}
+      };
+
+      // Recover an approximate lattice orientation for the surface target.
+      {
+        const auto& row=c->rows[ids.front()];
+
+        double best=1.e300;
+        Vec first={{0,0,0}};
+
+        for(const auto& e:row){
+          double rr=0;
+          for(int k=0;k<d;k++)rr+=e.R[k]*e.R[k];
+
+          if(rr<best){
+            best=rr;
+            first=e.R;
+          }
+        }
+
+        if(best>0&&best<1.e299){
+          for(int k=0;k<d;k++)
+            frame[0][k]=first[k]/std::sqrt(best);
+
+          if(d==2){
+            frame[1]={{-frame[0][1],frame[0][0],0}};
+          }
+          else{
+            double nextBest=1.e300;
+            Vec second={{0,0,0}};
+
+            for(const auto& e:row){
+              double rr=0,pr=0;
+
+              for(int k=0;k<d;k++){
+                rr+=e.R[k]*e.R[k];
+                pr+=e.R[k]*frame[0][k];
+              }
+
+              if(pr*pr<.25*rr&&rr<nextBest){
+                nextBest=rr;
+                second=e.R;
+              }
+            }
+
+            if(nextBest<1.e299){
+              double pr=0,rr=0;
+
+              for(int k=0;k<d;k++)
+                pr+=second[k]*frame[0][k];
+
+              for(int k=0;k<d;k++){
+                second[k]-=pr*frame[0][k];
+                rr+=second[k]*second[k];
+              }
+
+              for(int k=0;k<d;k++)
+                frame[1][k]=second[k]/std::sqrt(rr);
+
+              frame[2]={{
+                  frame[0][1]*frame[1][2]-frame[0][2]*frame[1][1],
+                  frame[0][2]*frame[1][0]-frame[0][0]*frame[1][2],
+                  frame[0][0]*frame[1][1]-frame[0][1]*frame[1][0]
+              }};
+            }
+            else{
+              frame={
+                  Vec{{1,0,0}},Vec{{0,1,0}},Vec{{0,0,1}}
+              };
+            }
+          }
+        }
+      }
+
+      const auto lattice=[&](unsigned i){
+        Vec q={{0,0,0}};
+
+        for(int a=0;a<d;a++)
+          for(int k=0;k<d;k++)
+            q[a]+=frame[a][k]*X[i][k];
+
+        return q;
+      };
+
+      Vec origin=lattice(ids.front());
+
+      for(unsigned i:ids)
+        for(int k=0;k<d;k++)
+          origin[k]=std::min(origin[k],lattice(i)[k]);
+
+      for(unsigned i:ids){
+        Key key={{0,0,0}};
+
+        for(int k=0;k<d;k++){
+          const double t=lattice(i)[k]-origin[k];
+
+          Check(
+              std::abs(t)<1.e9,
+              "reference coordinate range exceeds voxel capacity.");
+
+          key[k]=std::llround(t);
+
+        }
+
+        auto& owners=occupied[key];
+
+
+        owners.push_back(i);
+      }
+
+      for(const auto& cell:occupied)
+        for(int k=0;k<d;k++)
+          for(int sign:{-1,1}){
+            Key next=cell.first;
+            next[k]+=sign;
+
+            if(!occupied.count(next)){
+              for(unsigned owner:cell.second){
+                Face f;
+                f.i=owner;
+                f.normal={{0,0,0}};
+
+                for(int a=0;a<d;a++)
+                  f.normal[a]=sign*frame[k][a];
+
+                f.area=1./cell.second.size();
+                faces.push_back(f);
+              }
+            }
+          }
+    }
+
+    CorrectArea(ids,X,v,d,faces,target);
+  }
+
+  physicalTarget=target;
+  for(auto& a:physicalTarget)for(int k=0;k<d;k++)a[k]*=std::pow(dp,d-1);
+  for(auto& row:c->rows)for(auto& e:row){
+    for(int k=0;k<d;k++){e.R[k]*=dp;e.D[k]/=unitGradient;}
+  }
+  c->dp=dp;
+  return c;
+}
+void BuildBlend(Cache& c,unsigned n,int d,double dp,const tdouble3* reference,
+    const unsigned* body,const float* volume,const std::function<double(double)>& kernelFac){
+  std::vector<byte> surface(n,0);
+
+  // Identify potential surface owners from missing short-range directions.
+  // Existing particles only; no ghost particles are introduced.
+  for(unsigned i=0;i<n;i++)if(!c.rows[i].empty()){
+    const Vec xi=Coordinates(reference[i],d);
+
+    for(int ax=-1;ax<=1;ax++)
+      for(int ay=-1;ay<=1;ay++)
+        for(int az=(d==2?0:-1);az<=(d==2?0:1);az++){
+
+          if(!ax&&!ay&&!az)continue;
+
+          const Vec q={{double(ax),double(ay),double(az)}};
+          const double qq=ax*ax+ay*ay+az*az;
+          bool covered=false;
+
+          for(const auto& e:c.rows[i]){
+            const Vec xj=Coordinates(reference[e.j],d);
+            double rr=0,pr=0;
+
+            for(int k=0;k<d;k++){
+              const double r=xj[k]-xi[k];
+              rr+=r*r;
+              pr+=q[k]*r;
+            }
+
+            if(rr>0 && rr<=3.24*dp*dp &&
+                pr>0 && pr*pr>=.49*qq*rr){
+              covered=true;
+              break;
+            }
+          }
+
+          if(!covered)surface[i]=1;
+        }
+  }
+
+  struct SurfaceNode{unsigned id;int left=-1,right=-1,axis=0;};
+  std::vector<SurfaceNode> tree;
+  std::vector<Vec> coordinates(n);
+  std::map<unsigned,std::vector<unsigned>> surfaceIds;
+  for(unsigned i=0;i<n;i++){
+    coordinates[i]=Coordinates(reference[i],d);
+    if(surface[i])surfaceIds[body[i]].push_back(i);
+  }
+  std::function<int(std::vector<unsigned>&,size_t,size_t,int)> build;
+  build=[&](std::vector<unsigned>& ids,size_t begin,size_t end,int depth)->int{
+    if(begin==end)return -1;
+    const size_t mid=(begin+end)/2;const int axis=depth%d;
+    std::nth_element(ids.begin()+begin,ids.begin()+mid,ids.begin()+end,
+        [&](unsigned a,unsigned b){return coordinates[a][axis]<coordinates[b][axis] ||
+            (coordinates[a][axis]==coordinates[b][axis]&&a<b);});
+    const int node=int(tree.size());SurfaceNode entry;entry.id=ids[mid];entry.axis=axis;tree.push_back(entry);
+    const int left=build(ids,begin,mid,depth+1),right=build(ids,mid+1,end,depth+1);
+    tree[node].left=left;tree[node].right=right;return node;
+  };
+  std::map<unsigned,int> roots;
+  for(auto& item:surfaceIds)roots[item.first]=build(item.second,0,item.second.size(),0);
+  std::function<void(int,const Vec&,double&,unsigned&)> nearest;
+  nearest=[&](int node,const Vec& x,double& best,unsigned& owner){
+    if(node<0)return;const auto& entry=tree[node];const auto& y=coordinates[entry.id];double rr=0;
+    for(int k=0;k<d;k++)rr+=(y[k]-x[k])*(y[k]-x[k]);
+    if(rr<best||(rr==best&&entry.id<owner)){best=rr;owner=entry.id;}
+    const double delta=x[entry.axis]-y[entry.axis];
+    nearest(delta<0?entry.left:entry.right,x,best,owner);
+    if(delta*delta<=best)nearest(delta<0?entry.right:entry.left,x,best,owner);
+  };
+
+  for(unsigned i=0;i<n;i++){
+    if(!c.active[i])continue;
+
+    const Vec xi=Coordinates(reference[i],d);
+
+    const auto add=[&](unsigned j){
+      if(!surface[j] || body[j]!=body[i])return;
+
+      const Vec xj=Coordinates(reference[j],d);
+      double rr=0;
+
+      for(int k=0;k<d;k++)
+        rr+=(xj[k]-xi[k])*(xj[k]-xi[k]);
+
+      // A small positive radius also handles Cubic's Fac(0) singular form.
+      const double w=volume[j]*std::abs(
+          kernelFac(std::max(rr,1.e-12*dp*dp)));
+
+      if(std::isfinite(w)&&w>0)
+        c.blend[i].push_back({j,w});
+    };
+
+    add(i);
+    for(const auto& e:c.rows[i])add(e.j);
+
+    if(c.blend[i].empty()){
+      // Deep selected rows or irregular local support:
+      // use the nearest surface owner of the same elastic body.
+      double best=1.e300;
+      unsigned owner=i;
+
+      const auto root=roots.find(body[i]);
+      if(root!=roots.end())nearest(root->second,xi,best,owner);
+
+      c.blend[i].push_back({owner,1});
+    }
+
+    double sum=0;
+    for(const auto& w:c.blend[i])sum+=w.second;
+    for(auto& w:c.blend[i])w.second/=sum;
+  }
+
+}
+void UpdateMixed(
+    Cache& c,const ContactGeometry& contact,
+    const tdouble3* position,const unsigned* ridp)
+{
+  const int d=c.dim;
+  const double width=c.dp;
+  const double cell=2*c.dp;
+
+  using Key=std::array<long long,3>;
+
+  const auto key=[&](const Vec& x){
+    Key k={{0,0,0}};
+
+    for(int a=0;a<d;a++)
+      k[a]=static_cast<long long>(std::floor(x[a]/cell));
+
+    return k;
+  };
+
+  PrepareRuntime(c);
+
+  if(contact.Kind==1){
+    bool same=c.fixedReady&&
+        c.fixedSaved.size()==contact.Fixed.size();
+
+    if(same)
+      for(size_t i=0;i<contact.Fixed.size();i++){
+        const auto a=c.fixedSaved[i],b=contact.Fixed[i];
+        if(a.x!=b.x||a.y!=b.y||a.z!=b.z){
+          same=false;
+          break;
+        }
+      }
+
+    if(!same){
+      c.fixedCells.clear();
+      for(const auto& p:contact.Fixed){
+        const Vec x=Coordinates(p,d);
+        c.fixedCells[key(x)].push_back(x);
+      }
+      c.fixedSaved=contact.Fixed;
+      c.fixedReady=true;
+    }
+  }
+
+  const auto& cells=c.fixedCells;
+  const auto& used=c.used;
+  auto& gate=c.gate;
+  std::fill(gate.begin(),gate.end(),0.0);
+
+  #ifdef OMP_USE
+    #pragma omp parallel for schedule(guided)
+  #endif
+  for(unsigned i=0;i<c.rows.size();i++){
+    const Vec x=Coordinates(position[ridp[i]],d);
+
+    if(!used[i])continue;
+
+
+    double remaining=1;
+
+    // Smooth union of local proximity gates.
+    // It avoids switching the identity of a single nearest boundary particle.
+    const auto include=[&](double gap){
+      const double t=std::max(0.,std::min(1.,gap/width));
+      const double s=1-t*t*(3-2*t);
+
+      remaining*=1-s;
+    };
+
+    if(contact.Kind==2){
+      const Vec p=Coordinates(contact.Point,d);
+      const Vec normal=Coordinates(contact.Normal,d);
+
+      double gap=-.5*c.dp;
+
+      for(int k=0;k<d;k++)
+        gap+=(x[k]-p[k])*normal[k];
+
+      include(gap);
+    }
+    else if(contact.Kind==1){
+      const Key base=key(x);
+
+      for(int ax=-1;ax<=1;ax++)
+        for(int ay=-1;ay<=1;ay++)
+          for(int az=(d==2?0:-1);az<=(d==2?0:1);az++){
+
+            const Key k={{
+                base[0]+ax,base[1]+ay,base[2]+az
+            }};
+
+            const auto it=cells.find(k);
+            if(it==cells.end())continue;
+
+            for(const Vec& p:it->second){
+              Vec normal={{0,0,0}};
+              double rr=0;
+
+              for(int a=0;a<d;a++){
+                normal[a]=x[a]-p[a];
+                rr+=normal[a]*normal[a];
+              }
+
+              const double r=std::sqrt(rr);
+              if(r>=2*c.dp)continue;
+
+              if(r>0)
+                for(int a=0;a<d;a++)
+                  normal[a]/=r;
+
+              include(r-c.dp);
+            }
+          }
+    }
+
+    gate[i]=1-remaining;
+  }
+
+  // Sample the target state without changing the held gradient operator.
+  #ifdef OMP_USE
+    #pragma omp parallel for schedule(guided)
+  #endif
+  for(unsigned i=0;i<c.rows.size();i++){
+    double eta=0;
+
+    for(const auto& w:c.blend[i])
+      eta+=w.second*gate[w.first];
+
+    c.eta[i]=eta;
+  }
+}
+
+static std::vector<Vec> NodalArea(const Cache& c,const std::vector<std::vector<Vec>>& q){
+  std::vector<Vec> a(c.rows.size(),Vec{{0,0,0}});
+  for(unsigned i=0;i<c.rows.size();i++)for(size_t e=0;e<c.rows[i].size();e++)
+    for(int k=0;k<c.dim;k++){a[i][k]-=q[i][e][k];a[c.rows[i][e].j][k]+=q[i][e][k];}
+  return a;
+}
+static unsigned SolveRegularized(Cache& c,const std::vector<double>& eta,
+    std::vector<std::vector<Vec>>& q){
+  auto& s=*c.reg;const unsigned n=c.rows.size(),m=s.ids.size();unsigned total=0;
+  std::vector<Vec> lambda(n,Vec{{0,0,0}});
+  for(int k=0;k<c.dim;k++){
+    RegularizedMG::Vector rhs(m);
+    for(unsigned a=0;a<m;a++){
+      const unsigned i=s.ids[a];const double target=s.fluid[i][k]+eta[i]*(s.solid[i][k]-s.fluid[i][k]);
+      rhs[a]=s.baseArea[i][k]-target;
+    }
+    const double bn=std::sqrt(RegularizedMG::Inner(rhs,rhs));s.rhsNorm[k]=std::max(s.rhsNorm[k],bn);
+    auto& x=s.lambda[k];if(x.size()!=m)x.assign(m,0);
+    auto r=s.matrix.Apply(x);for(unsigned a=0;a<m;a++)r[a]=rhs[a]-r[a];
+    const double tolerance=1.e-4*std::max(1.e-15,s.rhsNorm[k]);unsigned it=0;
+    if(std::sqrt(RegularizedMG::Inner(r,r))>tolerance){
+      auto z=s.solver->Apply(r),p=z;double rz=RegularizedMG::Inner(r,z);
+      for(;it<c.maxIterations;it++){
+        const auto ap=s.matrix.Apply(p);const double pap=RegularizedMG::Inner(p,ap);
+        Check(pap>0 && rz>0 && std::isfinite(pap+rz),"regularized CG breakdown");const double step=rz/pap;
+        for(unsigned a=0;a<m;a++){x[a]+=step*p[a];r[a]-=step*ap[a];}
+        if(std::sqrt(RegularizedMG::Inner(r,r))<=tolerance){it++;break;}
+        z=s.solver->Apply(r);const double next=RegularizedMG::Inner(r,z);
+        for(unsigned a=0;a<m;a++)p[a]=z[a]+next/rz*p[a];rz=next;
+      }
+      auto residual=s.matrix.Apply(x);for(unsigned a=0;a<m;a++)residual[a]-=rhs[a];
+      Check(std::sqrt(RegularizedMG::Inner(residual,residual))<=2*tolerance,"initial projection reached maxiterations before convergence");
+    }
+    total+=it;for(unsigned a=0;a<m;a++)lambda[s.ids[a]][k]=x[a];
+  }
+  q=s.particular;
+  for(unsigned i=0;i<n;i++)if(s.active[i]){
+    for(int k=0;k<c.dim;k++){
+      Vec moment={{0,0,0}};
+      for(const auto& e:c.rows[i])for(int a=0;a<c.dim;a++)
+        moment[a]+=e.R[a]/c.dp*(lambda[e.j][k]-lambda[i][k]);
+      Vec coef={{0,0,0}};
+      for(int a=0;a<c.dim;a++)for(int t=0;t<c.dim;t++)coef[a]+=s.inverse[i][a*c.dim+t]*moment[t];
+      for(size_t e=0;e<c.rows[i].size();e++){
+        double correction=lambda[c.rows[i][e].j][k]-lambda[i][k];
+        for(int a=0;a<c.dim;a++)correction-=c.rows[i][e].R[a]/c.dp*coef[a];
+        q[i][e][k]-=correction;
+      }
+    }
+  }
+  return total;
+}
+static void BuildInitialSystem(Cache& c,const tdouble3* reference){
+  auto& s=*c.reg;const unsigned n=c.rows.size();const int dim=c.dim;
+  s.active=c.active;s.inverse.resize(n);s.particular.resize(n);
+  std::vector<std::vector<Vec>> R(n);std::vector<Mat>& inverse=s.inverse;
+  std::vector<byte> used(n,0);
+  for(unsigned i=0;i<n;i++){
+    s.particular[i].resize(c.rows[i].size());
+    Mat moment(dim*dim,0);R[i].resize(c.rows[i].size());
+    for(size_t e=0;e<c.rows[i].size();e++){
+      const auto& edge=c.rows[i][e];R[i][e]=edge.R;
+      for(int a=0;a<dim;a++)R[i][e][a]/=c.dp;
+      for(int a=0;a<dim;a++)for(int k=0;k<dim;k++)moment[a*dim+k]+=R[i][e][a]*R[i][e][k];
+      for(int k=0;k<dim;k++)s.particular[i][e][k]=c.volume[i]*c.volume[edge.j]*edge.D[k];
+      if(s.active[i]){used[i]=1;used[edge.j]=1;}
+    }
+    if(s.active[i]&&!c.rows[i].empty()){
+      inverse[i]=Inverse(moment,dim);
+      for(size_t e=0;e<c.rows[i].size();e++)for(int k=0;k<dim;k++){
+        double q=0;for(int a=0;a<dim;a++)q+=R[i][e][a]*inverse[i][a*dim+k];
+        s.particular[i][e][k]=c.volume[i]/c.dp*q;
+      }
+    }
+  }
+  for(unsigned i=0;i<n;i++)if(used[i])s.ids.push_back(i);
+  const unsigned m=s.ids.size();
+  Check(m>0,"no active geometry correction rows");
+  std::vector<double> diagonal(m,0);
+  std::vector<unsigned> index(n,~0u);for(unsigned a=0;a<m;a++)index[s.ids[a]]=a;
+  std::vector<std::map<unsigned,double>> assembled(m);
+  for(unsigned i=0;i<n;i++)if(s.active[i]){
+    const unsigned degree=c.rows[i].size(),count=degree+1;
+    std::vector<unsigned> nodes(count);std::vector<Vec> C(count,Vec{{0,0,0}});
+    nodes[0]=index[i];
+    for(unsigned e=0;e<degree;e++){
+      nodes[e+1]=index[c.rows[i][e].j];C[e+1]=R[i][e];
+      for(int k=0;k<dim;k++)C[0][k]-=R[i][e][k];
+    }
+    for(unsigned a=0;a<count;a++){
+      Vec coef={{0,0,0}};for(int k=0;k<dim;k++)for(int t=0;t<dim;t++)coef[k]+=inverse[i][k*dim+t]*C[a][t];
+      for(unsigned j=0;j<count;j++){
+        double v=(a==0&&j==0)?double(degree):((a==0||j==0)?-1.:(a==j?1.:0.));
+        for(int k=0;k<dim;k++)v-=coef[k]*C[j][k];
+        assembled[nodes[a]][nodes[j]]+=v;
+      }
+    }
+  }
+  RegularizedMG::Sparse current(m,m);
+  for(unsigned a=0;a<m;a++){
+    assembled[a][a]+=1.e-7*diagonal[a];current.row[a].reserve(assembled[a].size());
+    for(const auto& e:assembled[a])current.row[a].push_back(e);
+    assembled[a].clear();
+  }
+
+  // The shift scales with the reference matrix diagonal.
+  for(unsigned a=0;a<m;a++)for(auto& e:current.row[a])if(e.first==a){
+    Check(e.second>0,"nonpositive geometry diagonal");e.second*=1.+1.e-7;
+  }
+  s.referenceDiagonal.resize(m);
+  for(unsigned a=0;a<m;a++)for(const auto& e:current.row[a])
+    if(e.first==a)s.referenceDiagonal[a]=e.second/(1.+1.e-7);
+  s.matrix=std::move(current);s.matrix.Pack();
+  std::vector<RegularizedMG::Point> coords(m);
+  for(unsigned a=0;a<m;a++)coords[a]=Coordinates(reference[s.ids[a]],dim);
+  s.solver=std::make_shared<RegularizedMG::Solver>(s.matrix,coords,dim);
+  s.baseArea=NodalArea(c,s.particular);
+}
+namespace{
 using Apply=std::function<Array(const Array&)>;
 
 double Length(const Array& x){
@@ -915,7 +1638,7 @@ double Length(const Array& x){
 // Minimum-norm least squares.
 Array LeastSquares(
     const Apply& forward,const Apply& adjoint,
-    Array rhs,unsigned maxit=600)
+    Array rhs,unsigned maxit)
 {
   Array x=adjoint(rhs);
   std::fill(x.begin(),x.end(),0);
@@ -989,73 +1712,6 @@ Array LeastSquares(
   }
 
   return x;
-}
-
-// Expand along short same-body edges, rather than through empty gaps.
-Array InwardWeights(
-    const Options& o,int d,double dp,unsigned n,
-    const tdouble3* reference,const unsigned* body,
-    const byte* selected,const unsigned* count,
-    const unsigned* const* pairs)
-{
-  Array distance(
-      n,std::numeric_limits<double>::infinity());
-  Array weight(n,0);
-
-  using Item=std::pair<double,unsigned>;
-  std::priority_queue<
-      Item,std::vector<Item>,std::greater<Item>> queue;
-
-  for(unsigned i=0;i<n;i++)if(selected[i]){
-    distance[i]=0;
-    weight[i]=1;
-    queue.push({0,i});
-  }
-
-  if(o.InwardReach==0)return weight;
-
-  const double reach=o.InwardReach*o.KernelH;
-
-  while(!queue.empty()){
-    const auto item=queue.top();
-    queue.pop();
-
-    const unsigned i=item.second;
-
-    if(item.first!=distance[i]||item.first>=reach)
-      continue;
-
-    const Vec xi=Coordinates(reference[i],d);
-
-    for(unsigned e=0;e<count[i];e++){
-      const unsigned j=pairs[i][e];
-
-      if(j>=n||body[j]!=body[i])continue;
-
-      const Vec xj=Coordinates(reference[j],d);
-      double rr=0;
-
-      for(int k=0;k<d;k++)
-        rr+=(xj[k]-xi[k])*(xj[k]-xi[k]);
-
-      const double r=std::sqrt(rr);
-      if(!(r>0&&r<=1.8*dp))continue;
-
-      const double next=item.first+r;
-
-      if(next<reach&&next<distance[j]){
-        distance[j]=next;
-        queue.push({next,j});
-      }
-    }
-  }
-
-  for(unsigned i=0;i<n;i++)if(distance[i]<reach){
-    const double t=distance[i]/reach;
-    weight[i]=(1-t)*(1-t)*(1+2*t);
-  }
-
-  return weight;
 }
 
 // Symmetric eigensystem. Eigenvectors are stored by columns.
@@ -1191,7 +1847,7 @@ QuadraticGeometry MakeQuadraticGeometry(
   }
 
   // Approximate surface distance is used only for peer selection.
-  std::vector<unsigned> surface;
+  std::vector<byte> surface(n,0);
 
   for(unsigned i=0;i<n;i++){
     bool exposed=false;
@@ -1226,8 +1882,39 @@ QuadraticGeometry MakeQuadraticGeometry(
           if(!covered)exposed=true;
         }
 
-    if(exposed)surface.push_back(i);
+    if(exposed)surface[i]=1;
   }
+
+  struct SurfaceNode{unsigned id;int left=-1,right=-1,axis=0;};
+  std::vector<SurfaceNode> tree;
+  std::vector<Vec> coordinates(n);
+  std::map<unsigned,std::vector<unsigned>> surfaceIds;
+  for(unsigned i=0;i<n;i++){
+    coordinates[i]=Coordinates(reference[i],d);
+    if(surface[i])surfaceIds[body[i]].push_back(i);
+  }
+  std::function<int(std::vector<unsigned>&,size_t,size_t,int)> build;
+  build=[&](std::vector<unsigned>& ids,size_t begin,size_t end,int depth)->int{
+    if(begin==end)return -1;
+    const size_t mid=(begin+end)/2;const int axis=depth%d;
+    std::nth_element(ids.begin()+begin,ids.begin()+mid,ids.begin()+end,
+        [&](unsigned a,unsigned b){return coordinates[a][axis]<coordinates[b][axis] ||
+            (coordinates[a][axis]==coordinates[b][axis]&&a<b);});
+    const int node=int(tree.size());SurfaceNode entry;entry.id=ids[mid];entry.axis=axis;tree.push_back(entry);
+    const int left=build(ids,begin,mid,depth+1),right=build(ids,mid+1,end,depth+1);
+    tree[node].left=left;tree[node].right=right;return node;
+  };
+  std::map<unsigned,int> roots;
+  for(auto& item:surfaceIds)roots[item.first]=build(item.second,0,item.second.size(),0);
+  std::function<void(int,const Vec&,double&,unsigned&)> nearest;
+  nearest=[&](int node,const Vec& x,double& best,unsigned& owner){
+    if(node<0)return;const auto& entry=tree[node];const auto& y=coordinates[entry.id];double rr=0;
+    for(int k=0;k<d;k++)rr+=(y[k]-x[k])*(y[k]-x[k]);
+    if(rr<best||(rr==best&&entry.id<owner)){best=rr;owner=entry.id;}
+    const double delta=x[entry.axis]-y[entry.axis];
+    nearest(delta<0?entry.left:entry.right,x,best,owner);
+    if(delta*delta<=best)nearest(delta<0?entry.right:entry.left,x,best,owner);
+  };
 
   g.depth.assign(n,0);
 
@@ -1235,15 +1922,9 @@ QuadraticGeometry MakeQuadraticGeometry(
     double best=
         std::numeric_limits<double>::infinity();
 
-    for(unsigned j:surface)if(body[j]==body[i]){
-      double rr=0;
-
-      for(int k=0;k<d;k++)
-        rr+=(g.X[j][k]-g.X[i][k])*
-            (g.X[j][k]-g.X[i][k]);
-
-      best=std::min(best,rr);
-    }
+    unsigned owner=i;
+    const auto root=roots.find(body[i]);
+    if(root!=roots.end())nearest(root->second,g.X[i],best,owner);
 
     if(std::isfinite(best))
       g.depth[i]=std::sqrt(best);
@@ -1462,7 +2143,7 @@ bool CorrectQuadraticPatch(
         if(edges[e].i==i){
           const unsigned j=c.rows[i][edges[e].e].j;
 
-          row[e]=c.mobility[i]*
+          row[e]=1.0*
               (g.X[j][k]-g.X[i][k])/g.h;
         }
 
@@ -1478,7 +2159,7 @@ bool CorrectQuadraticPatch(
       const unsigned i=edges[e].i;
       const unsigned j=c.rows[i][edges[e].e].j;
 
-      row[e]=c.mobility[i]*c.volume[i]/unitV*
+      row[e]=1.0*c.volume[i]/unitV*
           ((j==item.first?1.:0)-
            (i==item.first?1.:0));
     }
@@ -1513,7 +2194,7 @@ bool CorrectQuadraticPatch(
       const int a=g.powers[p].first;
       const int b=g.powers[p].second;
 
-      q[e][p]=c.mobility[i]*
+      q[e][p]=1.0*
           std::sqrt(c.volume[i]/unitV)*
           (a==b?1.:std::sqrt(2.))*
           (g.X[j][a]-g.X[i][a])*
@@ -1555,7 +2236,7 @@ bool CorrectQuadraticPatch(
       const auto& edge=c.rows[r.i][r.e];
 
       z[e]=c.volume[edge.j]*g.h*
-          edge.D[k]/c.mobility[r.i];
+          edge.D[k]/1.0;
     }
 
     Array rhs=Q(z);
@@ -1564,7 +2245,7 @@ bool CorrectQuadraticPatch(
     for(double& x:rhs)x=-x;
 
     increment[k]=project(
-        LeastSquares(forward,adjoint,rhs));
+        LeastSquares(forward,adjoint,rhs,c.maxIterations));
 
     Array after=Q(increment[k]);
 
@@ -1589,7 +2270,7 @@ bool CorrectQuadraticPatch(
     for(size_t e=0;e<ne;e++){
       const unsigned i=edges[e].i;
       const unsigned j=c.rows[i][edges[e].e].j;
-      const double z=c.mobility[i]*increment[k][e];
+      const double z=1.0*increment[k][e];
 
       area[i]-=c.volume[i]/unitV*z;
       area[j]+=c.volume[i]/unitV*z;
@@ -1615,7 +2296,7 @@ bool CorrectQuadraticPatch(
 
     for(int k=0;k<g.d;k++)
       edge.D[k]+=
-          c.mobility[r.i]*increment[k][e]/
+          1.0*increment[k][e]/
           (c.volume[edge.j]*g.h);
   }
 
@@ -1638,12 +2319,16 @@ void ApplyQuadratic(
       twoD?2:3,dp,o.KernelH,n,reference,body);
 
   Array loss(n,0);
+  std::vector<byte> scored(n,0);
+  for(unsigned i=0;i<n;i++)if(selected[i]){
+    scored[i]=1;for(unsigned j:g.near[i])scored[j]=1;
+  }
 
   for(const auto& c:templates){
     const Array M=QuadraticMoments(*c,g);
 
     for(unsigned i=0;i<n;i++)
-      if(!c->rows[i].empty())
+      if(scored[i]&&!c->rows[i].empty())
         loss[i]=std::max(
             loss[i],QuadraticScore(*c,g,M,i).first);
   }
@@ -1777,6 +2462,16 @@ void ApplyQuadratic(
                 average.rows[i][e].D[k]-
                 initial[i][e].D[k];
 
+      for(unsigned i:ids){
+        Vec sum={{0,0,0}};double norm=0;
+        for(const auto& e:c->rows[i])for(int k=0;k<g.d;k++){
+          const double value=c->volume[e.j]*e.D[k];
+          norm+=value*value;sum[k]+=value;
+        }
+        for(int k=0;k<g.d;k++)norm+=sum[k]*sum[k];
+        accept=accept&&std::isfinite(norm)&&norm<=4*c->referenceNorm2[i];
+      }
+
       const Array afterM=QuadraticMoments(*c,g);
       double afterMax=0,afterMean=0;
 
@@ -1801,1093 +2496,241 @@ void ApplyQuadratic(
 
 }
 
-Diagnostics InitializeMixed(
-    const Options& o,bool twoD,double dp,unsigned n,
+static void FinishInitialProjection(Cache& c){
+  auto& s=*c.reg;std::vector<std::vector<Vec>> q;
+  const unsigned iterations=SolveRegularized(c,c.eta,q);
+  const auto area=NodalArea(c,q);double rr=0,tt=0,affine=0;
+  for(unsigned i=0;i<c.rows.size();i++){
+    Vec sum={{0,0,0}};double norm=0;Mat moment(c.dim*c.dim,0);
+    for(size_t e=0;e<c.rows[i].size();e++)for(int k=0;k<c.dim;k++){
+      auto& edge=c.rows[i][e];edge.D[k]=q[i][e][k]/(c.volume[i]*c.volume[edge.j]);
+      const double g=q[i][e][k]/c.volume[i];norm+=g*g;sum[k]+=g;
+      for(int a=0;a<c.dim;a++)moment[a*c.dim+k]+=edge.R[a]*g;
+    }
+    if(!c.rows[i].empty())for(int a=0;a<c.dim;a++)for(int k=0;k<c.dim;k++)
+      affine=std::max(affine,std::abs(moment[a*c.dim+k]-(a==k?1.:0.)));
+    for(int k=0;k<c.dim;k++){
+      norm+=sum[k]*sum[k];const double target=s.fluid[i][k]+c.eta[i]*(s.solid[i][k]-s.fluid[i][k]);
+      rr+=(area[i][k]-target)*(area[i][k]-target);tt+=target*target;
+    }
+    c.referenceNorm2[i]=norm;
+  }
+  Check(std::isfinite(rr)&&affine<1.e-7,"invalid regularized initial geometry");
+  s.initialResidual=std::sqrt(rr/std::max(tt,1.e-30));c.localReady=true;
+  std::fprintf(stderr,"Mode 5 initialized: iterations=%u area=%.9g affine=%.9g\n",iterations,s.initialResidual,affine);
+  if(c.quadraticError>0){
+    Options options;options.QuadraticError=c.quadraticError;
+    options.KernelH=c.kernelH;options.MaxIterations=c.maxIterations;
+    Diagnostics report;
+    // The alias is borrowed only for this synchronous initialization call.
+    std::shared_ptr<Cache> alias(&c,[](Cache*){});
+    ApplyQuadratic(options,c.dim==2,c.dp,unsigned(c.rows.size()),
+        c.quadraticReference.data(),c.quadraticBody.data(),
+        c.quadraticSelected.data(),{alias},report);
+    std::vector<Vec> checkedArea(c.rows.size(),Vec{{0,0,0}});
+    double affineChange=0,areaChange=0;
+    for(unsigned i=0;i<c.rows.size();i++){
+      Mat moment(c.dim*c.dim,0);
+      for(const auto& edge:c.rows[i])for(int k=0;k<c.dim;k++){
+        const double flux=c.volume[i]*c.volume[edge.j]*edge.D[k];
+        checkedArea[i][k]-=flux;checkedArea[edge.j][k]+=flux;
+        for(int a=0;a<c.dim;a++)moment[a*c.dim+k]+=edge.R[a]*flux/c.volume[i];
+      }
+      if(!c.rows[i].empty())for(int a=0;a<c.dim;a++)for(int k=0;k<c.dim;k++)
+        affineChange=std::max(affineChange,std::abs(moment[a*c.dim+k]-(a==k?1.:0.)));
+    }
+    for(unsigned i=0;i<c.rows.size();i++)for(int k=0;k<c.dim;k++){
+      const double delta=checkedArea[i][k]-area[i][k];areaChange+=delta*delta;
+    }
+    if(!std::isfinite(areaChange)||!std::isfinite(affineChange)||
+        affineChange>1.e-7||std::sqrt(areaChange)>1.e-7*std::max(std::sqrt(tt),std::pow(c.dp,c.dim-1))){
+      for(unsigned i=0;i<c.rows.size();i++)for(size_t e=0;e<c.rows[i].size();e++)
+        for(int k=0;k<c.dim;k++)c.rows[i][e].D[k]=q[i][e][k]/(c.volume[i]*c.volume[c.rows[i][e].j]);
+      report.QuadraticAccepted=0;
+      std::fprintf(stderr,"Mode 5 quadratic: optional pass rolled back after constraint audit.\n");
+    }
+    std::fprintf(stderr,"Mode 5 quadratic: threshold=%.9g above=%u attempted=%u accepted=%u\n",
+        c.quadraticError,report.QuadraticAboveThreshold,report.QuadraticTried,report.QuadraticAccepted);
+  }
+  // Keep the pre-patch row norm as the dynamic amplification reference.
+  std::vector<tdouble3>().swap(c.quadraticReference);
+  std::vector<unsigned>().swap(c.quadraticBody);
+  std::vector<byte>().swap(c.quadraticSelected);
+  // Initial Krylov workspace is not needed by event projections.
+  s.solver.reset();s.matrix=RegularizedMG::Sparse();s.particular.clear();s.inverse.clear();s.baseArea.clear();
+  for(auto& x:s.lambda)x.clear();
+}
+static unsigned ThreadIndex(){
+#ifdef OMP_USE
+  return unsigned(omp_get_thread_num());
+#else
+  return 0;
+#endif
+}
+// Preserve current deformation inside the area-increment projection.
+static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdouble3* position,const unsigned* ridp,double waveSpeed){
+  c.eventPending=false;auto& s=*c.reg;const double elapsed=c.eventTime-s.lastEvent;
+  const double tau=10*c.kernelH/std::max(waveSpeed,1.e-12);if(elapsed<.5*tau)return;
+  auto start=std::chrono::steady_clock::now();const auto previousEta=c.eta;UpdateMixed(c,contact,position,ridp);
+  double change=0;for(unsigned i=0;i<c.rows.size();i++)change=std::max(change,std::abs(c.eta[i]-previousEta[i]));
+  const double fraction=-std::expm1(-elapsed/tau);std::vector<double> targetEta=c.eta;
+  for(unsigned i=0;i<c.rows.size();i++)targetEta[i]=previousEta[i]+fraction*(targetEta[i]-previousEta[i]);c.eta=previousEta;s.lastEvent=c.eventTime;
+  if(change<1.e-6)return;
+  const unsigned n=c.rows.size(),m=s.ids.size();const int dim=c.dim;
+  std::vector<std::vector<Vec>> R(n),dq(n);std::vector<Mat> inverse(n);
+  for(unsigned i=0;i<n;i++)if(s.active[i]){
+    const auto xi=Coordinates(position[ridp[i]],dim);Mat moment(dim*dim,0);R[i].resize(c.rows[i].size());dq[i].resize(c.rows[i].size(),Vec{{0,0,0}});
+    for(size_t e=0;e<c.rows[i].size();e++){
+      const auto xj=Coordinates(position[ridp[c.rows[i][e].j]],dim);auto& r=R[i][e];
+      for(int a=0;a<dim;a++)r[a]=(xj[a]-xi[a])/c.dp;
+      for(int a=0;a<dim;a++)for(int k=0;k<dim;k++)moment[a*dim+k]+=r[a]*r[k];
+    }
+    inverse[i]=Inverse(moment,dim);
+  }
+  const auto& diagonal=s.referenceDiagonal;
+  const auto project=[&](const RegularizedMG::Vector& x,std::vector<std::vector<Vec>>* result,int component){
+    RegularizedMG::Vector lambda(n,0),out(n,0);for(unsigned a=0;a<m;a++)lambda[s.ids[a]]=x[a];
+    for(unsigned i=0;i<n;i++)if(s.active[i]){
+      Vec moment={{0,0,0}},coef=moment;
+      for(size_t e=0;e<c.rows[i].size();e++)for(int a=0;a<dim;a++)moment[a]+=R[i][e][a]*(lambda[c.rows[i][e].j]-lambda[i]);
+      for(int a=0;a<dim;a++)for(int k=0;k<dim;k++)coef[a]+=inverse[i][a*dim+k]*moment[k];
+      for(size_t e=0;e<c.rows[i].size();e++){
+        const unsigned j=c.rows[i][e].j;double v=lambda[j]-lambda[i];for(int a=0;a<dim;a++)v-=R[i][e][a]*coef[a];
+        out[i]-=v;out[j]+=v;if(result)(*result)[i][e][component]=v;
+      }
+    }
+    RegularizedMG::Vector y(m);for(unsigned a=0;a<m;a++)y[a]=out[s.ids[a]]+1.e-7*diagonal[a]*x[a];return y;
+  };
+
+  const auto assemblyStart=std::chrono::steady_clock::now();
+  std::vector<unsigned> index(n,~0u);for(unsigned a=0;a<m;a++)index[s.ids[a]]=a;
+  std::vector<std::map<unsigned,double>> assembled(m);
+  for(unsigned i=0;i<n;i++)if(s.active[i]){
+    const unsigned degree=c.rows[i].size(),count=degree+1;
+    std::vector<unsigned> nodes(count);std::vector<Vec> C(count,Vec{{0,0,0}});
+    nodes[0]=index[i];
+    for(unsigned e=0;e<degree;e++){
+      nodes[e+1]=index[c.rows[i][e].j];C[e+1]=R[i][e];
+      for(int k=0;k<dim;k++)C[0][k]-=R[i][e][k];
+    }
+    for(unsigned a=0;a<count;a++){
+      Vec coef={{0,0,0}};for(int k=0;k<dim;k++)for(int t=0;t<dim;t++)coef[k]+=inverse[i][k*dim+t]*C[a][t];
+      for(unsigned j=0;j<count;j++){
+        double v=(a==0&&j==0)?double(degree):((a==0||j==0)?-1.:(a==j?1.:0.));
+        for(int k=0;k<dim;k++)v-=coef[k]*C[j][k];
+        assembled[nodes[a]][nodes[j]]+=v;
+      }
+    }
+  }
+  RegularizedMG::Sparse current(m,m);
+  for(unsigned a=0;a<m;a++){
+    assembled[a][a]+=1.e-7*diagonal[a];current.row[a].reserve(assembled[a].size());
+    for(const auto& e:assembled[a])current.row[a].push_back(e);
+    assembled[a].clear();
+  }
+  const double assemblySeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-assemblyStart).count();
+  const auto mgStart=std::chrono::steady_clock::now();
+  std::vector<RegularizedMG::Point> coords(m);
+  for(unsigned a=0;a<m;a++)coords[a]=Coordinates(position[ridp[s.ids[a]]],dim);
+  current.Pack();
+  RegularizedMG::Solver currentSolver(current,coords,dim);
+  const double mgSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-mgStart).count();
+  std::fprintf(stderr,"Mode 5 projection assembly seconds=%.9g mgSeconds=%.9g\n",assemblySeconds,mgSeconds);
+  double matvecSeconds[3]={0,0,0},preconditionSeconds[3]={0,0,0};
+  const auto multiply=[&](const RegularizedMG::Vector& v){auto t=std::chrono::steady_clock::now();auto y=current.Apply(v);matvecSeconds[ThreadIndex()]+=std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();return y;};
+  const auto precondition=[&](const RegularizedMG::Vector& v){auto t=std::chrono::steady_clock::now();auto y=currentSolver.Apply(v);preconditionSeconds[ThreadIndex()]+=std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();return y;};
+  unsigned iterations=0;
+  std::exception_ptr solveErrors[3];
+  int solveThreads=1;
+  #ifdef OMP_USE
+    solveThreads=std::min(dim,omp_get_max_threads());
+  #endif
+  #ifdef OMP_USE
+    #pragma omp parallel for num_threads(solveThreads) reduction(+:iterations)
+  #endif
+  for(int k=0;k<dim;k++){
+    try{
+    RegularizedMG::Vector rhs(m),x(m,0);
+    for(unsigned a=0;a<m;a++){const unsigned i=s.ids[a];rhs[a]=(targetEta[i]-previousEta[i])*(s.solid[i][k]-s.fluid[i][k]);}
+    const double tolerance=1.e-4*std::max(std::sqrt(RegularizedMG::Inner(rhs,rhs)),1.e-15);
+
+    auto r=rhs;if(std::sqrt(RegularizedMG::Inner(r,r))<=tolerance)continue;
+    auto z=precondition(r),p=z;double rz=RegularizedMG::Inner(r,z);unsigned it=0;
+    for(;it<c.maxIterations;it++){
+      auto ap=multiply(p);double pap=RegularizedMG::Inner(p,ap);Check(pap>0 && rz>0 && std::isfinite(pap+rz),"incremental projection CG breakdown");const double step=rz/pap;
+      for(unsigned a=0;a<m;a++){x[a]+=step*p[a];r[a]-=step*ap[a];}
+      if(std::sqrt(RegularizedMG::Inner(r,r))<=tolerance){it++;break;}
+      z=precondition(r);const double next=RegularizedMG::Inner(r,z);for(unsigned a=0;a<m;a++)p[a]=z[a]+next/rz*p[a];rz=next;
+    }
+    auto residual=project(x,&dq,k);for(unsigned a=0;a<m;a++)residual[a]-=rhs[a];
+    Check(std::sqrt(RegularizedMG::Inner(residual,residual))<2*tolerance,"dynamic projection reached maxiterations before convergence");iterations+=it;
+    }catch(...){solveErrors[k]=std::current_exception();}
+  }
+  for(int k=0;k<dim;k++)if(solveErrors[k])std::rethrow_exception(solveErrors[k]);
+  size_t nnz=0;for(const auto& row:current.row)nnz+=row.size();
+  std::fprintf(stderr,"Mode 5 projection profile nnz=%zu matvec=%.9g precondition=%.9g\n",nnz,matvecSeconds[0]+matvecSeconds[1]+matvecSeconds[2],preconditionSeconds[0]+preconditionSeconds[1]+preconditionSeconds[2]);
+  double accepted=0,maxGain=0,jump=0;
+  for(double alpha=1;alpha>=1./128;alpha*=.5){
+    double gain=0;bool valid=true;
+    for(unsigned i=0;i<n&&valid;i++)if(s.active[i]){
+      Vec sum={{0,0,0}};double norm=0;
+      for(size_t e=0;e<c.rows[i].size();e++)for(int k=0;k<dim;k++){
+        const double g=c.volume[c.rows[i][e].j]*c.rows[i][e].D[k]+alpha*dq[i][e][k]/c.volume[i];norm+=g*g;sum[k]+=g;
+      }
+      for(int k=0;k<dim;k++)norm+=sum[k]*sum[k];gain=std::max(gain,std::sqrt(norm/std::max(c.referenceNorm2[i],1.e-30)));if(norm>4*c.referenceNorm2[i])valid=false;
+    }
+    if(valid){accepted=alpha;maxGain=gain;break;}
+  }
+  std::vector<Vec> area(n,Vec{{0,0,0}});
+  for(unsigned i=0;i<n;i++){
+    Mat moment(dim*dim,0);
+    for(size_t e=0;e<c.rows[i].size();e++){
+      auto& edge=c.rows[i][e];
+      for(int k=0;k<dim;k++){
+        if(s.active[i]){
+          edge.D[k]+=accepted*dq[i][e][k]/(c.volume[i]*c.volume[edge.j]);
+          for(int a=0;a<dim;a++)moment[a*dim+k]+=c.dp*R[i][e][a]*accepted*dq[i][e][k]/c.volume[i];
+        }
+        const double q=c.volume[i]*c.volume[edge.j]*edge.D[k];area[i][k]-=q;area[edge.j][k]+=q;
+      }
+    }
+    for(double a:moment)jump=std::max(jump,std::abs(a));c.eta[i]=previousEta[i]+accepted*(targetEta[i]-previousEta[i]);
+  }
+  double rr=0,tt=0;for(unsigned i=0;i<n;i++)for(int k=0;k<dim;k++){
+    const double target=s.fluid[i][k]+c.eta[i]*(s.solid[i][k]-s.fluid[i][k]);rr+=(area[i][k]-target)*(area[i][k]-target);tt+=target*target;
+  }
+  std::fprintf(stderr,"Mode 5 update time=%.9g iterations=%u alpha=%.9g etaStep=%.9g lag=%.9g residual=%.9g gain=%.9g Fjump=%.9g seconds=%.9g\n",c.eventTime,iterations,accepted,accepted*fraction*change,(1-accepted*fraction)*change,std::sqrt(rr/std::max(tt,1.e-30)),maxGain,jump,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
+}
+
+Diagnostics Initialize(const Options& o,bool twoD,double dp,unsigned n,
     const tdouble3* reference,const unsigned* body,const byte* selected,
     const float* volume,const unsigned* count,const unsigned* const* pairs,
-    const std::function<double(double)>& kernelFac,
-    std::shared_ptr<Cache>& handle)
-{
-  Options a=o;
-  a.BoundaryForm=1;
-  a.QuadraticError=0;
-  a.ApproximateGeometry=true;
-
-  std::shared_ptr<Cache> fluid,solid;
-
-  Diagnostics report=Initialize(
-      a,twoD,dp,n,reference,body,selected,
-      volume,count,pairs,kernelFac,fluid);
-
-  a.BoundaryForm=2;
-
-  try{
-    const auto r=Initialize(
-        a,twoD,dp,n,reference,body,selected,
-        volume,count,pairs,kernelFac,solid);
-
-    if(!r.Approximation.empty())
-      report.Approximation+=" solid: "+r.Approximation;
-
-    report.AreaError=std::max(report.AreaError,r.AreaError);
-    report.AffineError=std::max(report.AffineError,r.AffineError);
+    const std::function<double(double)>& kernelFac,std::shared_ptr<Cache>& handle){
+  Options endpoint=o;endpoint.BoundaryForm=o.BoundaryForm==2?2:1;
+  std::vector<Vec> fluid,solid;
+  auto c=BuildTemplate(endpoint,twoD,dp,n,reference,body,selected,volume,count,pairs,kernelFac,fluid);
+  if(o.BoundaryForm==3){
+    endpoint.BoundaryForm=2;
+    BuildTemplate(endpoint,twoD,dp,n,reference,body,selected,volume,count,pairs,kernelFac,solid);
+  }else solid=fluid;
+  c->reg=std::make_shared<RegularizedState>();c->reg->fluid=std::move(fluid);c->reg->solid=std::move(solid);
+  c->maxIterations=o.MaxIterations;c->kernelH=o.KernelH;c->mixed=o.BoundaryForm==3;
+  c->quadraticError=o.QuadraticError;
+  if(o.QuadraticError>0){
+    c->quadraticReference.assign(reference,reference+n);
+    c->quadraticBody.assign(body,body+n);
+    c->quadraticSelected.assign(selected,selected+n);
   }
-  catch(const std::runtime_error& e){
-    // The fluid operator has already passed the data and moment checks.
-    // Failure of the solid geometry reconstruction has a safe fallback.
-    solid=fluid;
-    report.Approximation=
-        std::string("solid template falls back to fluid: ")+e.what();
-  }
-
-  ApplyQuadratic(
-      o,twoD,dp,n,reference,body,selected,
-      {fluid,solid},report);
-  auto& c=*fluid;
-  const int d=c.dim;
-
-  c.mixed=true;
-  c.dp=dp;
-  c.base.resize(n);
-  c.delta.resize(n);
-  c.blend.resize(n);
-  c.dF.resize(n);
-  c.gateGradient.resize(n);
-  c.current.resize(n);
-  c.eta.assign(n,0);
-
-  std::vector<byte> surface(n,0);
-
-  // Identify potential surface owners from missing short-range directions.
-  // Existing particles only; no ghost particles are introduced.
-  for(unsigned i=0;i<n;i++)if(!c.rows[i].empty()){
-    const Vec xi=Coordinates(reference[i],d);
-
-    for(int ax=-1;ax<=1;ax++)
-      for(int ay=-1;ay<=1;ay++)
-        for(int az=(d==2?0:-1);az<=(d==2?0:1);az++){
-
-          if(!ax&&!ay&&!az)continue;
-
-          const Vec q={{double(ax),double(ay),double(az)}};
-          const double qq=ax*ax+ay*ay+az*az;
-          bool covered=false;
-
-          for(const auto& e:c.rows[i]){
-            const Vec xj=Coordinates(reference[e.j],d);
-            double rr=0,pr=0;
-
-            for(int k=0;k<d;k++){
-              const double r=xj[k]-xi[k];
-              rr+=r*r;
-              pr+=q[k]*r;
-            }
-
-            if(rr>0 && rr<=3.24*dp*dp &&
-                pr>0 && pr*pr>=.49*qq*rr){
-              covered=true;
-              break;
-            }
-          }
-
-          if(!covered)surface[i]=1;
-        }
-  }
-
-  for(unsigned i=0;i<n;i++){
-    c.base[i].resize(c.rows[i].size());
-    c.delta[i].resize(c.rows[i].size());
-
-    bool changed=false;
-
-    for(size_t e=0;e<c.rows[i].size();e++)
-      for(int k=0;k<d;k++){
-        c.base[i][e][k]=c.rows[i][e].D[k];
-
-        c.delta[i][e][k]=c.active[i]
-            ? solid->rows[i][e].D[k]-c.rows[i][e].D[k]
-            : 0;
-
-        changed|=c.delta[i][e][k]!=0;
-      }
-
-    if(!changed)continue;
-
-    const Vec xi=Coordinates(reference[i],d);
-
-    const auto add=[&](unsigned j){
-      if(!surface[j] || body[j]!=body[i])return;
-
-      const Vec xj=Coordinates(reference[j],d);
-      double rr=0;
-
-      for(int k=0;k<d;k++)
-        rr+=(xj[k]-xi[k])*(xj[k]-xi[k]);
-
-      // A small positive radius also handles Cubic's Fac(0) singular form.
-      const double w=volume[j]*std::abs(
-          kernelFac(std::max(rr,1.e-12*dp*dp)));
-
-      if(std::isfinite(w)&&w>0)
-        c.blend[i].push_back({j,w});
-    };
-
-    add(i);
-    for(const auto& e:c.rows[i])add(e.j);
-
-    if(c.blend[i].empty()){
-      // Deep selected rows or irregular local support:
-      // use the nearest surface owner of the same elastic body.
-      double best=1.e300;
-      unsigned owner=i;
-
-      for(unsigned j=0;j<n;j++)
-        if(surface[j]&&body[j]==body[i]){
-          const Vec xj=Coordinates(reference[j],d);
-          double rr=0;
-
-          for(int k=0;k<d;k++)
-            rr+=(xj[k]-xi[k])*(xj[k]-xi[k]);
-
-          if(rr<best){
-            best=rr;
-            owner=j;
-          }
-        }
-
-      c.blend[i].push_back({owner,1});
-    }
-
-    double sum=0;
-    for(const auto& w:c.blend[i])sum+=w.second;
-    for(auto& w:c.blend[i])w.second/=sum;
-  }
-
-  handle=fluid;
-  return report;
-}
-
-void UpdateMixed(
-    Cache& c,const ContactGeometry& contact,
-    const tdouble3* position,const unsigned* ridp)
-{
-  const int d=c.dim;
-  const double width=c.dp;
-  const double cell=2*c.dp;
-
-  using Key=std::array<long long,3>;
-
-  const auto key=[&](const Vec& x){
-    Key k={{0,0,0}};
-
-    for(int a=0;a<d;a++)
-      k[a]=static_cast<long long>(std::floor(x[a]/cell));
-
-    return k;
-  };
-
-  PrepareRuntime(c);
-
-  if(contact.Kind==1){
-    bool same=c.fixedReady&&
-        c.fixedSaved.size()==contact.Fixed.size();
-
-    if(same)
-      for(size_t i=0;i<contact.Fixed.size();i++){
-        const auto a=c.fixedSaved[i],b=contact.Fixed[i];
-        if(a.x!=b.x||a.y!=b.y||a.z!=b.z){
-          same=false;
-          break;
-        }
-      }
-
-    if(!same){
-      c.fixedCells.clear();
-      for(const auto& p:contact.Fixed){
-        const Vec x=Coordinates(p,d);
-        c.fixedCells[key(x)].push_back(x);
-      }
-      c.fixedSaved=contact.Fixed;
-      c.fixedReady=true;
-    }
-  }
-
-  const auto& cells=c.fixedCells;
-  const auto& used=c.used;
-  auto& gate=c.gate;
-  std::fill(gate.begin(),gate.end(),0.0);
-
-  #ifdef OMP_USE
-    #pragma omp parallel for schedule(guided)
-  #endif
-  for(unsigned i=0;i<c.rows.size();i++){
-    c.current[i]=Coordinates(position[ridp[i]],d);
-    c.gateGradient[i]={{0,0,0}};
-
-    if(!used[i])continue;
-
-    const Vec& x=c.current[i];
-
-    double remaining=1;
-    Vec grad={{0,0,0}};
-
-    // Smooth union of local proximity gates.
-    // It avoids switching the identity of a single nearest boundary particle.
-    const auto include=[&](double gap,const Vec& normal){
-      const double t=std::max(0.,std::min(1.,gap/width));
-      const double s=1-t*t*(3-2*t);
-
-      const double ds=(gap>0&&gap<width)
-          ? -6*t*(1-t)/width : 0;
-
-      for(int k=0;k<d;k++)
-        grad[k]=grad[k]*(1-s)+remaining*ds*normal[k];
-
-      remaining*=1-s;
-    };
-
-    if(contact.Kind==2){
-      const Vec p=Coordinates(contact.Point,d);
-      const Vec normal=Coordinates(contact.Normal,d);
-
-      double gap=-.5*c.dp;
-
-      for(int k=0;k<d;k++)
-        gap+=(x[k]-p[k])*normal[k];
-
-      include(gap,normal);
-    }
-    else if(contact.Kind==1){
-      const Key base=key(x);
-
-      for(int ax=-1;ax<=1;ax++)
-        for(int ay=-1;ay<=1;ay++)
-          for(int az=(d==2?0:-1);az<=(d==2?0:1);az++){
-
-            const Key k={{
-                base[0]+ax,base[1]+ay,base[2]+az
-            }};
-
-            const auto it=cells.find(k);
-            if(it==cells.end())continue;
-
-            for(const Vec& p:it->second){
-              Vec normal={{0,0,0}};
-              double rr=0;
-
-              for(int a=0;a<d;a++){
-                normal[a]=x[a]-p[a];
-                rr+=normal[a]*normal[a];
-              }
-
-              const double r=std::sqrt(rr);
-              if(r>=2*c.dp)continue;
-
-              if(r>0)
-                for(int a=0;a<d;a++)
-                  normal[a]/=r;
-
-              include(r-c.dp,normal);
-            }
-          }
-    }
-
-    gate[i]=1-remaining;
-    c.gateGradient[i]=grad;
-  }
-
-  // Reconstruct from the frozen base; do not accumulate incremental updates.
-  #ifdef OMP_USE
-    #pragma omp parallel for schedule(guided)
-  #endif
-  for(unsigned i=0;i<c.rows.size();i++){
-    double eta=0;
-
-    for(const auto& w:c.blend[i])
-      eta+=w.second*gate[w.first];
-
-    for(size_t e=0;e<c.rows[i].size();e++)
-      for(int k=0;k<d;k++)
-        c.rows[i][e].D[k]=
-            c.base[i][e][k]+eta*c.delta[i][e][k];
-
-    c.eta[i]=eta;
-  }
-}
-
-void MixedForce(
-    Cache& c,const tmatrix3f* pk,std::vector<tdouble3>& force)
-{
-  PrepareRuntime(c);
-  const unsigned n=c.rows.size();
-  const int d=c.dim;
-
-  #ifdef OMP_USE
-    #pragma omp parallel for schedule(guided)
-  #endif
-  for(unsigned i=0;i<n;i++){
-    const auto& p=pk[i];
-    const auto& q=c.dF[i];
-
-    c.mixedB[i]=c.volume[i]*(d==2
-        ? p.a11*q[0]+p.a13*q[1]+p.a31*q[3]+p.a33*q[4]
-        : p.a11*q[0]+p.a12*q[1]+p.a13*q[2]+
-          p.a21*q[3]+p.a22*q[4]+p.a23*q[5]+
-          p.a31*q[6]+p.a32*q[7]+p.a33*q[8]);
-  }
-
-  double fx=0,fy=0,fz=0,mx=0,my=0,mz=0;
-
-  #ifdef OMP_USE
-    #pragma omp parallel for schedule(guided) reduction(+:fx,fy,fz,mx,my,mz)
-  #endif
-  for(unsigned i=0;i<n;i++){
-    double b=0;
-    for(const auto& w:c.blendIncoming[i])
-      b+=c.mixedB[w.first]*w.second;
-
-    const Vec& g=c.gateGradient[i];
-    const Vec& p=c.current[i];
-
-    const tdouble3 q=d==2
-        ? TDouble3(-b*g[0],0,-b*g[1])
-        : TDouble3(-b*g[0],-b*g[1],-b*g[2]);
-
-    const tdouble3 x=d==2
-        ? TDouble3(p[0],0,p[1])
-        : TDouble3(p[0],p[1],p[2]);
-
-    force[i]=force[i]+q;
-    fx-=q.x;
-    fy-=q.y;
-    fz-=q.z;
-    mx-=x.y*q.z-x.z*q.y;
-    my-=x.z*q.x-x.x*q.z;
-    mz-=x.x*q.y-x.y*q.x;
-  }
-
-  c.supportForce=TDouble3(fx,fy,fz);
-  c.supportMoment=TDouble3(mx,my,mz);
-}
-
-void MixedSupportReaction(
-    const std::shared_ptr<Cache>& handle,
-    tdouble3& force,tdouble3& moment)
-{
-  force=handle?handle->supportForce:TDouble3(0);
-  moment=handle?handle->supportMoment:TDouble3(0);
-}
-
-Diagnostics Initialize(
-    const Options& o,bool twoD,double dp,unsigned n,
-    const tdouble3* reference,const unsigned* body,
-    const byte* selected,const float* volume,
-    const unsigned* count,const unsigned* const* pairs,
-    const std::function<double(double)>& kernelFac,
-    std::shared_ptr<Cache>& handle)
-{
-  handle.reset();
-
-  const auto error=ValidateOptions(o);
-  if(!error.empty())throw std::invalid_argument(error);
-
-  if(o.InwardReach>0 || o.QuadraticError>0)
-    Check(
-        std::isfinite(o.KernelH)&&o.KernelH>0,
-        "positive inwardreach/quadraticerror requires "
-        "the solver kernel length.");
-
-  Check(
-      n && reference && body && selected && volume &&
-      count && pairs && kernelFac,
-      "incomplete initialization data.");
-
-  Check(
-      std::isfinite(dp)&&dp>0,
-      "invalid particle spacing.");
-  
-  Check(
-      o.ParticleMass && o.ParticleMassCount==n,
-      "particle mass is unavailable for geometry error control.");
-
-  for(unsigned i=0;i<n;i++)
-    Check(
-        std::isfinite(double(o.ParticleMass[i])) &&
-        o.ParticleMass[i]>0,
-        "invalid particle mass for geometry error control.");
-
-  if(o.BoundaryForm==3)
-    return InitializeMixed(
-        o,twoD,dp,n,reference,body,selected,
-        volume,count,pairs,kernelFac,handle);
-
-  auto c=std::make_shared<Cache>();
-  const int d=twoD?2:3;
-
-  c->dim=d;
-  c->volume.assign(volume,volume+n);
-  c->rows.resize(n);
-
-  const auto weights=InwardWeights(
-      o,d,dp,n,reference,body,selected,count,pairs);
-
-  c->active.resize(n);
-  c->mobility.resize(n);
-
-  for(unsigned i=0;i<n;i++){
-    c->active[i]=weights[i]>0;
-    c->mobility[i]=std::sqrt(weights[i]);
-  }
-
-  std::vector<Vec> X(n);
-  std::vector<Vec> rawArea(n,Vec{{0,0,0}});
-  std::vector<Vec> target(n,Vec{{0,0,0}});
-  std::vector<double> v(n);
-  std::vector<Mat> projector(n);
-  std::map<unsigned,std::vector<unsigned>> groups;
-
-  const double unitVolume=std::pow(dp,d);
-  const double unitGradient=std::pow(dp,d+1);
-
-  for(unsigned i=0;i<n;i++){
-    Check(
-        std::isfinite(volume[i])&&volume[i]>0,
-        "invalid reference volume.");
-
-    X[i]=Coordinates(reference[i],d);
-
-    for(int k=0;k<d;k++){
-      Check(
-          std::isfinite(X[i][k]),
-          "nonfinite reference coordinate.");
-      X[i][k]/=dp;
-    }
-
-    v[i]=volume[i]/unitVolume;
-
-    // Disconnected clamp markers have no reconstruction or elastic force.
-    if(count[i])groups[body[i]].push_back(i);
-  }
-
-  for(unsigned i=0;i<n;i++)if(count[i]){
-    Check(pairs[i],"missing neighbour row.");
-
-    Mat moment(d*d,0),q(d*d,0);
-
-    for(unsigned p=0;p<count[i];p++){
-      const unsigned j=pairs[i][p];
-
-      Check(
-          j<n && j!=i && body[i]==body[j],
-          "invalid same-body neighbour.");
-
-      Edge e;
-      e.j=j;
-      e.R={{0,0,0}};
-      e.D={{0,0,0}};
-      e.raw={{0,0,0}};
-
-      double rr=0;
-
-      for(int k=0;k<d;k++){
-        e.R[k]=X[j][k]-X[i][k];
-        rr+=e.R[k]*e.R[k];
-      }
-
-      Check(rr>0,"duplicate reference particles.");
-
-      const double fac=
-          -kernelFac(rr*dp*dp)*dp*unitGradient;
-
-      Check(
-          std::isfinite(fac),
-          "nonfinite kernel gradient.");
-
-      for(int k=0;k<d;k++)
-        e.raw[k]=fac*e.R[k];
-
-      for(int a=0;a<d;a++)
-        for(int b=0;b<d;b++){
-          moment[a*d+b]+=
-              v[j]*e.R[a]*e.raw[b];
-
-          q[a*d+b]+=
-              v[j]*v[j]*e.R[a]*e.R[b];
-        }
-
-      c->rows[i].push_back(e);
-    }
-
-    const Mat inv=Inverse(moment,d);
-
-    if(c->active[i])
-      projector[i]=Inverse(q,d);
-
-    for(auto& e:c->rows[i])
-      for(int b=0;b<d;b++)
-        for(int a=0;a<d;a++)
-          e.D[b]+=e.raw[a]*inv[a*d+b];
-  }
-
-  // Each directed row contributes to both endpoints.
-  // Reciprocity of the supplied neighbour list is not assumed.
-  for(unsigned i=0;i<n;i++)
-    for(const auto& e:c->rows[i])
-      for(int k=0;k<d;k++){
-        const double a=v[i]*v[e.j]*e.raw[k];
-        rawArea[i][k]-=a;
-        rawArea[e.j][k]+=a;
-      }
-
-  for(const auto& group:groups){
-    const auto& ids=group.second;
-    std::vector<Face> faces;
-
-    if(o.BoundaryForm==1){
-      for(unsigned i:ids)
-        for(int k=0;k<d;k++)
-          if(std::abs(rawArea[i][k])>1.e-12){
-            Face f;
-            f.i=i;
-            f.normal={{0,0,0}};
-            f.normal[k]=rawArea[i][k]>0?1:-1;
-            f.area=std::abs(rawArea[i][k]);
-            faces.push_back(f);
-          }
-    }
-    else{
-      using Key=std::array<long long,3>;
-      std::map<Key,std::vector<unsigned>> occupied;
-
-      std::array<Vec,3> frame={
-          Vec{{1,0,0}},Vec{{0,1,0}},Vec{{0,0,1}}
-      };
-
-      // For mixed mode, recover an approximate lattice orientation.
-      if(o.ApproximateGeometry){
-        const auto& row=c->rows[ids.front()];
-
-        double best=1.e300;
-        Vec first={{0,0,0}};
-
-        for(const auto& e:row){
-          double rr=0;
-          for(int k=0;k<d;k++)rr+=e.R[k]*e.R[k];
-
-          if(rr<best){
-            best=rr;
-            first=e.R;
-          }
-        }
-
-        if(best>0&&best<1.e299){
-          for(int k=0;k<d;k++)
-            frame[0][k]=first[k]/std::sqrt(best);
-
-          if(d==2){
-            frame[1]={{-frame[0][1],frame[0][0],0}};
-          }
-          else{
-            double nextBest=1.e300;
-            Vec second={{0,0,0}};
-
-            for(const auto& e:row){
-              double rr=0,pr=0;
-
-              for(int k=0;k<d;k++){
-                rr+=e.R[k]*e.R[k];
-                pr+=e.R[k]*frame[0][k];
-              }
-
-              if(pr*pr<.25*rr&&rr<nextBest){
-                nextBest=rr;
-                second=e.R;
-              }
-            }
-
-            if(nextBest<1.e299){
-              double pr=0,rr=0;
-
-              for(int k=0;k<d;k++)
-                pr+=second[k]*frame[0][k];
-
-              for(int k=0;k<d;k++){
-                second[k]-=pr*frame[0][k];
-                rr+=second[k]*second[k];
-              }
-
-              for(int k=0;k<d;k++)
-                frame[1][k]=second[k]/std::sqrt(rr);
-
-              frame[2]={{
-                  frame[0][1]*frame[1][2]-frame[0][2]*frame[1][1],
-                  frame[0][2]*frame[1][0]-frame[0][0]*frame[1][2],
-                  frame[0][0]*frame[1][1]-frame[0][1]*frame[1][0]
-              }};
-            }
-            else{
-              frame={
-                  Vec{{1,0,0}},Vec{{0,1,0}},Vec{{0,0,1}}
-              };
-            }
-          }
-        }
-      }
-
-      const auto lattice=[&](unsigned i){
-        Vec q={{0,0,0}};
-
-        for(int a=0;a<d;a++)
-          for(int k=0;k<d;k++)
-            q[a]+=frame[a][k]*X[i][k];
-
-        return q;
-      };
-
-      Vec origin=lattice(ids.front());
-
-      for(unsigned i:ids)
-        for(int k=0;k<d;k++)
-          origin[k]=std::min(origin[k],lattice(i)[k]);
-
-      for(unsigned i:ids){
-        Key key={{0,0,0}};
-
-        for(int k=0;k<d;k++){
-          const double t=lattice(i)[k]-origin[k];
-
-          Check(
-              std::abs(t)<1.e9,
-              "reference coordinate range exceeds voxel capacity.");
-
-          key[k]=std::llround(t);
-
-          Check(
-              o.ApproximateGeometry || std::abs(t-key[k])<=.35,
-              "solid boundary geometry is too irregular "
-              "for voxel reconstruction.");
-        }
-
-        auto& owners=occupied[key];
-
-        Check(
-            o.ApproximateGeometry || owners.empty(),
-            "multiple particles occupy one boundary voxel.");
-
-        owners.push_back(i);
-      }
-
-      for(const auto& cell:occupied)
-        for(int k=0;k<d;k++)
-          for(int sign:{-1,1}){
-            Key next=cell.first;
-            next[k]+=sign;
-
-            if(!occupied.count(next)){
-              for(unsigned owner:cell.second){
-                Face f;
-                f.i=owner;
-                f.normal={{0,0,0}};
-
-                for(int a=0;a<d;a++)
-                  f.normal[a]=sign*frame[k][a];
-
-                f.area=1./cell.second.size();
-                faces.push_back(f);
-              }
-            }
-          }
-    }
-
-    CorrectArea(ids,X,v,d,faces,target);
-  }
-
-  // Project edge increments onto the null space of each row's first moment.
-  const auto project=
-      [&](unsigned i,std::vector<double>& z)
-  {
-    Vec b={{0,0,0}},lambda={{0,0,0}};
-    const auto& row=c->rows[i];
-
-    for(size_t e=0;e<row.size();e++)
-      for(int k=0;k<d;k++)
-        b[k]+=v[row[e].j]*row[e].R[k]*z[e];
-
-    for(int a=0;a<d;a++)
-      for(int k=0;k<d;k++)
-        lambda[a]+=projector[i][a*d+k]*b[k];
-
-    for(size_t e=0;e<row.size();e++)
-      for(int k=0;k<d;k++)
-        z[e]-=v[row[e].j]*row[e].R[k]*lambda[k];
-  };
-
-  std::vector<size_t> offset(n+1,0);
-
-  for(unsigned i=0;i<n;i++)
-    offset[i+1]=offset[i]+
-        (c->active[i]?c->rows[i].size():0);
-
-  const auto projectAll=[&](std::vector<double>& z){
-    for(unsigned i=0;i<n;i++)
-      if(offset[i+1]>offset[i]){
-        std::vector<double> row(
-            z.begin()+offset[i],
-            z.begin()+offset[i+1]);
-
-        project(i,row);
-        std::copy(
-            row.begin(),row.end(),
-            z.begin()+offset[i]);
-      }
-  };
-
-  const auto forward=
-      [&](std::vector<double> z)->std::vector<double>
-  {
-    projectAll(z);
-    std::vector<double> y(n,0);
-
-    for(unsigned i=0;i<n;i++)
-      for(size_t t=offset[i];t<offset[i+1];t++){
-        const unsigned j=c->rows[i][t-offset[i]].j;
-        const double a=
-            v[i]*v[j]*c->mobility[i]*z[t];
-        y[i]-=a;
-        y[j]+=a;
-      }
-
-    return y;
-  };
-
-  const auto adjoint=
-      [&](const std::vector<double>& y)->std::vector<double>
-  {
-    std::vector<double> z(offset[n],0);
-
-    for(unsigned i=0;i<n;i++)
-      for(size_t t=offset[i];t<offset[i+1];t++){
-        const unsigned j=c->rows[i][t-offset[i]].j;
-        z[t]=v[i]*v[j]*c->mobility[i]*(y[j]-y[i]);
-      }
-
-    projectAll(z);
-    return z;
-  };
-
-  const auto norm=[](const std::vector<double>& x)->double {
-    return std::sqrt(Dot(x,x));
-  };
-
-  // Build the sparsity pattern without storing duplicate local entries.
-  std::vector<std::vector<unsigned>> owners(n);
-
-  for(unsigned i=0;i<n;i++)
-    if(offset[i+1]>offset[i]){
-      owners[i].push_back(i);
-
-      for(const auto& e:c->rows[i])
-        owners[e.j].push_back(i);
-    }
-
-  GeometryMG::Sparse full(n,n);
-
-  for(unsigned a=0;a<n;a++)
-    if(!owners[a].empty()){
-      std::vector<unsigned> columns;
-
-      for(unsigned i:owners[a]){
-        columns.push_back(i);
-
-        for(const auto& e:c->rows[i])
-          columns.push_back(e.j);
-      }
-
-      std::sort(columns.begin(),columns.end());
-
-      columns.erase(
-          std::unique(columns.begin(),columns.end()),
-          columns.end());
-
-      for(unsigned b:columns)
-        full.row[a].emplace_back(b,0.);
-    }
-
-  std::vector<std::vector<unsigned>>().swap(owners);
-
-  // Assemble S=A*A^T from the existing projected edge operator.
-  for(unsigned i=0;i<n;i++)
-    if(offset[i+1]>offset[i]){
-      const auto& row=c->rows[i];
-      const size_t m=row.size()+1;
-
-      std::vector<unsigned> nodes(m,i);
-      std::vector<Vec> cc(m,Vec{{0,0,0}});
-      std::vector<double> w(m,0);
-
-      for(size_t e=1;e<m;e++){
-        nodes[e]=row[e-1].j;
-        w[e]=v[nodes[e]]*v[nodes[e]];
-        w[0]+=w[e];
-
-        for(int k=0;k<d;k++){
-          cc[e][k]=w[e]*row[e-1].R[k];
-          cc[0][k]-=cc[e][k];
-        }
-      }
-
-      const double scale=v[i]*c->mobility[i];
-
-      for(size_t a=0;a<m;a++)
-        for(size_t b=0;b<m;b++){
-          double value=
-              (a==b ? w[a] :
-              (a==0 ? -w[b] :
-              (b==0 ? -w[a] : 0.)));
-
-          for(int k=0;k<d;k++)
-            for(int l=0;l<d;l++)
-              value-=cc[a][k]*
-                  projector[i][k*d+l]*cc[b][l];
-
-          auto& rr=full.row[nodes[a]];
-
-          auto at=std::lower_bound(
-              rr.begin(),rr.end(),nodes[b],
-              [](const std::pair<unsigned,double>& e,unsigned j){
-                return e.first<j;
-              });
-
-          Check(
-              at!=rr.end() && at->first==nodes[b],
-              "invalid MG sparsity.");
-
-          at->second+=scale*scale*value;
-        }
-    }
-
-  // Remove nodes that are not coupled to correction degrees of freedom.
-  std::vector<unsigned> touch;
-  std::vector<int> index(n,-1);
-
-  for(unsigned i=0;i<n;i++)
-    for(const auto& e:full.row[i])
-      if(e.first==i && e.second>1.e-18){
-        index[i]=int(touch.size());
-        touch.push_back(i);
-        break;
-      }
-
-  GeometryMG::Sparse matrix(
-      unsigned(touch.size()),unsigned(touch.size()));
-
-  std::vector<Vec> points(touch.size());
-
-  for(size_t a=0;a<touch.size();a++){
-    points[a]=X[touch[a]];
-
-    for(const auto& e:full.row[touch[a]])
-      if(index[e.first]>=0)
-        matrix.row[a].emplace_back(
-            unsigned(index[e.first]),e.second);
-  }
-
-  full=GeometryMG::Sparse();
-
-  GeometryMG::Solver mg(std::move(matrix),points,d);
-
-  // Use the original operators for Krylov products and final verification.
-  const auto applyS=[&](const std::vector<double>& y){
-    std::vector<double> expanded(n,0);
-
-    for(size_t a=0;a<touch.size();a++)
-      expanded[touch[a]]=y[a];
-
-    const auto result=forward(adjoint(expanded));
-
-    std::vector<double> out(touch.size());
-
-    for(size_t a=0;a<touch.size();a++)
-      out[a]=result[touch[a]];
-
-    return out;
-  };
-
+  c->mass.assign(o.ParticleMass,o.ParticleMass+n);c->referenceNorm2.assign(n,0);
+  c->eta.assign(n,0);c->blend.resize(n);
+  if(c->mixed)BuildBlend(*c,n,c->dim,dp,reference,body,volume,kernelFac);
+  BuildInitialSystem(*c,reference);
+  if(!c->mixed)FinishInitialProjection(*c);
   Diagnostics report;
-
-  for(unsigned i=0;i<n;i++)
-    if(c->active[i]&&!selected[i])
-      report.Coordinated++;
-
-  // Multigrid-preconditioned CG preserves the existing first-moment constraints.
-  // Accept the correction only after checking area and nodal force budgets.
-  for(int k=0;k<d;k++){
-    std::vector<double> rhs(n);
-    std::vector<double> solution(offset[n],0);
-
-    for(unsigned i=0;i<n;i++)
-      rhs[i]=target[i][k];
-
-    for(unsigned i=0;i<n;i++)
-      for(const auto& e:c->rows[i]){
-        const double a=v[i]*v[e.j]*e.D[k];
-        rhs[i]+=a;
-        rhs[e.j]-=a;
-      }
-
-    // Error budgets using the actual initialized particle masses.
-    const double areaTol=1.e-5;
-    const double stressBound=3.e5;
-    const double accelerationBudget=1.e-3*9.81;
-
-    // Convert dimensionless area residuals to physical force errors.
-    const double areaScale=twoD ? dp : dp*dp;
-    const double forceScale=
-        stressBound*areaScale*std::sqrt(double(d));
-
-    std::vector<double> componentResidualLimit(n);
-
-    for(unsigned i=0;i<n;i++){
-      componentResidualLimit[i]=
-          accelerationBudget*double(o.ParticleMass[i])/forceScale;
-
-      Check(
-          std::isfinite(componentResidualLimit[i]) &&
-          componentResidualLimit[i]>0,
-          "invalid nodal geometry error budget.");
-    }
-
-    // Per-component quotas imply the requested vector norm budgets.
-    double targetNorm2=0;
-
-    for(unsigned i=0;i<n;i++)
-      for(int a=0;a<d;a++)
-        targetNorm2+=target[i][a]*target[i][a];
-
-    const double componentAreaBudget=
-        areaTol*std::sqrt(targetNorm2/d);
-
-    std::vector<double> b(touch.size()),lambda;
-
-    for(size_t i=0;i<touch.size();i++)
-      b[i]=rhs[touch[i]];
-
-    const auto accept=
-        [&](const std::vector<double>& r)->bool
-    {
-      if(!std::isfinite(norm(r)) ||
-         norm(r)>componentAreaBudget)
-        return false;
-
-      for(size_t i=0;i<touch.size();i++)
-        if(std::abs(r[i])>
-           componentResidualLimit[touch[i]])
-          return false;
-
-      return true;
-    };
-
-    unsigned iteration=
-        mg.Solve(b,lambda,applyS,accept,600);
-
-    std::vector<double> fullLambda(n,0);
-
-    for(size_t i=0;i<touch.size();i++)
-      fullLambda[touch[i]]=lambda[i];
-
-    solution=adjoint(fullLambda);
-
-    // Verify every node, including nodes excluded from the reduced system.
-    const auto actual=forward(solution);
-
-    double residual2=0;
-
-    for(unsigned i=0;i<n;i++){
-      const double residual=actual[i]-rhs[i];
-      residual2+=residual*residual;
-
-      Check(
-          std::isfinite(residual) &&
-          std::abs(residual)<=componentResidualLimit[i],
-          "geometry force budget exceeded (including inactive particles).");
-    }
-
-    Check(
-        std::sqrt(residual2)<=componentAreaBudget,
-        "geometry area budget exceeded.");
-
-    report.Iterations=std::max(
-        report.Iterations,iteration);
-
-    projectAll(solution);
-
-    for(unsigned i=0;i<n;i++)
-      for(size_t t=offset[i];t<offset[i+1];t++)
-        c->rows[i][t-offset[i]].D[k]+=
-            c->mobility[i]*solution[t];
-  }
-
-  std::vector<Vec> obtained(n,Vec{{0,0,0}});
-  double err=0,den=0;
-
-  for(unsigned i=0;i<n;i++)if(!c->rows[i].empty()){
-    Mat m(d*d,0);
-
-    for(const auto& e:c->rows[i])
-      for(int k=0;k<d;k++){
-        const double a=v[i]*v[e.j]*e.D[k];
-
-        obtained[i][k]-=a;
-        obtained[e.j][k]+=a;
-
-        for(int b=0;b<d;b++)
-          m[b*d+k]+=v[e.j]*e.R[b]*e.D[k];
-      }
-
-    for(int a=0;a<d;a++)
-      for(int b=0;b<d;b++)
-        report.AffineError=std::max(
-            report.AffineError,
-            std::abs(m[a*d+b]-(a==b?1.:0.)));
-  }
-
-  for(unsigned i=0;i<n;i++)
-    for(int k=0;k<d;k++){
-      const double e=obtained[i][k]-target[i][k];
-      err+=e*e;
-      den+=target[i][k]*target[i][k];
-    }
-
-  report.AreaError=
-      std::sqrt(err/std::max(den,1.e-30));
-
-  Check(
-      std::isfinite(report.AreaError) &&
-      report.AffineError<1.e-7,
-      "nonfinite area or inconsistent affine reconstruction.");
-
-  if(report.AreaError>=1.e-4){
-    Check(
-        o.ApproximateGeometry,
-        "final area verification failed.");
-
-    report.Approximation=
-        "area target approximated; affine reconstruction retained";
-  }
-
-  // Restore physical gradient units. D does not contain Vj.
-  for(auto& row:c->rows)
-    for(auto& e:row)
-      for(int k=0;k<d;k++)
-        e.D[k]/=unitGradient;
-
-  ApplyQuadratic(
-      o,twoD,dp,n,reference,body,selected,
-      {c},report);
-  handle=c;
-  return report;
+  report.AreaError=c->reg->initialResidual;
+  report.Approximation=c->mixed?"mixed projection completed at first contact geometry evaluation":"regularized area target with exact affine moments";
+  handle=c;return report;
 }
-
 void DefGrad(
     const std::shared_ptr<Cache>& handle,unsigned n,
     const tdouble3* position,const unsigned* ridp,
@@ -2902,7 +2745,11 @@ void DefGrad(
         contact!=nullptr,
         "mixed contact geometry was not supplied.");
 
-    UpdateMixed(c,*contact,position,ridp);
+    c.pendingContact=*contact;
+    if(!c.localReady){
+      UpdateMixed(c,*contact,position,ridp);
+      FinishInitialProjection(c);
+    }
   }
 
   #ifdef OMP_USE
@@ -2911,27 +2758,18 @@ void DefGrad(
   for(unsigned i=0;i<n;i++){
     double f[3][3]={{0}};
 
-    if(c.mixed)c.dF[i].fill(0);
-
-    size_t edgeIndex=0;
     const Vec xi=Coordinates(position[ridp[i]],d);
 
     for(const auto& e:c.rows[i]){
       const Vec xj=Coordinates(position[ridp[e.j]],d);
 
+      const Vec D=e.D;
       for(int a=0;a<d;a++)
         for(int b=0;b<d;b++)
           f[a][b]+=
-              c.volume[e.j]*(xj[a]-xi[a])*e.D[b];
+              c.volume[e.j]*(xj[a]-xi[a])*D[b];
 
-      if(c.mixed)
-        for(int a=0;a<d;a++)
-          for(int b=0;b<d;b++)
-            c.dF[i][3*a+b]+=
-                c.volume[e.j]*(xj[a]-xi[a])*
-                c.delta[i][edgeIndex][b];
 
-      edgeIndex++;
     }
 
     if(c.rows[i].empty())
@@ -2977,8 +2815,7 @@ void ElasticForce(
   for(unsigned i=0;i<n;i++)
     force[i]=GatherFlux(c,i,c.flux);
 
-  if(c.mixed)
-    MixedForce(c,pk,force);
+  // Held numerical states: no instantaneous gate derivative applies.
 }
 
 const AuxiliaryLoads& GetAuxiliaryLoads(const std::shared_ptr<Cache>& handle){
@@ -3105,7 +2942,7 @@ void ElasticForceWithHourglass(
     Check(!invalid,"collapsed or invalid hourglass pair.");
     c.loads.HourglassEnergy=energy;
 
-    // Includes both elastic and hourglass contributions to mixed D(x).
+    // Use the same held gradient for elastic and hourglass forces.
     ElasticForce(handle,n,c.totalPK.data(),force);
   }
   else{
@@ -3139,6 +2976,14 @@ void ElasticForceWithHourglass(
   c.loads.ClampMoment=TDouble3(mx,my,mz);
 }
 
+}
+
+void FlexBoundaryCorrection::BeginAcceptedStep(const UserParameters& user,double time){
+  const auto c=user.FlexRestartBoundaryData.Correction;
+  if(c && c->mixed){
+    if(!c->stepClockReady){c->reg->lastEvent=time;c->stepClockReady=true;}
+    c->eventTime=time;c->eventPending=true;
+  }
 }
 
 void FlexBoundaryCorrection::DefGradForSolver(
@@ -3212,6 +3057,22 @@ void FlexBoundaryCorrection::ElasticForceForSolver(
 
     hgModulus[i]=double(material.hgfactor)*material.youngmod;
     clamp[i]=CODE_IsFlexStrucClamp(ci)?1:0;
+  }
+
+  auto& cache=*user.FlexRestartBoundaryData.Correction;
+  if(cache.mixed && cache.eventPending){
+    double speed=0;
+    for(unsigned i=0;i<np;i++){
+      const auto& m=materialData[CODE_GetIbodyFlexStruc(code[ridp[i]])];
+      const auto& f=deformation[i];
+      const double J=fmath::Determinant3x3(f);
+      Check(std::isfinite(J)&&J>0,"invalid deformation in mixed wave-speed estimate");
+      const double rho=cache.mass[i]/(cache.volume[i]*J);
+      const double c2=double(m.youngmod)*(1-m.poissratio)/
+          (rho*(1+m.poissratio)*(1-2*m.poissratio));
+      speed=std::max(speed,std::sqrt(c2));
+    }
+    UpdateIncremental(cache,cache.pendingContact,position,ridp,speed);
   }
 
   ElasticForceWithHourglass(
@@ -3403,8 +3264,8 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
     options.Layers=User->FlexRestartBoundaryCorrectionLayers;
     options.InwardReach=
         User->FlexRestartBoundaryCorrectionInwardReach;
-    options.QuadraticError=
-        User->FlexRestartBoundaryCorrectionQuadraticError;
+    options.MaxIterations=User->FlexRestartBoundaryCorrectionMaxIterations;
+    options.QuadraticError=User->FlexRestartBoundaryCorrectionQuadraticError;
     options.BoundaryForm=
         User->FlexRestartBoundaryCorrectionBoundaryForm;
 
@@ -3449,38 +3310,12 @@ void JSphCpu::InitFlexRestartBoundaryCorrection()
           referenceVolume.data(),
           NumPairsc,PairIdxc,fac,data.Correction);
 
-      Log->Printf(
-          "  Mode 5: boundary form=%d; layers=%d; "
-          "area residual=%.9g; affine error=%.9g; iterations=%u.",
-          options.BoundaryForm,options.Layers,
-          report.AreaError,report.AffineError,
-          report.Iterations);
+      Log->Printf("  Mode 5: boundary form=%d; layers=%d; maxiterations=%u.",
+          options.BoundaryForm,options.Layers,options.MaxIterations);
       if(!report.Approximation.empty())
         Log->Printf(
             "  Mode 5 approximation: %s",
             report.Approximation.c_str());
-      Log->Printf(
-          "  Mode 5: inward rows=%u; "
-          "quadratic patches=%u/%u accepted.",
-          report.Coordinated,
-          report.QuadraticAccepted,
-          report.QuadraticTried);
-      if(options.QuadraticError>0){
-        if(report.QuadraticAboveThreshold==0)
-          Log->Print(
-              "  Mode 5 quadratic correction enabled: no selected particle "
-              "exceeds the diagnostic threshold; no correction applied.");
-        else if(report.QuadraticTried==0)
-          Log->Printf(
-              "  Mode 5 quadratic correction enabled: %u particles exceed "
-              "the threshold, but none passes the local-excess/peak/peer "
-              "selection; no patch attempted.",report.QuadraticAboveThreshold);
-        else if(report.QuadraticAccepted==0)
-          Log->Print(
-              "  Mode 5 quadratic correction enabled: patches attempted, "
-              "but none accepted (constraints, improvement or resource "
-              "conditions); original gradients retained.");
-      }
     }
     catch(const std::exception& e){
       Run_Exceptioon(e.what());

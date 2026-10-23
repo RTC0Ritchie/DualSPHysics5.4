@@ -16,12 +16,11 @@ namespace FlexBoundaryCorrection{
 struct Options{
   int Layers=0;
   double InwardReach=0.0;
+  unsigned MaxIterations=2000;
   double QuadraticError=0.0;
   int BoundaryForm=1;
   double KernelH=0; // Solver kernel length; not an XML parameter.
 
-  // Internal approximation flag; not an XML parameter.
-  bool ApproximateGeometry=false;
 
   // Borrowed during Initialize only; indexed by flexible-particle index.
   const float* ParticleMass=nullptr;
@@ -45,7 +44,6 @@ struct Diagnostics{
   double AreaError=0;
   double AffineError=0;
   unsigned Iterations=0;
-  unsigned Coordinated=0;
   unsigned QuadraticTried=0;
   unsigned QuadraticAccepted=0;
   unsigned QuadraticAboveThreshold=0;
@@ -89,11 +87,7 @@ void ElasticForce(
     const tmatrix3f* referencePK,
     std::vector<tdouble3>& force);
 
-// Additional reaction associated with the changing gradient operator.
-// Moment is about the global origin; this excludes the original contact force.
-void MixedSupportReaction(
-    const std::shared_ptr<Cache>& cache,
-    tdouble3& force,tdouble3& moment);
+void BeginAcceptedStep(const UserParameters& user,double time);
 
 void DefGradForSolver(
     const UserParameters& user,unsigned np,unsigned npb,

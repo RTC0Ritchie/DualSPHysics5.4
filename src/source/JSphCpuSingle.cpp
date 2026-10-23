@@ -19,6 +19,7 @@
 /// \file JSphCpuSingle.cpp \brief Implements the class \ref JSphCpuSingle.
 
 #include "JSphCpuSingle.h"
+#include "UserFlexBoundaryCorrection.h"
 #include "JCellDivCpuSingle.h"
 #include "JSphMk.h"
 #include "JPartsLoad4.h"
@@ -1212,6 +1213,7 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
     InterStep=(TStep==STEP_Symplectic? INTERSTEP_SymPredictor: INTERSTEP_Verlet);
     if(ViscoTime)Visco=ViscoTime->GetVisco(float(TimeStep));
     if(DDTRamp.x)RunInitialDDTRamp(); //<vs_ddramp>
+    FlexBoundaryCorrection::BeginAcceptedStep(*User,TimeStep);
     const double stepdt=ComputeStep();
     RunGaugeSystem(TimeStep+stepdt);
     if(CaseNmoving)RunMotion(stepdt);
