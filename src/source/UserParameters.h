@@ -8,6 +8,14 @@
 #include "JObject.h"
 #include "TypesDef.h"
 
+namespace FlexKinematics{
+  struct Cache;
+}
+
+namespace FlexDissipation{
+  struct Cache;
+}
+
 class JXml;
 class JLog2;
 class TiXmlElement;
@@ -48,6 +56,21 @@ public:
 
   int unContactMode; // 1: manual; 2: automatic.
   double unContact;
+
+   // Numerical high-frequency dissipation.
+  bool ElasticHighFrequencyDissipation=false;
+
+  // Reserved Kelvin-Voigt dissipation.
+  // model: 1=artificial coefficients; 2=prescribed coefficients.
+  bool ElasticViscousDissipation=false;
+  int ElasticViscousModel=1;
+  double ElasticViscousFactor=0.5;
+  double ElasticShearViscosity=0;
+  double ElasticBulkViscosity=0;
+
+  // Shared elastic kinematics and separate dissipation workspace.
+  mutable std::shared_ptr<FlexKinematics::Cache> ElasticKinematicsCache;
+  mutable std::shared_ptr<FlexDissipation::Cache> ElasticDissipationCache;
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
 

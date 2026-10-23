@@ -30,6 +30,13 @@ void UserParameters::Reset(){
   unContactMode=1;
   unContact=0.0;
 
+  ElasticHighFrequencyDissipation=false;
+  ElasticViscousDissipation=false;
+  ElasticViscousModel=1;
+  ElasticViscousFactor=0.5;
+  ElasticShearViscosity=0;
+  ElasticBulkViscosity=0;
+
   SaveFlexData=false;
 
   FlexRestartRequested=false;
@@ -55,6 +62,9 @@ void UserParameters::Reset(){
   FlexRestartHourglassCorrection=false;
 
   OutputObjects.clear();
+
+  ElasticDissipationCache.reset();
+  ElasticKinematicsCache.reset();
 
 
   FlexRestartState.Clear();
@@ -86,7 +96,61 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
   const TiXmlElement* root=node->ToElement();
   xml->CheckElementNames(
       root,true,
-      "*parameter output restart directcontinuation boundarylayercorrection");
+      "*parameter output restart directcontinuation boundarylayercorrection elasticdissipation");
+
+  if(const TiXmlElement* damping=root->FirstChildElement("elasticdissipation")){
+    if(damping->NextSiblingElement("elasticdissipation"))
+      Run_Exceptioon("Repeated User.elasticdissipation node.");
+
+    xml->CheckAttributeNames(damping,"comment");
+    xml->CheckElementNames(damping,true,"highfrequency viscous");
+
+    const auto child=[&](const char* name)->const TiXmlElement* {
+      const TiXmlElement* p=damping->FirstChildElement(name);
+
+      if(p && (p->NextSiblingElement(name) || p->FirstChildElement()))
+        Run_Exceptioon("Elastic dissipation child must be a unique leaf.");
+
+      return p;
+    };
+
+    if(const TiXmlElement* p=child("highfrequency")){
+      xml->CheckAttributeNames(p,"enabled comment");
+      ElasticHighFrequencyDissipation=
+          xml->GetAttributeBool(p,"enabled",true,false);
+    }
+
+    if(const TiXmlElement* p=child("viscous")){
+      xml->CheckAttributeNames(
+          p,"enabled model factor shear bulk comment");
+
+      ElasticViscousDissipation=
+          xml->GetAttributeBool(p,"enabled",true,false);
+
+      const double model=xml->GetAttributeDouble(p,"model",true,1);
+
+      if(model!=1 && model!=2)
+        Run_Exceptioon("Viscous model must be 1 or 2.");
+
+      ElasticViscousModel=int(model);
+      ElasticViscousFactor=
+          xml->GetAttributeDouble(p,"factor",true,0.5);
+      ElasticShearViscosity=
+          xml->GetAttributeDouble(p,"shear",true,0);
+      ElasticBulkViscosity=
+          xml->GetAttributeDouble(p,"bulk",true,0);
+
+      for(double q:{
+          ElasticViscousFactor,
+          ElasticShearViscosity,
+          ElasticBulkViscosity})
+      {
+        if(!std::isfinite(q) || q<0)
+          Run_Exceptioon(
+              "Viscous coefficients must be finite and nonnegative.");
+      }
+    }
+  }
 
   // Record active parameter nodes and reject duplicate keys.
   std::map<std::string,const TiXmlElement*> nodes;
@@ -1334,6 +1398,20 @@ void UserParameters::ConfigFlexRestartCorrections(
     JLog2* log)
 {
   const bool applicable=isDirectContinuation && hasflex;
+  // Independent of restart and boundary-correction modes.
+  if(hasflex && ElasticViscousDissipation)
+    Run_Exceptioon(
+        "Elastic KV dissipation interface is reserved; "
+        "implementation is not available yet.");
+
+  if(log){
+    log->Printf(
+        "Elastic high-frequency dissipation: %s; KV interface: %s.",
+        ElasticHighFrequencyDissipation
+          ? (hasflex ? "enabled" : "inactive (no elastic body)")
+          : "disabled",
+        ElasticViscousDissipation ? "requested" : "disabled");
+  }
 
   UseFlexRestartRestorePairs=
       applicable && FlexRestartRestorePairs;

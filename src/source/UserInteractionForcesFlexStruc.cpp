@@ -9,6 +9,8 @@
 #include "Functions.h"
 #include "UserFlexBoundaryCorrection.h"
 #include "UserFlexInline.h"
+#include "UserFlexKinematics.h"
+#include "UserFlexDissipation.h"
 
 #include <cmath>
 #include <unordered_map>
@@ -180,8 +182,37 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
   const bool useHourglass=
       isRestart && User.UseFlexRestartHourglassCorrection;
 
-  if(!FlexRestartCorrection::ForceCacheReady(state,useGradient,useHourglass))
-    Run_Exceptioon("Flexible correction cache is unavailable.");
+  // Shared current-stage kinematics.
+  // Prepared before constitutive evaluation for future consumers.
+  const FlexKinematics::Cache* elasticKinematics=nullptr;
+
+  if(User.ElasticHighFrequencyDissipation
+      || User.ElasticViscousDissipation)
+  {
+    const auto w=[&](double rr){
+      return double(
+          fsph::GetKernel_Wab<tker>(CSP,float(rr)));
+    };
+
+    try{
+      elasticKinematics=&FlexKinematics::Update(
+          User,
+          Simulate2D,
+          np,
+          pos0,
+          pos,
+          velrhop,
+          code,
+          flexstrucridp,
+          numpairs,
+          pairidx,
+          flexstrucdata,
+          w);
+    }
+    catch(const std::exception& e){
+      Run_Exceptioon(e.what());
+    }
+  }
 
   std::vector<tmatrix3f> flexPk1Reference(
       (useGradient || useBoundary) ? np : 0);
@@ -575,6 +606,39 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
         const int th=omp_get_thread_num();
         if(csp1>flexstructh[th*OMP_STRIDE])flexstructh[th*OMP_STRIDE]=csp1;
       }
+    }
+  }
+
+  if(User.ElasticHighFrequencyDissipation){
+    const auto dw=[&](double rr){
+      return double(
+          fsph::GetKernel_Fac<tker>(CSP,float(rr)))
+          *std::sqrt(rr);
+    };
+
+    try{
+      if(!elasticKinematics)
+        Run_Exceptioon(
+            "Elastic kinematics was not prepared for this force stage.");
+
+      const double rate=FlexDissipation::Apply(
+          User,
+          *elasticKinematics,
+          pos,
+          code,
+          flexstrucridp,
+          flexstrucdata,
+          dw,
+          ace,
+          TimeStep,
+          Nstep);
+
+      flexstrucdt=std::max(
+          flexstrucdt,
+          float(CSP.kernelh*rate*0.5));
+    }
+    catch(const std::exception& e){
+      Run_Exceptioon(e.what());
     }
   }
   //-Keep max value in flexstrucdt.

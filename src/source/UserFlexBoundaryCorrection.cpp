@@ -2635,7 +2635,6 @@ static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdou
   current.Pack();
   RegularizedMG::Solver currentSolver(current,coords,dim);
   const double mgSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-mgStart).count();
-  std::fprintf(stderr,"Mode 5 projection assembly seconds=%.9g mgSeconds=%.9g\n",assemblySeconds,mgSeconds);
   double matvecSeconds[3]={0,0,0},preconditionSeconds[3]={0,0,0};
   const auto multiply=[&](const RegularizedMG::Vector& v){auto t=std::chrono::steady_clock::now();auto y=current.Apply(v);matvecSeconds[ThreadIndex()]+=std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();return y;};
   const auto precondition=[&](const RegularizedMG::Vector& v){auto t=std::chrono::steady_clock::now();auto y=currentSolver.Apply(v);preconditionSeconds[ThreadIndex()]+=std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();return y;};
@@ -2668,8 +2667,6 @@ static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdou
   }
   for(int k=0;k<dim;k++)if(solveErrors[k])std::rethrow_exception(solveErrors[k]);
   size_t nnz=0;for(const auto& row:current.row)nnz+=row.size();
-  std::fprintf(stderr,"Mode 5 projection profile nnz=%zu matvec=%.9g precondition=%.9g\n",nnz,matvecSeconds[0]+matvecSeconds[1]+matvecSeconds[2],preconditionSeconds[0]+preconditionSeconds[1]+preconditionSeconds[2]);
-  double accepted=0,maxGain=0,jump=0;
   for(double alpha=1;alpha>=1./128;alpha*=.5){
     double gain=0;bool valid=true;
     for(unsigned i=0;i<n&&valid;i++)if(s.active[i]){
@@ -2699,7 +2696,7 @@ static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdou
   double rr=0,tt=0;for(unsigned i=0;i<n;i++)for(int k=0;k<dim;k++){
     const double target=s.fluid[i][k]+c.eta[i]*(s.solid[i][k]-s.fluid[i][k]);rr+=(area[i][k]-target)*(area[i][k]-target);tt+=target*target;
   }
-  std::fprintf(stderr,"Mode 5 update time=%.9g iterations=%u alpha=%.9g etaStep=%.9g lag=%.9g residual=%.9g gain=%.9g Fjump=%.9g seconds=%.9g\n",c.eventTime,iterations,accepted,accepted*fraction*change,(1-accepted*fraction)*change,std::sqrt(rr/std::max(tt,1.e-30)),maxGain,jump,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
+  //std::fprintf(stderr,"Mode 5 update time=%.9g iterations=%u alpha=%.9g etaStep=%.9g lag=%.9g residual=%.9g gain=%.9g Fjump=%.9g seconds=%.9g\n",c.eventTime,iterations,accepted,accepted*fraction*change,(1-accepted*fraction)*change,std::sqrt(rr/std::max(tt,1.e-30)),maxGain,jump,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
 }
 
 Diagnostics Initialize(const Options& o,bool twoD,double dp,unsigned n,
