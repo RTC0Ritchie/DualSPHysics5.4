@@ -39,6 +39,7 @@ void UserParameters::Reset(){
   FlexRestartElasticFile.clear();
   FlexRestartFileVariableType=0;
   FlexRestartSpecialField=0;
+  FlexRestartColumnGapCoef=0.1;
   FlexRestartConserveMass=true;
   FlexRestartDensityIsNatural=true;
   FlexRestartBoundaryCorrectionMode=0;
@@ -545,8 +546,41 @@ void UserParameters::LoadRestartElasticInputXml(
   FlexRestartElasticInput=
       xml->GetAttributeInt(input,"source");
 
+  // Optional in every input mode; consumed only by hydrostatic initialisation.
+  FlexRestartColumnGapCoef=0.1;
+
+  const TiXmlElement* columnGap=
+      input->FirstChildElement("columngapcoef");
+
+  if(columnGap){
+    if(columnGap->NextSiblingElement("columngapcoef")){
+      Run_ExceptioonFile(
+          "Repeated elasticinput.columngapcoef node.",
+          xml->ErrGetFileRow(columnGap));
+    }
+
+    xml->CheckAttributeNames(columnGap,"value comment");
+
+    if(columnGap->FirstChildElement()){
+      Run_ExceptioonFile(
+          "Columngapcoef does not accept child elements.",
+          xml->ErrGetFileRow(columnGap));
+    }
+
+    FlexRestartColumnGapCoef=
+        xml->GetAttributeDouble(columnGap,"value");
+
+    if(!std::isfinite(FlexRestartColumnGapCoef) ||
+       FlexRestartColumnGapCoef<0.0)
+    {
+      Run_ExceptioonFile(
+          "Columngapcoef must be finite and non-negative.",
+          xml->ErrGetFileRow(columnGap));
+    }
+  }
+
   if(FlexRestartElasticInput==1){
-    xml->CheckElementNames(input,true,"file");
+    xml->CheckElementNames(input,true,"file columngapcoef");
 
     const TiXmlElement* file=
         input->FirstChildElement("file");
@@ -597,7 +631,7 @@ void UserParameters::LoadRestartElasticInputXml(
     }
   }
   else if(FlexRestartElasticInput==2){
-    xml->CheckElementNames(input,true,"specialfield");
+    xml->CheckElementNames(input,true,"specialfield columngapcoef");
 
     const TiXmlElement* field=
         input->FirstChildElement("specialfield");

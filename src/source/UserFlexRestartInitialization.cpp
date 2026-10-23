@@ -346,6 +346,18 @@ void JSphCpuSingle::InitFlexRestartHydrostatic()
   const double half=0.5*double(Dp);
   const double tolerance=1e-6*double(Dp);
 
+  const double columnGapCoef=User->FlexRestartColumnGapCoef;
+
+  if(!std::isfinite(columnGapCoef) || columnGapCoef<0.0)
+    Run_Exceptioon(
+        "FlexRestart.Hydrostatic: invalid column gap coefficient.");
+
+  const double columnGapTolerance=columnGapCoef*double(Dp);
+
+  if(!std::isfinite(columnGapTolerance))
+    Run_Exceptioon(
+        "FlexRestart.Hydrostatic: column gap tolerance overflow.");
+
   UserParameters::StFlexRestartState state;
   state.Idp.resize(nf);
   state.Fstar.assign(nf,TMatrix3f());
@@ -474,10 +486,15 @@ void JSphCpuSingle::InitFlexRestartHydrostatic()
               return a.begin<b.begin;
             });
 
-        // Stop at the first gap; use the upper particle centre as datum.
+        // Bridge permitted discretization gaps.
+        // Use the upper particle centre as the pressure datum.
         double reach=0.0;
         for(const auto& interval:intervals){
-          if(interval.begin>reach+tolerance)break;
+          const double gap=interval.begin-reach;
+
+          if(gap>tolerance &&
+             gap-tolerance>columnGapTolerance)
+            break;
 
           reach=std::max(reach,interval.end);
           depth=std::max(depth,interval.head);
@@ -533,7 +550,10 @@ void JSphCpuSingle::InitFlexRestartHydrostatic()
   // CompleteFlexRestartMaterialState() supplies rho, volume and conserved mass.
   // Do not fabricate natural positions or overwrite fluid-EOS state arrays.
   User->FlexRestartState=state;
-
+  Log->Printf(
+      "FlexRestart.Hydrostatic: columnGapCoef=%g; "
+      "columnGapTolerance=%g m.",
+      columnGapCoef,columnGapTolerance);
   Log->Printf(
       "FlexRestart.Prescribed: local-column hydrostatic field initialised "
       "for %u flexible/clamp particles; pmax=%g Pa; Jstar_min=%g.",
