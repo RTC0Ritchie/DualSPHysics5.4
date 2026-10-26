@@ -59,6 +59,8 @@ struct Cache{
 
 
   std::vector<byte> active;
+  // Continuous inward mobility; zero rows retain the local kernel gradient.
+  std::vector<double> inwardWeight;
 
   // Runtime graph and reusable work arrays.
   bool runtimeReady=false,hgReady=false,fixedReady=false;
@@ -999,6 +1001,7 @@ std::shared_ptr<Cache> BuildTemplate(
       o,d,dp,n,reference,body,selected,count,pairs);
 
   c->active.resize(n);
+  c->inwardWeight=weights;
 
   for(unsigned i=0;i<n;i++){
     c->active[i]=weights[i]>0 && count[i]>0;
@@ -1556,12 +1559,15 @@ static unsigned SolveRegularized(Cache& c,const std::vector<double>& eta,
       for(size_t e=0;e<c.rows[i].size();e++){
         double correction=lambda[c.rows[i][e].j][k]-lambda[i][k];
         for(int a=0;a<c.dim;a++)correction-=c.rows[i][e].R[a]/c.dp*coef[a];
-        q[i][e][k]-=correction;
+        q[i][e][k]-=c.inwardWeight[i]*correction;
       }
     }
   }
   return total;
 }
+// Both anchors reproduce affine fields. Blend them before the area solve,
+// then use the same inward mobility in the Schur matrix and its adjoint.
+// A post-solve taper would invalidate the area constraint being solved.
 static void BuildInitialSystem(Cache& c,const tdouble3* reference){
   auto& s=*c.reg;const unsigned n=c.rows.size();const int dim=c.dim;
   s.active=c.active;s.inverse.resize(n);s.particular.resize(n);
@@ -1581,7 +1587,9 @@ static void BuildInitialSystem(Cache& c,const tdouble3* reference){
       inverse[i]=Inverse(moment,dim);
       for(size_t e=0;e<c.rows[i].size();e++)for(int k=0;k<dim;k++){
         double q=0;for(int a=0;a<dim;a++)q+=R[i][e][a]*inverse[i][a*dim+k];
-        s.particular[i][e][k]=c.volume[i]/c.dp*q;
+        const double weight=c.inwardWeight[i];
+        s.particular[i][e][k]=weight*c.volume[i]/c.dp*q
+            +(1.-weight)*s.particular[i][e][k];
       }
     }
   }
@@ -1604,24 +1612,22 @@ static void BuildInitialSystem(Cache& c,const tdouble3* reference){
       for(unsigned j=0;j<count;j++){
         double v=(a==0&&j==0)?double(degree):((a==0||j==0)?-1.:(a==j?1.:0.));
         for(int k=0;k<dim;k++)v-=coef[k]*C[j][k];
-        assembled[nodes[a]][nodes[j]]+=v;
+        assembled[nodes[a]][nodes[j]]+=c.inwardWeight[i]*v;
+        if(a==j)diagonal[nodes[a]]+=v;
       }
     }
   }
   RegularizedMG::Sparse current(m,m);
   for(unsigned a=0;a<m;a++){
+    Check(diagonal[a]>0 && std::isfinite(diagonal[a]),"nonpositive geometry diagonal");
     assembled[a][a]+=1.e-7*diagonal[a];current.row[a].reserve(assembled[a].size());
     for(const auto& e:assembled[a])current.row[a].push_back(e);
     assembled[a].clear();
   }
 
-  // The shift scales with the reference matrix diagonal.
-  for(unsigned a=0;a<m;a++)for(auto& e:current.row[a])if(e.first==a){
-    Check(e.second>0,"nonpositive geometry diagonal");e.second*=1.+1.e-7;
-  }
-  s.referenceDiagonal.resize(m);
-  for(unsigned a=0;a<m;a++)for(const auto& e:current.row[a])
-    if(e.first==a)s.referenceDiagonal[a]=e.second/(1.+1.e-7);
+  // Retain the unweighted reference scale for the soft area penalty.
+  // Scaling this penalty by mobility would undo the taper near its inner end.
+  s.referenceDiagonal=diagonal;
   s.matrix=std::move(current);s.matrix.Pack();
   std::vector<RegularizedMG::Point> coords(m);
   for(unsigned a=0;a<m;a++)coords[a]=Coordinates(reference[s.ids[a]],dim);
@@ -1894,7 +1900,7 @@ QuadraticGeometry MakeQuadraticGeometry(
     if(surface[i])surfaceIds[body[i]].push_back(i);
   }
   std::function<int(std::vector<unsigned>&,size_t,size_t,int)> build;
-  build=[&](std::vector<unsigned>& ids,size_t begin,size_t end,int depth)->int{
+  build=[&](std::vector<unsigned>& ids,size_t begin,size_t end,int depth)->int {
     if(begin==end)return -1;
     const size_t mid=(begin+end)/2;const int axis=depth%d;
     std::nth_element(ids.begin()+begin,ids.begin()+mid,ids.begin()+end,
@@ -2143,7 +2149,7 @@ bool CorrectQuadraticPatch(
         if(edges[e].i==i){
           const unsigned j=c.rows[i][edges[e].e].j;
 
-          row[e]=1.0*
+          row[e]=std::sqrt(c.inwardWeight[i])*
               (g.X[j][k]-g.X[i][k])/g.h;
         }
 
@@ -2159,7 +2165,7 @@ bool CorrectQuadraticPatch(
       const unsigned i=edges[e].i;
       const unsigned j=c.rows[i][edges[e].e].j;
 
-      row[e]=1.0*c.volume[i]/unitV*
+      row[e]=std::sqrt(c.inwardWeight[i])*c.volume[i]/unitV*
           ((j==item.first?1.:0)-
            (i==item.first?1.:0));
     }
@@ -2194,7 +2200,7 @@ bool CorrectQuadraticPatch(
       const int a=g.powers[p].first;
       const int b=g.powers[p].second;
 
-      q[e][p]=1.0*
+      q[e][p]=std::sqrt(c.inwardWeight[i])*
           std::sqrt(c.volume[i]/unitV)*
           (a==b?1.:std::sqrt(2.))*
           (g.X[j][a]-g.X[i][a])*
@@ -2229,17 +2235,22 @@ bool CorrectQuadraticPatch(
   std::vector<Array> increment(g.d);
 
   for(int k=0;k<g.d;k++){
-    Array z(ne);
-
+    // Evaluate the current quadratic moment directly. The inward mobility
+    // cancels analytically; do not divide by a weight that can approach zero.
+    Array rhs(ids.size()*g.q,0);
     for(size_t e=0;e<ne;e++){
-      const auto& r=edges[e];
-      const auto& edge=c.rows[r.i][r.e];
-
-      z[e]=c.volume[edge.j]*g.h*
-          edge.D[k]/1.0;
+      const auto& ref=edges[e];
+      const auto& edge=c.rows[ref.i][ref.e];
+      const double scale=std::sqrt(c.volume[ref.i]/unitV)*
+          c.volume[edge.j]*edge.D[k]/g.h;
+      for(int p=0;p<g.q;p++){
+        const int a=g.powers[p].first,b=g.powers[p].second;
+        rhs[local[ref.i]*g.q+p]+=scale*(a==b?1.:std::sqrt(2.))*
+            (g.X[edge.j][a]-g.X[ref.i][a])*
+            (g.X[edge.j][b]-g.X[ref.i][b]);
+      }
     }
 
-    Array rhs=Q(z);
     const double before=Length(rhs);
 
     for(double& x:rhs)x=-x;
@@ -2270,7 +2281,7 @@ bool CorrectQuadraticPatch(
     for(size_t e=0;e<ne;e++){
       const unsigned i=edges[e].i;
       const unsigned j=c.rows[i][edges[e].e].j;
-      const double z=1.0*increment[k][e];
+      const double z=std::sqrt(c.inwardWeight[i])*increment[k][e];
 
       area[i]-=c.volume[i]/unitV*z;
       area[j]+=c.volume[i]/unitV*z;
@@ -2296,7 +2307,7 @@ bool CorrectQuadraticPatch(
 
     for(int k=0;k<g.d;k++)
       edge.D[k]+=
-          1.0*increment[k][e]/
+          std::sqrt(c.inwardWeight[r.i])*increment[k][e]/
           (c.volume[edge.j]*g.h);
   }
 
@@ -2568,6 +2579,8 @@ static unsigned ThreadIndex(){
 #endif
 }
 // Preserve current deformation inside the area-increment projection.
+// The inward mobility must match in assembly, matrix-free audit and writeback;
+// it changes the admissible increment, not the current deformation gradient.
 static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdouble3* position,const unsigned* ridp,double waveSpeed){
   c.eventPending=false;auto& s=*c.reg;const double elapsed=c.eventTime-s.lastEvent;
   const double tau=10*c.kernelH/std::max(waveSpeed,1.e-12);if(elapsed<.5*tau)return;
@@ -2596,7 +2609,7 @@ static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdou
       for(int a=0;a<dim;a++)for(int k=0;k<dim;k++)coef[a]+=inverse[i][a*dim+k]*moment[k];
       for(size_t e=0;e<c.rows[i].size();e++){
         const unsigned j=c.rows[i][e].j;double v=lambda[j]-lambda[i];for(int a=0;a<dim;a++)v-=R[i][e][a]*coef[a];
-        out[i]-=v;out[j]+=v;if(result)(*result)[i][e][component]=v;
+        v*=c.inwardWeight[i];out[i]-=v;out[j]+=v;if(result)(*result)[i][e][component]=v;
       }
     }
     RegularizedMG::Vector y(m);for(unsigned a=0;a<m;a++)y[a]=out[s.ids[a]]+1.e-7*diagonal[a]*x[a];return y;
@@ -2618,7 +2631,7 @@ static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdou
       for(unsigned j=0;j<count;j++){
         double v=(a==0&&j==0)?double(degree):((a==0||j==0)?-1.:(a==j?1.:0.));
         for(int k=0;k<dim;k++)v-=coef[k]*C[j][k];
-        assembled[nodes[a]][nodes[j]]+=v;
+        assembled[nodes[a]][nodes[j]]+=c.inwardWeight[i]*v;
       }
     }
   }
@@ -2667,6 +2680,7 @@ static void UpdateIncremental(Cache& c,const ContactGeometry& contact,const tdou
   }
   for(int k=0;k<dim;k++)if(solveErrors[k])std::rethrow_exception(solveErrors[k]);
   size_t nnz=0;for(const auto& row:current.row)nnz+=row.size();
+  double accepted=0,maxGain=0,jump=0;
   for(double alpha=1;alpha>=1./128;alpha*=.5){
     double gain=0;bool valid=true;
     for(unsigned i=0;i<n&&valid;i++)if(s.active[i]){
@@ -2877,7 +2891,7 @@ void ElasticForceWithHourglass(
         const Vec xj=Coordinates(position[ridp[j]],d);
         const Vec& R=c.hgR[id];
 
-        Vec r={{0,0,0}},e=r,normal=r;
+        Vec r={{0,0,0}},e=r;
         double r2=0;
         for(int a=0;a<d;a++){
           r[a]=xj[a]-xi[a];
@@ -2893,23 +2907,23 @@ void ElasticForceWithHourglass(
         const double k=hgModulus[i]*c.hgWeight[id];
         if(k==0)continue;
 
-        const double length=std::sqrt(r2);
-        double s=0;
+        // Penalize the complete non-affine displacement residual.
+        double residual2=0;
         for(int a=0;a<d;a++){
-          normal[a]=r[a]/length;
           e[a]=r[a];
           for(int b=0;b<d;b++)
             e[a]-=F[a][b]*R[b];
-          s+=e[a]*normal[a];
+          residual2+=e[a]*e[a];
         }
 
-        energy+=0.5*k*s*s;
+        energy+=0.5*k*residual2;
 
+        // Differentiate the same energy through the held gradient.
         Vec q={{0,0,0}};
         for(int a=0;a<d;a++){
-          q[a]=k*s*(normal[a]+(e[a]-s*normal[a])/length);
+          q[a]=k*e[a];
           for(int b=0;b<d;b++)
-            H[a][b]-=k*s*normal[a]*R[b]/c.volume[i];
+            H[a][b]-=q[a]*R[b]/c.volume[i];
         }
 
         c.hgFlux[id]=d==2
