@@ -101,7 +101,7 @@ protected:
   void FinishRun(bool stop);
   
   void InitFlexRestartState();
-  void InitFlexRiemann();
+  void InitFlexDissipation(const tmatrix3f* correction);
   void InitFlexRestartFromPrescribed();
   void InitFlexRestartFromModelTransfer();
   void CompleteFlexRestartMaterialState(bool validateOnly=false);

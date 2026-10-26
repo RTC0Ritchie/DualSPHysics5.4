@@ -579,18 +579,17 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void JSphCpu::Interacti
     }
   }
 
-  if(User.ElasticHighFrequencyDissipation){
+  // Preserve the original force parallel region; dissipation owns its passes.
+  if(User.ElasticHighFrequencyDissipation ||
+      (User.ElasticViscousDissipation && User.ElasticViscousFactor>0)){
     try{
-      if(!User.ElasticRiemann)
+      if(!User.ElasticDissipation)
         throw std::runtime_error(
-            "cR: SPH reference cache is not initialized.");
+            "Elastic dissipation: SPH reference cache is not initialized.");
 
-      User.ElasticRiemann->Apply(
-          np,pos,velrhop,code,flexstrucridp,ace);
-
-      flexstrucdt=std::max(
-          flexstrucdt,
-          float(User.ElasticRiemann->GetMaxWaveSpeed()));
+      const double speed=User.ElasticDissipation->Apply(
+          np,pos,velrhop,code,flexstrucridp,defgrad,ace);
+      flexstrucdt=std::max(flexstrucdt,float(speed));
     }
     catch(const std::exception& e){
       Run_Exceptioon(e.what());

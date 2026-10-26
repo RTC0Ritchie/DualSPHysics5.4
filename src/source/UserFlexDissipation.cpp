@@ -1,28 +1,24 @@
 #include "UserFlexDissipation.h"
 #include "OmpDefs.h"
-
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <limits>
 
-//==============================================================================
-// Vector and matrix operations.
-//==============================================================================
-
-JFlexRiemann::V JFlexRiemann::Sub(const V& a,const V& b){
+JFlexDissipation::V JFlexDissipation::Sub(const V& a,const V& b){
   return {{a[0]-b[0],a[1]-b[1],a[2]-b[2]}};
 }
 
-JFlexRiemann::V JFlexRiemann::Scale(V a,double s){
+JFlexDissipation::V JFlexDissipation::Scale(V a,double s){
   for(double& q:a)q*=s;
   return a;
 }
 
-double JFlexRiemann::Dot(const V& a,const V& b){
+double JFlexDissipation::Dot(const V& a,const V& b){
   return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 }
 
-JFlexRiemann::V JFlexRiemann::Mul(const M& a,const V& b){
+JFlexDissipation::V JFlexDissipation::Mul(const M& a,const V& b){
   V c={{0,0,0}};
 
   for(unsigned k=0;k<3;k++)
@@ -32,20 +28,20 @@ JFlexRiemann::V JFlexRiemann::Mul(const M& a,const V& b){
   return c;
 }
 
-void JFlexRiemann::Outer(M& a,const V& b,const V& c){
+void JFlexDissipation::Outer(M& a,const V& b,const V& c){
   for(unsigned k=0;k<3;k++)
     for(unsigned l=0;l<3;l++)
       a[3*k+l]+=b[k]*c[l];
 }
 
-JFlexRiemann::M JFlexRiemann::Inverse(M a){
+JFlexDissipation::M JFlexDissipation::Inverse(M a){
   M b={{1,0,0,0,1,0,0,0,1}};
 
   double scale=0;
 
   for(double q:a){
     if(!std::isfinite(q))
-      throw std::runtime_error("cR: invalid moment.");
+      throw std::runtime_error("Dissipation: invalid moment.");
 
     scale=std::max(scale,std::abs(q));
   }
@@ -59,7 +55,7 @@ JFlexRiemann::M JFlexRiemann::Inverse(M a){
 
     if(!(std::abs(a[3*p+k])>1e-12*scale))
       throw std::runtime_error(
-          "cR: singular reference gradient.");
+          "Dissipation: singular reference gradient.");
 
     for(unsigned l=0;l<3;l++){
       std::swap(a[3*k+l],a[3*p+l]);
@@ -86,260 +82,518 @@ JFlexRiemann::M JFlexRiemann::Inverse(M a){
   return b;
 }
 
-JFlexRiemann::V JFlexRiemann::Position(const tdouble3& a)const{
+JFlexDissipation::V JFlexDissipation::Position(const tdouble3& a)const{
   return {{a.x,TwoD?0.:a.y,a.z}};
 }
 
-JFlexRiemann::V JFlexRiemann::Velocity(const tfloat4& a)const{
+JFlexDissipation::V JFlexDissipation::Velocity(const tfloat4& a)const{
   return {{a.x,TwoD?0.:double(a.y),a.z}};
 }
 
-//==============================================================================
-// Builds the fixed-reference cR operator.
-//
-// Reference arrays use flexible-local particle indices.
-// dW(rr) returns dW/dR evaluated at R=sqrt(rr).
-//
-// Cached quantities:
-//   R      = Xj - Xi
-//   g      = V0j * Bi * Gij
-//   weight = 0.5 * V0j * (-dW/dR)
-//
-// The constructor does not retain pointers to the supplied reference arrays.
-//==============================================================================
+JFlexDissipation::M JFlexDissipation::Matrix(const tmatrix3f& a){
+  return {{a.a11,a.a12,a.a13,a.a21,a.a22,a.a23,a.a31,a.a32,a.a33}};
+}
 
-JFlexRiemann::JFlexRiemann(
-    bool twoD,
-    unsigned n,
-    const tdouble3* X,
-    const double* volume,
-    const double* rho,
-    const double* young,
-    const double* poisson,
-    const unsigned* body,
-    const unsigned* count,
-    const unsigned* const* pairs,
-    const std::function<double(double)>& dW)
-  :TwoD(twoD),N(n),Rows(n),Grad(n),Cp(n),Cs(n)
+JFlexDissipation::JFlexDissipation(
+    bool twoD,unsigned n,const tdouble3* x0,
+    const double* volume,const double* rho,const double* young,
+    const double* poisson,const unsigned* body,const unsigned* count,
+    const unsigned* const* pairs,const tmatrix3f* correction,
+    bool mode5,const std::function<float(float)>& fac,
+    double h,bool useCR,bool useKV,double factor)
+  :TwoD(twoD),CR(useCR),KV(useKV),
+   N(n),H(h),Rows(n),Weights(useCR?n:0),ViscWeights(useKV?n:0),
+   Grad(useCR?n:0),Pv(useKV?n:0),
+   Rho(rho,rho+n),Cp(useCR?n:0),
+   Eta0(useKV?n:0),SumG(useKV?n:0),NormSumG(useKV?n:0),
+   Q(useKV?n:0),ReuseF(n,0)
 {
-  // Numerical wave-speed scales in the supplied SPH reference.
+  const tdouble3* X=x0;
+
+  if(!(H>0) || !std::isfinite(H)
+      || factor<0 || !std::isfinite(factor))
+    throw std::runtime_error("Dissipation: invalid h or factor.");
+
+  std::vector<double> cs(CR?n:0);
+
   for(unsigned i=0;i<N;i++){
-    if(!(volume[i]>0 && rho[i]>0 && young[i]>0
+    if(!(volume[i]>0 && Rho[i]>0 && young[i]>0
         && poisson[i]>-1 && poisson[i]<.5)
         || !std::isfinite(volume[i])
-        || !std::isfinite(rho[i])
+        || !std::isfinite(Rho[i])
         || !std::isfinite(young[i]))
-      throw std::runtime_error(
-          "cR: invalid reference material.");
+      throw std::runtime_error("Dissipation: invalid material.");
 
-    const double mu=young[i]/(2*(1+poisson[i]));
-    const double la=young[i]*poisson[i]
-        /((1+poisson[i])*(1-2*poisson[i]));
+    if(CR){
+      Cp[i]=std::sqrt(young[i]*(1-poisson[i])
+          /((1+poisson[i])*(1-2*poisson[i])*Rho[i]));
 
-    Cp[i]=std::sqrt((la+2*mu)/rho[i]);
-    Cs[i]=std::sqrt(mu/rho[i]);
+      cs[i]=std::sqrt(
+          young[i]/(2*(1+poisson[i])*Rho[i]));
 
-    if(!(Cp[i]>0 && Cs[i]>0)
-        || !std::isfinite(Cp[i]) || !std::isfinite(Cs[i])
-        || !std::isfinite(rho[i]*Cp[i])
-        || !std::isfinite(rho[i]*Cs[i]))
-      throw std::runtime_error(
-          "cR: invalid reference wave speed.");
+      if(!std::isfinite(Rho[i]*Cp[i])
+          || !std::isfinite(Rho[i]*cs[i]))
+        throw std::runtime_error(
+            "Dissipation: invalid wave speed.");
 
-    MaxCp=std::max(MaxCp,Cp[i]);
+      MaxCp=std::max(MaxCp,Cp[i]);
+    }
+
+    if(KV){
+      const double K=young[i]/(3*(1-2*poisson[i]));
+
+      Eta0[i]=factor*Rho[i]*std::sqrt(K/Rho[i])*H;
+
+      if(!std::isfinite(Eta0[i]))
+        throw std::runtime_error("KV: invalid viscosity.");
+    }
   }
 
-  // Fixed reference gradient and impedance weights.
+  // Cache only same-body, nonzero reference interactions.
   for(unsigned i=0;i<N;i++){
-    M moment={{0}};
     Rows[i].reserve(count[i]);
+    if(CR)Weights[i].reserve(count[i]);
 
-    for(unsigned p=0;p<count[i];p++){
-      const unsigned j=pairs[i][p];
+    M moment={{0}};
+    bool sameBody=true;
 
-      if(j>=N || j==i)
-        throw std::runtime_error("cR: invalid pair.");
+    for(unsigned k=0;k<count[i];k++){
+      const unsigned j=pairs[i][k];
 
-      // Internal stabilization only.
-      if(body[i]!=body[j])continue;
+      if(j>=N || j==i || (k && pairs[i][k-1]>=j))
+        throw std::runtime_error(
+            "Dissipation: invalid or unsorted pairs.");
 
-      const V R=Sub(Position(X[j]),Position(X[i]));
-      const double rr=Dot(R,R);
+      const float dx=float(X[i].x-X[j].x);
+      const float dy=float(X[i].y-X[j].y);
+      const float dz=float(X[i].z-X[j].z);
+      const float rr=dx*dx+dy*dy+dz*dz;
 
       if(!(rr>0) || !std::isfinite(rr))
         throw std::runtime_error(
-            "cR: invalid reference distance.");
+            "Dissipation: invalid reference distance.");
 
-      const double s=-dW(rr);
+      const float f=fac(rr);
 
-      if(!std::isfinite(s) || s<0)
-        throw std::runtime_error(
-            "cR: non-monotone reference kernel.");
+      if(f>0 || !std::isfinite(f))
+        throw std::runtime_error("Dissipation: invalid kernel.");
 
-      if(s==0)continue;
+      const tfloat3 raw=TFloat3(f*dx,f*dy,f*dz);
+      const bool active=body[i]==body[j];
 
-      // Gij = -W'(Rij) * Rij / |Rij|.
-      // Initially g = V0j * Gij.
-      const V g=Scale(R,volume[j]*s/std::sqrt(rr));
-      Outer(moment,R,g);
+      sameBody=sameBody && active;
 
-      // Stable evaluation of a*b/(a+b).
-      const auto impedance=[](double a,double b){
-        const double lo=std::min(a,b),hi=std::max(a,b);
-        return lo/(1+lo/hi);
-      };
+      if(!active || f==0)continue;
 
-      const double wp=volume[j]*s/rho[i]
-          *impedance(rho[i]*Cp[i],rho[j]*Cp[j]);
-      const double ws=volume[j]*s/rho[i]
-          *impedance(rho[i]*Cs[i],rho[j]*Cs[j]);
+      const V G={{raw.x,TwoD?0.:double(raw.y),raw.z}};
+      const V g=Scale(G,volume[j]);
 
-      if(!std::isfinite(wp) || !std::isfinite(ws))
-        throw std::runtime_error(
-            "cR: invalid pair impedance.");
+      Rows[i].push_back({j,g});
+      Outer(moment,Sub(Position(X[j]),Position(X[i])),g);
 
-      Rows[i].push_back({j,R,g,wp,ws});
+      if(CR){
+        CRWeight w={Sub(Position(X[j]),Position(X[i])),0,0};
+
+        const auto impedance=[](double a,double b){
+          const double lo=std::min(a,b);
+          const double hi=std::max(a,b);
+          return lo/(1+lo/hi);
+        };
+
+        const double s=std::sqrt(Dot(G,G))*volume[j]/Rho[i];
+
+        w.p=s*impedance(Rho[i]*Cp[i],Rho[j]*Cp[j]);
+        w.s=s*impedance(Rho[i]*cs[i],Rho[j]*cs[j]);
+
+        if(!std::isfinite(w.p) || !std::isfinite(w.s))
+          throw std::runtime_error("cR: invalid impedance.");
+
+        Weights[i].push_back(w);
+      }
     }
 
-    if(Rows[i].empty())continue;
+    bool nonzero=false;
+    for(double q:moment)nonzero=nonzero || q!=0;
+    if(!nonzero)continue;
 
-    // Embed the x-z moment matrix for a 2D calculation.
-    if(TwoD)
-      moment[4]=std::max(
-          std::abs(moment[0]),std::abs(moment[8]));
+    M B;
 
-    const M B=Inverse(moment);
+    if(correction && sameBody){
+      B=Matrix(correction[i]);
+    }
+    else{
+      if(TwoD)
+        moment[4]=std::max(
+            std::abs(moment[0]),std::abs(moment[8]));
 
-    // Cache V0j * Bi * Gij.
-    for(auto& e:Rows[i])
+      B=Inverse(moment);
+    }
+
+    // Solver forms F = (sum dx tensor Vj*Gij) * B.
+    std::swap(B[1],B[3]);
+    std::swap(B[2],B[6]);
+    std::swap(B[5],B[7]);
+
+    ReuseF[i]=correction && sameBody && !mode5;
+
+    V sumg={{0,0,0}};
+    for(auto& e:Rows[i]){
       e.g=Mul(B,e.g);
+      const double norm=std::sqrt(Dot(e.g,e.g));
+
+      if(!std::isfinite(norm))
+        throw std::runtime_error(
+            "Dissipation: invalid gradient.");
+
+      if(KV){
+        SumG[i]+=norm;
+        for(unsigned k=0;k<3;k++)sumg[k]+=e.g[k];
+      }
+    }
+    if(KV){
+      NormSumG[i]=std::sqrt(Dot(sumg,sumg));
+      if(!std::isfinite(SumG[i]) || !std::isfinite(NormSumG[i]))
+        throw std::runtime_error(
+            "KV: invalid reference gradient norm.");
+    }
+  }
+
+  // Pay the reverse lookup once, not at every force evaluation.
+  if(KV)for(unsigned i=0;i<N;i++){
+    ViscWeights[i].reserve(Rows[i].size());
+
+    for(const auto& e:Rows[i]){
+      const auto& row=Rows[e.j];
+
+      const auto it=std::lower_bound(
+          row.begin(),row.end(),i,
+          [](const Edge& a,unsigned j){return a.j<j;});
+
+      if(it==row.end() || it->j!=i)
+        throw std::runtime_error(
+            "KV: reciprocal pairs are required.");
+
+      const V q=Scale(it->g,-volume[e.j]/volume[i]);
+
+      ViscWeights[i].push_back({
+          q,std::sqrt(Dot(q,q))
+      });
+    }
   }
 }
 
-//==============================================================================
-// Returns the largest reference longitudinal wave speed.
-//==============================================================================
-
-double JFlexRiemann::GetMaxWaveSpeed()const{
-  return MaxCp;
+bool JFlexDissipation::BuildKV(unsigned i,const M& F,const M& L){
+  const double J=F[0]*(F[4]*F[8]-F[5]*F[7])
+      -F[1]*(F[3]*F[8]-F[5]*F[6])+F[2]*(F[3]*F[7]-F[4]*F[6]);
+  if(!(J>0) || !std::isfinite(J))return false;
+  const double eta=Eta0[i]/J;
+  M S={{0}},P={{0}};
+  for(unsigned a=0;a<3;a++)for(unsigned b=0;b<3;b++)
+    for(unsigned k=0;k<3;k++)
+      S[3*a+b]+=.5*eta*(F[3*k+a]*L[3*k+b]+L[3*k+a]*F[3*k+b]);
+  for(unsigned a=0;a<3;a++)for(unsigned b=0;b<3;b++)
+    for(unsigned k=0;k<3;k++)P[3*a+b]+=F[3*a+k]*S[3*k+b];
+  double n1=0,ni=0,n2=0;
+  for(unsigned a=0;a<3;a++){
+    double row=0,col=0;
+    for(unsigned b=0;b<3;b++){
+      row+=std::abs(F[3*a+b]);col+=std::abs(F[3*b+a]);
+      n2+=F[3*a+b]*F[3*a+b];
+    }
+    ni=std::max(ni,row);n1=std::max(n1,col);
+  }
+  Q[i]=eta*std::min(n2,n1*ni)*(SumG[i]+NormSumG[i]);
+  if(!std::isfinite(Q[i]))return false;
+  for(double q:P)if(!std::isfinite(q))return false;
+  Pv[i]=P;
+  return true;
 }
 
-//==============================================================================
-// Adds the paper cR acceleration to the existing acceleration array.
-//
-// Pass 1 updates material velocity gradients for the current force stage.
-// Pass 2 reconstructs midpoint jumps and directly assembles cR acceleration.
-//
-// rid maps flexible-local indices to current global particle indices.
-//==============================================================================
-
-void JFlexRiemann::Apply(
-    unsigned n,
-    const tdouble3* x,
-    const tfloat4* velocity,
-    const typecode* code,
-    const unsigned* rid,
-    tfloat3* ace)
+template<bool twoD,bool cr,bool kv>
+bool JFlexDissipation::PrepareT(
+    unsigned i,const tdouble3* x,const tfloat4* velocity,
+    const unsigned* rid,const tmatrix3f& existingF)
 {
-  if(n!=N)
-    throw std::runtime_error(
-        "cR: rebuild reference cache.");
-
-  // Pass 1:
-  //   L_i^X = sum_j (vj-vi) tensor (V0j * Bi * Gij).
-  //
-  // Include clamp particles because they can participate in reconstruction.
-  #ifdef OMP_USE
-  #pragma omp parallel for schedule(static)
-  #endif
-  for(int ii=0;ii<int(N);ii++){
-    const unsigned i=unsigned(ii);
-    M L={{0}};
-
-    const V vi=Velocity(velocity[rid[i]]);
-
-    for(const auto& e:Rows[i])
-      Outer(
-          L,
-          Sub(Velocity(velocity[rid[e.j]]),vi),
-          e.g);
-
-    Grad[i]=L;
+  if(kv){
+    Pv[i]=M{{0}};
+    Q[i]=0;
   }
 
-  // Pass 2:
-  //   jump = vj-vi - 0.5*(L_i^X + L_j^X)*Rij.
-  //
-  // Each thread writes only its target particle acceleration.
-  int invalid=0;
+  M L={{0}},F={{0}};
+  const unsigned p=rid[i];
 
+  const V vi={{
+    velocity[p].x,
+    twoD?0.:double(velocity[p].y),
+    velocity[p].z
+  }};
+
+  const bool rebuild=kv && !ReuseF[i];
+
+  if(rebuild){
+    const auto& xi=x[p];
+
+    for(const auto& e:Rows[i]){
+      const unsigned j=rid[e.j];
+      const auto& vj=velocity[j];
+      const auto& xj=x[j];
+
+      const V dv={{
+        vj.x-vi[0],
+        twoD?0.:vj.y-vi[1],
+        vj.z-vi[2]
+      }};
+
+      const V dx={{
+        xj.x-xi.x,
+        twoD?0.:xj.y-xi.y,
+        xj.z-xi.z
+      }};
+
+      for(unsigned a=0;a<3;a++)if(!twoD || a!=1)
+        for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
+          L[3*a+b]+=dv[a]*e.g[b];
+          F[3*a+b]+=dx[a]*e.g[b];
+        }
+    }
+
+    if(twoD)F[4]=1;
+  }
+  else{
+    for(const auto& e:Rows[i]){
+      const auto& vj=velocity[rid[e.j]];
+
+      const V dv={{
+        vj.x-vi[0],
+        twoD?0.:vj.y-vi[1],
+        vj.z-vi[2]
+      }};
+
+      for(unsigned a=0;a<3;a++)if(!twoD || a!=1)
+        for(unsigned b=0;b<3;b++)if(!twoD || b!=1)
+          L[3*a+b]+=dv[a]*e.g[b];
+    }
+  }
+
+  for(double q:L)if(!std::isfinite(q))return false;
+
+  if(cr)Grad[i]=L;
+
+  if(!kv || Eta0[i]==0 || SumG[i]==0)return true;
+
+  if(!rebuild)F=Matrix(existingF);
+
+  return BuildKV(i,F,L);
+}
+
+template<bool twoD,bool cr,bool kv>
+bool JFlexDissipation::AddParticleT(
+    unsigned i,const tdouble3* x,const tfloat4* velocity,
+    const unsigned* rid,tdouble3& acceleration,double& rate)const
+{
+  V a={{0}},av={{0}};
+  V xi={{0}},vi={{0}};
+  M Li={{0}},Pi={{0}};
+
+  if(cr){
+    const unsigned p=rid[i];
+
+    xi={{x[p].x,twoD?0.:x[p].y,x[p].z}};
+
+    vi={{
+      velocity[p].x,
+      twoD?0.:double(velocity[p].y),
+      velocity[p].z
+    }};
+
+    Li=Grad[i];
+  }
+
+  if(kv)Pi=Pv[i];
+
+  const auto& row=Rows[i];
+
+  for(unsigned k=0;k<row.size();k++){
+    const auto& e=row[k];
+    const unsigned j=e.j;
+
+    if(cr){
+      const auto& w=Weights[i][k];
+      const auto& Lj=Grad[j];
+      const unsigned p=rid[j];
+
+      const V dv={{
+        velocity[p].x-vi[0],
+        twoD?0.:velocity[p].y-vi[1],
+        velocity[p].z-vi[2]
+      }};
+
+      V jump=dv;
+
+      for(unsigned a=0;a<3;a++)if(!twoD || a!=1){
+        double gi=0,gj=0;
+
+        for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
+          gi+=Li[3*a+b]*w.R[b];
+          gj+=Lj[3*a+b]*w.R[b];
+        }
+
+        jump[a]-=.5*(gi+gj);
+      }
+
+      const V r={{
+        x[p].x-xi[0],
+        twoD?0.:x[p].y-xi[1],
+        x[p].z-xi[2]
+      }};
+
+      const double rr=Dot(r,r);
+
+      if(!(rr>0) || !std::isfinite(rr))return false;
+
+      const V normal=Scale(r,1/std::sqrt(rr));
+      const double un=Dot(jump,normal);
+
+      if(!std::isfinite(un))return false;
+
+      if(un<0)
+        for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
+          a[t]+=w.s*jump[t]+(w.p-w.s)*un*normal[t];
+    }
+
+    if(kv){
+      const auto& w=ViscWeights[i][k];
+      const auto& Pj=Pv[j];
+
+      for(unsigned a=0;a<3;a++)if(!twoD || a!=1){
+        double ai=0,aj=0;
+
+        for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
+          ai+=Pi[3*a+b]*e.g[b];
+          aj+=Pj[3*a+b]*w.q[b];
+        }
+
+        av[a]+=ai+aj;
+      }
+
+      rate+=Q[j]*w.norm;
+    }
+  }
+
+  if(kv){
+    const double invrho=1/Rho[i];
+
+    for(unsigned t=0;t<3;t++)
+      a[t]+=av[t]*invrho;
+  }
+
+  for(double q:a)if(!std::isfinite(q))return false;
+
+  acceleration.x+=a[0];
+  acceleration.y+=a[1];
+  acceleration.z+=a[2];
+
+  return true;
+}
+
+// Called from a compile-time-specialized force pass, not via per-particle
+// runtime dispatch. Each particle writes only its own acceleration.
+template<bool twoD,bool cr,bool kv>
+bool JFlexDissipation::Accumulate(
+    unsigned i,const tdouble3* x,const tfloat4* velocity,
+    const unsigned* rid,tfloat3* ace,double& speed)const
+{
+  tdouble3 da=TDouble3(0);
+  double rate=kv?Q[i]*NormSumG[i]:0;
+  if(!AddParticleT<twoD,cr,kv>(i,x,velocity,rid,da,rate))return false;
+
+  const double limit=std::numeric_limits<float>::max();
+  if(!std::isfinite(da.x) || std::abs(da.x)>limit
+      || !std::isfinite(da.y) || std::abs(da.y)>limit
+      || !std::isfinite(da.z) || std::abs(da.z)>limit)return false;
+
+  if(kv){
+    const double value=H*rate/Rho[i];
+    if(!std::isfinite(value) || value<0 || value>limit)return false;
+    speed=std::max(speed,value);
+  }
+
+  const unsigned p=rid[i];
+  ace[p].x+=float(da.x);
+  ace[p].y+=float(da.y);
+  ace[p].z+=float(da.z);
+  return true;
+}
+
+template<bool twoD,bool cr,bool kv>
+double JFlexDissipation::ApplyT(
+    const tdouble3* x,const tfloat4* velocity,
+    const typecode* code,const unsigned* rid,
+    const tmatrix3f* defgrad,tfloat3* ace)
+{
+  int invalid=0;
+  const tmatrix3f zero={};
+
+  // Same two independent, statically scheduled passes as the pre-KV cR.
+  // Shared Fdot/LX is computed once, including clamp particles.
   #ifdef OMP_USE
   #pragma omp parallel for schedule(static) reduction(+:invalid)
   #endif
   for(int ii=0;ii<int(N);ii++){
     const unsigned i=unsigned(ii);
-    const unsigned p=rid[i];
-
-    if(!CODE_IsFlexStrucFlex(code[p]))continue;
-
-    const V vi=Velocity(velocity[p]);
-    const V xi=Position(x[p]);
-    V a={{0,0,0}};
-
-    for(const auto& e:Rows[i]){
-      const unsigned j=e.j;
-
-      // Midpoint reconstruction in the reference configuration.
-      V jump=Sub(Velocity(velocity[rid[j]]),vi);
-
-      const V gi=Mul(Grad[i],e.R);
-      const V gj=Mul(Grad[j],e.R);
-
-      for(unsigned k=0;k<3;k++)
-        jump[k]-=.5*(gi[k]+gj[k]);
-
-      // Longitudinal and tangential projections use the current direction.
-      const V r=Sub(Position(x[rid[j]]),xi);
-      const double rr=Dot(r,r);
-
-      if(!(rr>0) || !std::isfinite(rr)){
-        invalid++;
-        continue;
-      }
-
-      const V normal=Scale(r,1/std::sqrt(rr));
-      const double un=Dot(jump,normal);
-
-      if(!std::isfinite(un)){
-        invalid++;
-        continue;
-      }
-
-      // Paper limiter:
-      //   beta=1 for a compressive reconstructed normal jump.
-      //   beta=0 otherwise, including an exactly zero normal jump.
-      if(un>=0)continue;
-
-      // Cp * jump_normal + Cs * jump_tangential.
-      for(unsigned k=0;k<3;k++)
-        a[k]+=e.ws*jump[k]+(e.wp-e.ws)*un*normal[k];
-    }
-
-    if(!std::isfinite(a[0])
-        || !std::isfinite(a[1])
-        || !std::isfinite(a[2])){
-      invalid++;
-      continue;
-    }
-
-    // Already an acceleration: no additional density division.
-    // Preserve all previously assembled force contributions.
-    ace[p].x+=float(a[0]);
-    ace[p].y+=float(a[1]);
-    ace[p].z+=float(a[2]);
+    const tmatrix3f& F=kv && defgrad?defgrad[i]:zero;
+    if(!PrepareT<twoD,cr,kv>(i,x,velocity,rid,F))invalid++;
   }
-
   if(invalid)
-    throw std::runtime_error(
-        "cR: invalid current state.");
+    throw std::runtime_error("Elastic dissipation: invalid stage gradient or stress.");
+
+  double speed=0;
+  if(kv){
+    #ifdef OMP_USE
+    #pragma omp parallel for schedule(static) reduction(+:invalid) reduction(max:speed)
+    #endif
+    for(int ii=0;ii<int(N);ii++){
+      const unsigned i=unsigned(ii);
+      if(!CODE_IsFlexStrucFlex(code[rid[i]]))continue;
+      if(!Accumulate<twoD,cr,kv>(i,x,velocity,rid,ace,speed))invalid++;
+    }
+  }
+  else{
+    // cR uses its cached constant maximum wave speed. No per-particle
+    // time-step interface or maximum-speed reduction in this path.
+    #ifdef OMP_USE
+    #pragma omp parallel for schedule(static) reduction(+:invalid)
+    #endif
+    for(int ii=0;ii<int(N);ii++){
+      const unsigned i=unsigned(ii);
+      if(!CODE_IsFlexStrucFlex(code[rid[i]]))continue;
+      double unused=0;
+      if(!Accumulate<twoD,cr,kv>(i,x,velocity,rid,ace,unused))invalid++;
+    }
+  }
+  if(invalid)
+    throw std::runtime_error("Elastic dissipation: invalid stage acceleration.");
+  return std::max(cr?MaxCp:0.,speed);
+}
+
+double JFlexDissipation::Apply(
+    unsigned n,const tdouble3* x,const tfloat4* velocity,
+    const typecode* code,const unsigned* rid,
+    const tmatrix3f* defgrad,tfloat3* ace)
+{
+  if(n!=N)
+    throw std::runtime_error("Elastic dissipation: rebuild SPH reference cache.");
+  if(!CR && !KV)return 0;
+  if(MaxCp>std::numeric_limits<float>::max())
+    throw std::runtime_error("Elastic dissipation: reference wave speed overflow.");
+
+  // Select the active operators and dimension once per force evaluation.
+  if(TwoD){
+    if(CR && KV)return ApplyT<true,true,true>(x,velocity,code,rid,defgrad,ace);
+    if(CR)return ApplyT<true,true,false>(x,velocity,code,rid,defgrad,ace);
+    return ApplyT<true,false,true>(x,velocity,code,rid,defgrad,ace);
+  }
+  if(CR && KV)return ApplyT<false,true,true>(x,velocity,code,rid,defgrad,ace);
+  if(CR)return ApplyT<false,true,false>(x,velocity,code,rid,defgrad,ace);
+  return ApplyT<false,false,true>(x,velocity,code,rid,defgrad,ace);
 }

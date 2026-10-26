@@ -32,10 +32,7 @@ void UserParameters::Reset(){
 
   ElasticHighFrequencyDissipation=false;
   ElasticViscousDissipation=false;
-  ElasticViscousModel=1;
   ElasticViscousFactor=0.5;
-  ElasticShearViscosity=0;
-  ElasticBulkViscosity=0;
 
   SaveFlexData=false;
 
@@ -63,7 +60,7 @@ void UserParameters::Reset(){
 
   OutputObjects.clear();
 
-  ElasticRiemann.reset();
+  ElasticDissipation.reset();
 
 
   FlexRestartState.Clear();
@@ -120,34 +117,17 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     }
 
     if(const TiXmlElement* p=child("viscous")){
-      xml->CheckAttributeNames(
-          p,"enabled model factor shear bulk comment");
+      xml->CheckAttributeNames(p,"enabled factor comment");
 
       ElasticViscousDissipation=
           xml->GetAttributeBool(p,"enabled",true,false);
-
-      const double model=xml->GetAttributeDouble(p,"model",true,1);
-
-      if(model!=1 && model!=2)
-        Run_Exceptioon("Viscous model must be 1 or 2.");
-
-      ElasticViscousModel=int(model);
       ElasticViscousFactor=
           xml->GetAttributeDouble(p,"factor",true,0.5);
-      ElasticShearViscosity=
-          xml->GetAttributeDouble(p,"shear",true,0);
-      ElasticBulkViscosity=
-          xml->GetAttributeDouble(p,"bulk",true,0);
 
-      for(double q:{
-          ElasticViscousFactor,
-          ElasticShearViscosity,
-          ElasticBulkViscosity})
-      {
-        if(!std::isfinite(q) || q<0)
-          Run_Exceptioon(
-              "Viscous coefficients must be finite and nonnegative.");
-      }
+      if(!std::isfinite(ElasticViscousFactor)
+          || ElasticViscousFactor<0)
+        Run_Exceptioon(
+            "KV factor must be finite and nonnegative.");
     }
   }
 
@@ -1397,21 +1377,18 @@ void UserParameters::ConfigFlexRestartCorrections(
     JLog2* log)
 {
   const bool applicable=isDirectContinuation && hasflex;
-  // Independent of restart and boundary-correction modes.
-  if(hasflex && ElasticViscousDissipation)
-    Run_Exceptioon(
-        "Elastic KV dissipation interface is reserved; "
-        "implementation is not available yet.");
-
   if(log){
     log->Printf(
-        "Elastic high-frequency dissipation: %s; KV interface: %s.",
-        ElasticHighFrequencyDissipation
-          ? (hasflex ? "enabled" : "inactive (no elastic body)")
-          : "disabled",
-        ElasticViscousDissipation ? "requested" : "disabled");
-  }
+        "Elastic high-frequency dissipation: %s; KV dissipation: %s.",
+        ElasticHighFrequencyDissipation && hasflex
+          ? "enabled" : "disabled",
+        ElasticViscousDissipation && hasflex
+          ? "enabled" : "disabled");
 
+    if(hasflex && ElasticViscousDissipation)
+      log->Printf("  KV factor: %g",ElasticViscousFactor);
+  }
+  
   UseFlexRestartRestorePairs=
       applicable && FlexRestartRestorePairs;
 
@@ -1420,6 +1397,12 @@ void UserParameters::ConfigFlexRestartCorrections(
 
   UseFlexRestartHourglassCorrection=
       applicable && FlexRestartHourglassCorrection;
+
+  if(hasflex && ElasticViscousDissipation &&
+      (UseFlexRestartRestorePairs || UseFlexRestartGradientCorrection))
+    Run_Exceptioon(
+        "KV requires directcontinuation.restorepairs=false and "
+        "directcontinuation.gradientcorrection=false.");
 
   const auto reportUnused=
       [&](const char* option,bool requested)

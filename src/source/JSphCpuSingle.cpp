@@ -1423,8 +1423,12 @@ void JSphCpuSingle::LoadBoundaryMotionRestart(){
   Log->Print("Boundary MotionVel and MotionAce restored.");
 }
 
-void JSphCpuSingle::InitFlexRiemann(){
-  if(!User->ElasticHighFrequencyDissipation)return;
+void JSphCpuSingle::InitFlexDissipation(const tmatrix3f* correction){
+  const bool useCR=User->ElasticHighFrequencyDissipation;
+  const bool useKV=User->ElasticViscousDissipation
+      && User->ElasticViscousFactor>0;
+
+  if(!useCR && !useKV)return;
 
   try{
     const unsigned np=CaseNflexstruc;
@@ -1471,18 +1475,21 @@ void JSphCpuSingle::InitFlexRiemann(){
     if(TKernel!=KERNEL_Wendland && TKernel!=KERNEL_Cubic)
       throw std::runtime_error("cR: unsupported kernel.");
 
-    const auto dw=[&](double rr){
-      const double fac=(TKernel==KERNEL_Wendland
-          ?fsph::GetKernel_Fac<KERNEL_Wendland>(CSP,float(rr))
-          :fsph::GetKernel_Fac<KERNEL_Cubic>(CSP,float(rr)));
-
-      return fac*std::sqrt(rr);
+    const auto fac=[&](float rr)->float {
+      return TKernel==KERNEL_Wendland
+          ?fsph::GetKernel_Fac<KERNEL_Wendland>(CSP,rr)
+          :fsph::GetKernel_Fac<KERNEL_Cubic>(CSP,rr);
     };
 
-    User->ElasticRiemann=std::make_shared<JFlexRiemann>(
+    if(useKV && (User->UseFlexRestartRestorePairs
+        || User->UseFlexRestartGradientCorrection))
+      throw std::runtime_error("KV cannot inherit reference kernels or pairs.");
+
+    User->ElasticDissipation=std::make_shared<JFlexDissipation>(
         Simulate2D,np,Pos0c,volume.data(),rho.data(),
-        young.data(),poisson.data(),body.data(),
-        NumPairsc,PairIdxc,dw);
+        young.data(),poisson.data(),body.data(),NumPairsc,PairIdxc,
+        correction,User->FlexRestartBoundaryCorrectionMode==5,
+        fac,KernelH,useCR,useKV,User->ElasticViscousFactor);
   }
   catch(const std::exception& e){
     Run_Exceptioon(e.what());
@@ -1495,7 +1502,7 @@ void JSphCpuSingle::InitFlexRiemann(){
 /// Inicializa las matrices asociadas para las estructuras flexibles.
 //==============================================================================
 void JSphCpuSingle::FlexStrucInit(){
-  User->ElasticRiemann.reset();
+  User->ElasticDissipation.reset();
   //-Start timer and print info.
   Timersc->TmStart(TMC_SuFlexStruc);
   Log->Print("\nInitialising Flexible Structures...");
@@ -1547,12 +1554,13 @@ void JSphCpuSingle::FlexStrucInit(){
   // Load the restart material state.
   InitFlexRestartState();
 
-  // Cache cR using this run's SPH reference and neighbours.
-  InitFlexRiemann();
+  const bool inheritKernel=User->UseFlexRestartRestorePairs
+      || User->UseFlexRestartGradientCorrection;
+  if(inheritKernel)InitFlexDissipation(nullptr);
 
-  // Initialise the existing elastic corrections and geometry.
   InitFlexRestartReferenceAndCorrections();
   JSphCpu::CalcFlexStrucKerCorr();
+  if(!inheritKernel)InitFlexDissipation(KerCorrc);
   JSphCpu::InitFlexRestartBoundaryCorrection();
   JSphCpu::UpdateFlexStrucGeometry();
   Log->Print("");

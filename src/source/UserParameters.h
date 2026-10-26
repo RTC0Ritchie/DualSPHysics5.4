@@ -11,7 +11,7 @@
 class JXml;
 class JLog2;
 class TiXmlElement;
-class JFlexRiemann;
+class JFlexDissipation;
 
 namespace FlexBoundaryCorrection{
   struct Cache;
@@ -53,16 +53,10 @@ public:
    // Numerical high-frequency dissipation.
   bool ElasticHighFrequencyDissipation=false;
 
-  // Reserved Kelvin-Voigt dissipation.
-  // model: 1=artificial coefficients; 2=prescribed coefficients.
+  // Kelvin-Voigt artificial dissipation.
   bool ElasticViscousDissipation=false;
-  int ElasticViscousModel=1;
   double ElasticViscousFactor=0.5;
-  double ElasticShearViscosity=0;
-  double ElasticBulkViscosity=0;
 
-  // Fixed-reference cR operator and current-stage gradient workspace.
-  mutable std::shared_ptr<JFlexRiemann> ElasticRiemann;
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
 
@@ -148,6 +142,7 @@ public:
   void VisuConfig(JLog2* log)const;
 
 
+  mutable std::shared_ptr<JFlexDissipation> ElasticDissipation;
 
 
   // Inner variables and functions, not directly accessible to users.
