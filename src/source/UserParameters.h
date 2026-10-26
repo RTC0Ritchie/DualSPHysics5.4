@@ -8,17 +8,10 @@
 #include "JObject.h"
 #include "TypesDef.h"
 
-namespace FlexKinematics{
-  struct Cache;
-}
-
-namespace FlexDissipation{
-  struct Cache;
-}
-
 class JXml;
 class JLog2;
 class TiXmlElement;
+class JFlexRiemann;
 
 namespace FlexBoundaryCorrection{
   struct Cache;
@@ -68,9 +61,8 @@ public:
   double ElasticShearViscosity=0;
   double ElasticBulkViscosity=0;
 
-  // Shared elastic kinematics and separate dissipation workspace.
-  mutable std::shared_ptr<FlexKinematics::Cache> ElasticKinematicsCache;
-  mutable std::shared_ptr<FlexDissipation::Cache> ElasticDissipationCache;
+  // Fixed-reference cR operator and current-stage gradient workspace.
+  mutable std::shared_ptr<JFlexRiemann> ElasticRiemann;
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
 

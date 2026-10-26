@@ -49,11 +49,14 @@
 #include "JDsPips.h"
 #include "JDsExtraData.h"
 #include "JDsOutputParts.h" //<vs_outpaarts>
+#include "UserFlexDissipation.h"
+#include "FunSphKernel.h"
 
 #include "UserParameters.h"
 
 #include <algorithm>
-
+#include <cmath>
+#include <stdexcept>
 #include <climits>
 
 using namespace std;
@@ -1420,12 +1423,79 @@ void JSphCpuSingle::LoadBoundaryMotionRestart(){
   Log->Print("Boundary MotionVel and MotionAce restored.");
 }
 
+void JSphCpuSingle::InitFlexRiemann(){
+  if(!User->ElasticHighFrequencyDissipation)return;
+
+  try{
+    const unsigned np=CaseNflexstruc;
+    const bool restart=User->IsFlexRestart();
+    const auto& state=User->FlexRestartState;
+
+    if(restart && (!state.HasRestartStateLayout()
+        || state.Idp.size()!=np))
+      throw std::runtime_error(
+          "cR: incomplete SPH reference state.");
+
+    std::vector<double> volume(np),rho(np),young(np),poisson(np);
+    std::vector<unsigned> body(np);
+
+    for(unsigned i=0;i<np;i++){
+      const unsigned p=FlexStrucRidpc[i];
+
+      body[i]=CODE_GetIbodyFlexStruc(Code_c->cptr()[p]);
+      const auto& mat=FlexStrucDatac[body[i]];
+
+      if(restart && state.Idp[i]!=Idp_c->cptr()[p])
+        throw std::runtime_error(
+            "cR: inconsistent particle identity.");
+
+      volume[i]=restart
+          ?state.ReferenceVolume[i]
+          :double(mat.vol0);
+
+      const double mass=restart
+          ?double(state.ParticleMass[i])
+          :volume[i]*double(mat.rho0);
+
+      if(!(volume[i]>0 && mass>0)
+          || !std::isfinite(volume[i])
+          || !std::isfinite(mass))
+        throw std::runtime_error(
+            "cR: invalid SPH reference volume or mass.");
+
+      rho[i]=mass/volume[i];
+      young[i]=mat.youngmod;
+      poisson[i]=mat.poissratio;
+    }
+
+    if(TKernel!=KERNEL_Wendland && TKernel!=KERNEL_Cubic)
+      throw std::runtime_error("cR: unsupported kernel.");
+
+    const auto dw=[&](double rr){
+      const double fac=(TKernel==KERNEL_Wendland
+          ?fsph::GetKernel_Fac<KERNEL_Wendland>(CSP,float(rr))
+          :fsph::GetKernel_Fac<KERNEL_Cubic>(CSP,float(rr)));
+
+      return fac*std::sqrt(rr);
+    };
+
+    User->ElasticRiemann=std::make_shared<JFlexRiemann>(
+        Simulate2D,np,Pos0c,volume.data(),rho.data(),
+        young.data(),poisson.data(),body.data(),
+        NumPairsc,PairIdxc,dw);
+  }
+  catch(const std::exception& e){
+    Run_Exceptioon(e.what());
+  }
+}
+
 //<vs_flexstruc_ini>
 //==============================================================================
 /// Initialises the associated arrays for the flexible structures.
 /// Inicializa las matrices asociadas para las estructuras flexibles.
 //==============================================================================
 void JSphCpuSingle::FlexStrucInit(){
+  User->ElasticRiemann.reset();
   //-Start timer and print info.
   Timersc->TmStart(TMC_SuFlexStruc);
   Log->Print("\nInitialising Flexible Structures...");
@@ -1473,9 +1543,14 @@ void JSphCpuSingle::FlexStrucInit(){
   }
   //-Set the indices for each particle pair.
   JSphCpu::SetFlexStrucPairs(CaseNflexstruc,Pos0c,PairIdxc);
-  // Load F* and Xn/X0 material quantities before kernel correction.
+
+  // Load the restart material state.
   InitFlexRestartState();
-  //-Calculate kernel correction and update geometry.
+
+  // Cache cR using this run's SPH reference and neighbours.
+  InitFlexRiemann();
+
+  // Initialise the existing elastic corrections and geometry.
   InitFlexRestartReferenceAndCorrections();
   JSphCpu::CalcFlexStrucKerCorr();
   JSphCpu::InitFlexRestartBoundaryCorrection();

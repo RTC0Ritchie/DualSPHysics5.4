@@ -101,6 +101,7 @@ protected:
   void FinishRun(bool stop);
   
   void InitFlexRestartState();
+  void InitFlexRiemann();
   void InitFlexRestartFromPrescribed();
   void InitFlexRestartFromModelTransfer();
   void CompleteFlexRestartMaterialState(bool validateOnly=false);

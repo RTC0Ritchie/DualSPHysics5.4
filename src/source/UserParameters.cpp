@@ -63,8 +63,7 @@ void UserParameters::Reset(){
 
   OutputObjects.clear();
 
-  ElasticDissipationCache.reset();
-  ElasticKinematicsCache.reset();
+  ElasticRiemann.reset();
 
 
   FlexRestartState.Clear();
