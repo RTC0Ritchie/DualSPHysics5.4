@@ -1330,6 +1330,7 @@ void JSphCpuSingle::SaveData(){
   //-Save extra data.
   if(SvExtraDataBi4)SaveExtraData();
   SaveFlexData();
+  SaveFlexPairDataOnce();
 
   // Save user-defined elected user fields at the current output frame.
   if(save){

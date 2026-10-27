@@ -17,7 +17,9 @@ void JSphCpuSingle::InitFlexRestartState()
 {
   User->FlexRestartState.Clear();
   User->FlexReferenceId.clear();
-  User->FlexReferenceWritten=false;
+  User->FlexRestartWriterRunCode.clear();
+  User->FlexPairDataWritten=false;
+  User->FlexMaterialDataWritten=false;
 
   if(!User->IsFlexRestart())
     return;
@@ -154,6 +156,11 @@ void JSphCpuSingle::CompleteFlexRestartMaterialState(bool validateOnly)
         "FlexRestart: incomplete restart state.");
   }
 
+  const bool suppliedMaterial=state.HasMaterialState;
+  if(suppliedMaterial && (state.NaturalVolume.size()!=nf ||
+      state.NaturalDensity.size()!=nf || state.ParticleMass.size()!=nf))
+    Run_Exceptioon("FlexRestart: incomplete supplied material state.");
+
   state.Jstar.resize(nf);
   state.NaturalVolume.resize(nf);
   state.NaturalDensity.resize(nf);
@@ -216,7 +223,22 @@ void JSphCpuSingle::CompleteFlexRestartMaterialState(bool validateOnly)
 
     state.Jstar[pfs]=jstar;
 
-    if(conserveMass && densityIsNatural){
+    if(suppliedMaterial){
+      const float vn=state.NaturalVolume[pfs];
+      const float rn=state.NaturalDensity[pfs];
+      const float mass=state.ParticleMass[pfs];
+      if(!std::isfinite(vn) || vn<=0 || !std::isfinite(rn) || rn<=0 ||
+         !std::isfinite(mass) || mass<=0)
+        Run_Exceptioon("FlexRestart: invalid supplied material invariants.");
+      const double expected=double(vn)*rn;
+      const double tolerance=32.0*std::numeric_limits<float>::epsilon()
+          *std::max(expected,double(mass));
+      if(std::fabs(double(mass)-expected)>tolerance)
+        Run_Exceptioon("FlexRestart: inconsistent supplied particle mass.");
+      state.ReferenceVolume[pfs]=vn*jstar;
+      state.ReferenceDensity[pfs]=rn/jstar;
+    }
+    else if(conserveMass && densityIsNatural){
       // Existing direct-continuation convention.
       state.NaturalVolume[pfs]=volbase;
       state.NaturalDensity[pfs]=rhoxml;
@@ -263,6 +285,12 @@ void JSphCpuSingle::CompleteFlexRestartMaterialState(bool validateOnly)
           "FlexRestart: invalid material density, volume or mass.");
     }
   }
+  state.HasMaterialState=true;
+  if(User->IsFlexDirectContinuation())
+    Log->Print(suppliedMaterial
+        ? "FlexRestart.Material: saved material invariants restored."
+        : "FlexRestart.Material: XML natural-state defaults (mass=true, natural=true).");
+
 }
 
 //==============================================================================

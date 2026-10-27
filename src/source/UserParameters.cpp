@@ -35,6 +35,7 @@ void UserParameters::Reset(){
   ElasticViscousFactor=0.5;
 
   SaveFlexData=false;
+  SaveFlexPairData=false;
 
   FlexRestartRequested=false;
   FlexRestartSourceRequested=0;
@@ -71,8 +72,10 @@ void UserParameters::Reset(){
 
   FlexRestartBoundaryData=StFlexRestartBoundaryData{};
 
-  FlexReferenceWritten=false;
+  FlexPairDataWritten=false;
+  FlexMaterialDataWritten=false;
   FlexReferenceId.clear();
+  FlexRestartWriterRunCode.clear();
 
   FlexRestartSource=TpFlexRestartSource::None;
 }
@@ -363,6 +366,14 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
   }
 
   SaveFlexData=(saveflexdata==1);
+
+  const int saveflexpairdata=
+      parameters.GetValueInt("SaveFlexPairData",true,0);
+
+  if(saveflexpairdata!=0 && saveflexpairdata!=1)
+    Run_Exceptioon("User.SaveFlexPairData must be 0 or 1.");
+
+  SaveFlexPairData=(saveflexpairdata==1);
 
 
   // ------------------------------------------------------------
@@ -1258,6 +1269,8 @@ void UserParameters::VisuConfig(JLog2* log)const{
 
   log->Printf("  SaveFlexData: %s",
             SaveFlexData ? "true" : "false");
+  log->Printf("  SaveFlexPairData: %s",
+            SaveFlexPairData ? "true" : "false");
   log->Printf("  FlexRestart.Requested: %s",
       FlexRestartRequested ? "true" : "false");
   const char* requestedSource=
@@ -1509,6 +1522,12 @@ void UserParameters::ConfigFlexRestartMode(
       }
     }
   }
+
+  if((IsFlexPrescribedRestart() || IsFlexModelTransferRestart()) &&
+     SaveFlexPairData && !IsFlexUndeformedRestart())
+    Run_Exceptioon(
+        "SaveFlexPairData requires the prescribed undeformed field "
+        "when User.restart is enabled (source=2, specialfield=1).");
 
   ConfigFlexRestartCorrections(
       IsFlexDirectContinuation(),

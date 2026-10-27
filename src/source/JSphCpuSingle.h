@@ -112,8 +112,10 @@ protected:
   void SaveFlexData();
   void LoadFlexDirectContinuationState();
 
-  void SaveFlexReferenceOnce();
-  void LoadFlexDirectContinuationReference();
+  void SaveFlexPairDataOnce();
+  void SaveFlexMaterialDataOnce();
+  void LoadFlexMaterialData(const std::string& storage);
+  void LoadFlexDirectContinuationPairData();
 
   void RestoreFlexRestartPairs();
 

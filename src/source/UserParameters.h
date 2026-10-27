@@ -59,7 +59,7 @@ public:
 
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
-
+  bool SaveFlexPairData;
 
   // Explicit User restart request; mutually exclusive with SPH restart.
   bool FlexRestartRequested;
@@ -163,6 +163,8 @@ public:
     std::vector<float> ReferenceVolume;
     std::vector<float> ReferenceDensity;
 
+    bool HasMaterialState=false;
+
     // Invariant particle mass.
     std::vector<float> ParticleMass;
 
@@ -217,6 +219,7 @@ public:
       ReferenceVolume.clear();
       ReferenceDensity.clear();
       ParticleMass.clear();
+      HasMaterialState=false;
 
       HasNaturalReferenceData=false;
       ReferenceKernel=0;
@@ -281,11 +284,14 @@ public:
   bool UseFlexRestartHourglassCorrection;
 
   // Output-directory state; reset for every run.
-  bool FlexReferenceWritten;
+  bool FlexPairDataWritten;
+  bool FlexMaterialDataWritten=false;
 
-  // Identifies the reference file associated with PartFlex.
-  // Preserved through successive restarts.
+  // Identifies original natural-reference kernel data across restarts.
   std::string FlexReferenceId;
+
+  // Writer of the loaded PartFlex v3 frame; empty for legacy formats.
+  std::string FlexRestartWriterRunCode;
 
   void ConfigFlexRestartCorrections(
       bool isDirectContinuation,
@@ -311,6 +317,11 @@ public:
   bool IsFlexDirectContinuation()const{
     return FlexRestartSource==
         TpFlexRestartSource::DirectContinuation;
+  }
+
+  bool IsFlexUndeformedRestart()const{
+    return IsFlexPrescribedRestart() &&
+        FlexRestartElasticInput==2 && FlexRestartSpecialField==1;
   }
 
   bool IsFlexPrescribedRestart()const{
