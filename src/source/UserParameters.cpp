@@ -44,9 +44,11 @@ void UserParameters::Reset(){
   FlexRestartElasticFile.clear();
   FlexRestartFileVariableType=0;
   FlexRestartSpecialField=0;
+  FlexRestartSeaLevel=0.0;
   FlexRestartColumnGapCoef=0.1;
   FlexRestartConserveMass=true;
   FlexRestartDensityIsNatural=true;
+
   FlexRestartBoundaryCorrectionMode=0;
   FlexRestartBoundaryCorrectionLayers=0;
   FlexRestartBoundaryCorrectionLimit=1.5;
@@ -704,7 +706,7 @@ void UserParameters::LoadRestartElasticInputXml(
           xml->ErrGetFileRow(field));
     }
 
-    xml->CheckAttributeNames(field,"value comment");
+    xml->CheckAttributeNames(field,"value sealevel comment");
 
     if(field->FirstChildElement()){
       Run_ExceptioonFile(
@@ -716,12 +718,35 @@ void UserParameters::LoadRestartElasticInputXml(
         xml->GetAttributeInt(field,"value");
 
     if(FlexRestartSpecialField!=1 &&
-       FlexRestartSpecialField!=2)
+       FlexRestartSpecialField!=2 &&
+       FlexRestartSpecialField!=3)
     {
       Run_ExceptioonFile(
           "Specialfield must be "
-          "1 (undeformed) or 2 (hydrostatic_pressure).",
+          "1 (undeformed), 2 (hydrostatic_pressure), "
+          "or 3 (sea_level_pressure).",
           xml->ErrGetFileRow(field));
+    }
+
+    if(FlexRestartSpecialField==3){
+      FlexRestartSeaLevel=
+          xml->GetAttributeDouble(field,"sealevel");
+
+      if(!std::isfinite(FlexRestartSeaLevel))
+        Run_ExceptioonFile(
+            "Specialfield=3 requires a finite sealevel.",
+            xml->ErrGetFileRow(field));
+
+      if(FlexRestartRequested){
+        const TiXmlNode* ctes=
+            xml->GetNodeSimple("case.casedef.constantsdef");
+
+        if(!ctes ||
+           xml->ReadElementInt(ctes,"rhopgradient","value",true,2)!=3)
+          Run_ExceptioonFile(
+              "Specialfield=3 requires rhopgradient=3.",
+              xml->ErrGetFileRow(field));
+      }
     }
   }
   else{
@@ -1375,12 +1400,16 @@ void UserParameters::VisuConfig(JLog2* log)const{
     const char* specialField=
         FlexRestartSpecialField==1
         ? "undeformed"
-        : "hydrostatic_pressure";
+        : (FlexRestartSpecialField==2
+           ? "hydrostatic_pressure"
+           : "sea_level_pressure");
 
     log->Printf(
         "  FlexRestart.SpecialField: %d (%s)",
         FlexRestartSpecialField,
         specialField);
+    if(FlexRestartSpecialField==3)
+      log->Printf("  FlexRestart.SeaLevel: %g m",FlexRestartSeaLevel);
   }
 }
 

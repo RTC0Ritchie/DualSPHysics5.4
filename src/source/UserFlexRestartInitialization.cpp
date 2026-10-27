@@ -76,6 +76,7 @@ void JSphCpuSingle::InitFlexRestartFromPrescribed()
         return;
 
       case 2:
+      case 3:
         InitFlexRestartHydrostatic();
         return;
 
@@ -368,6 +369,20 @@ void JSphCpuSingle::InitFlexRestartHydrostatic()
   if(Simulate2D && gy!=0.0)
     Run_Exceptioon("FlexRestart.Hydrostatic: 2D gravity must lie in the x-z plane.");
 
+  const bool seaLevelField=User->FlexRestartSpecialField==3;
+  const double seaLevel=User->FlexRestartSeaLevel;
+
+  if(seaLevelField){
+    if(!std::isfinite(seaLevel) ||
+       !std::isfinite(double(RhopZero)) || RhopZero<=0)
+      Run_Exceptioon(
+          "FlexRestart.SeaLevel: invalid sea level or water density.");
+
+    if(gx!=0.0 || gy!=0.0 || gz>=0.0)
+      Run_Exceptioon(
+          "FlexRestart.SeaLevel: horizontal sea level requires "
+          "gravity in the negative z direction.");
+  }
   const double up[3]={gravity>0 ? -gx/gravity : 0.0,
                       gravity>0 ? -gy/gravity : 0.0,
                       gravity>0 ? -gz/gravity : 0.0};
@@ -453,12 +468,15 @@ void JSphCpuSingle::InitFlexRestartHydrostatic()
           "FlexRestart.Hydrostatic: invalid material properties.");
     }
 
-    intervals.reserve(ids.size());
+    if(!seaLevelField)intervals.reserve(ids.size());
 
     for(unsigned i:ids){
       double depth=0.0;
 
-      if(gravity>0){
+      if(seaLevelField){
+        depth=std::max(0.0,seaLevel-positions[i].z);
+      }
+      else if(gravity>0){
         intervals.clear();
         const tdouble3& xi=positions[i];
 
@@ -529,10 +547,13 @@ void JSphCpuSingle::InitFlexRestartHydrostatic()
         }
       }
 
-      // Natural-density input: retain the existing pressure approximation.
-      // Reference-density input: use the prescribed X0 density directly.
-      // Do not replace rhoinput by the reconstructed NaturalDensity here.
-      const double pressure=rhoinput*gravity*depth;
+      // Mode 2: local-column pressure using the XML material density.
+      // Mode 3: sea-level pressure using the fluid reference density.
+      // Material mass/volume conventions are completed separately.
+      const double pressureDensity=seaLevelField
+          ? double(RhopZero) : rhoinput;
+
+      const double pressure=pressureDensity*gravity*depth;
       const double ratio=pressure/modulus;
 
       if(!std::isfinite(ratio) || ratio<0)
@@ -578,12 +599,22 @@ void JSphCpuSingle::InitFlexRestartHydrostatic()
   // CompleteFlexRestartMaterialState() supplies rho, volume and conserved mass.
   // Do not fabricate natural positions or overwrite fluid-EOS state arrays.
   User->FlexRestartState=state;
-  Log->Printf(
-      "FlexRestart.Hydrostatic: columnGapCoef=%g; "
-      "columnGapTolerance=%g m.",
-      columnGapCoef,columnGapTolerance);
-  Log->Printf(
-      "FlexRestart.Prescribed: local-column hydrostatic field initialised "
-      "for %u flexible/clamp particles; pmax=%g Pa; Jstar_min=%g.",
-      nf,pressuremax,jmin);
+  if(seaLevelField){
+    Log->Printf(
+        "FlexRestart.Prescribed: sea-level pressure field initialised "
+        "for %u flexible/clamp particles; seaLevel=%g m; "
+        "waterDensity=%g kg/m^3; pmax=%g Pa; Jstar_min=%g.",
+        nf,seaLevel,double(RhopZero),pressuremax,jmin);
+  }
+  else{
+    Log->Printf(
+        "FlexRestart.Hydrostatic: columnGapCoef=%g; "
+        "columnGapTolerance=%g m.",
+        columnGapCoef,columnGapTolerance);
+
+    Log->Printf(
+        "FlexRestart.Prescribed: local-column hydrostatic field initialised "
+        "for %u flexible/clamp particles; pmax=%g Pa; Jstar_min=%g.",
+        nf,pressuremax,jmin);
+  }
 }

@@ -75,8 +75,11 @@ public:
   // 0=unspecified, 1=deformation_gradient, 2=cauchy_stress.
   int FlexRestartFileVariableType;
 
-  // Special field: 0=unspecified, 1=undeformed, 2=hydrostatic_pressure.
+  // Special field:
+  // 0=unspecified, 1=undeformed,
+  // 2=local-column hydrostatic pressure, 3=sea-level pressure.
   int FlexRestartSpecialField;
+  double FlexRestartSeaLevel;
   double FlexRestartColumnGapCoef;
 
   bool FlexRestartConserveMass;
