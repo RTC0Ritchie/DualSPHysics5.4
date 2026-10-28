@@ -37,6 +37,13 @@ void UserParameters::Reset(){
   NoPenetrationMkEnabled=false;
   NoPenetrationMkBound=-1;
 
+  Mdbc2AdaptiveEnabled=false;
+  Mdbc2AdaptiveMode=0;
+  Mdbc2AdaptiveHead=0;
+  Mdbc2AdaptiveSupport=0;
+  Mdbc2AdaptiveHistory.clear();
+  Mdbc2AdaptiveAce.clear();
+
   SaveFlexData=false;
   SaveFlexPairData=false;
 
@@ -207,6 +214,31 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
       if(NoPenetrationMkBound<0 || NoPenetrationMkBound>65535)
         Run_Exceptioon(
             "User.NoPenetrationMk mkbound must be in [0,65535].");
+    }
+  }
+
+  // Modes: 0=off, 1=temporal, 2=support, 3=both.
+  const auto mdbcit=nodes.find("Mdbc2Adaptive");
+  if(mdbcit!=nodes.end()){
+    const TiXmlElement* ele=mdbcit->second;
+    xml->CheckAttributeNames(
+        ele,"key value head support active comment units_comment");
+    if(ele->FirstChildElement())
+      Run_Exceptioon("User.Mdbc2Adaptive does not accept child elements.");
+    Mdbc2AdaptiveMode=xml->GetAttributeInt(ele,"value");
+    if(Mdbc2AdaptiveMode<0 || Mdbc2AdaptiveMode>3)
+      Run_Exceptioon("User.Mdbc2Adaptive value must be 0, 1, 2 or 3.");
+    Mdbc2AdaptiveEnabled=(Mdbc2AdaptiveMode!=0);
+    if(Mdbc2AdaptiveMode&1){
+      Mdbc2AdaptiveHead=xml->GetAttributeDouble(ele,"head");
+      if(!std::isfinite(Mdbc2AdaptiveHead) || Mdbc2AdaptiveHead<=0)
+        Run_Exceptioon("User.Mdbc2Adaptive head must be finite and positive.");
+    }
+    if(Mdbc2AdaptiveMode&2){
+      Mdbc2AdaptiveSupport=xml->GetAttributeDouble(ele,"support");
+      if(!std::isfinite(Mdbc2AdaptiveSupport)
+          || Mdbc2AdaptiveSupport<0 || Mdbc2AdaptiveSupport>1)
+        Run_Exceptioon("User.Mdbc2Adaptive support must be in [0,1].");
     }
   }
   // ------------------------------------------------------------

@@ -61,6 +61,11 @@ public:
   bool NoPenetrationMkEnabled;
   int NoPenetrationMkBound;
 
+  // Adaptive mDBC2 pressure-acceleration protection (CPU).
+  bool Mdbc2AdaptiveEnabled;
+  int Mdbc2AdaptiveMode;
+  double Mdbc2AdaptiveHead;
+  double Mdbc2AdaptiveSupport;
   
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
@@ -288,6 +293,17 @@ public:
   // Resolved particle-ID interval: [begin,end).
   unsigned NoPenetrationMkIdBegin;
   unsigned NoPenetrationMkIdEnd;
+
+  struct StMdbc2AdaptiveHistory{
+    int Step=-1;
+    double Head=0;
+    double Delta=0;
+    tfloat3 Filtered=TFloat3(0);
+    float Weight=0;
+    unsigned Calm=0;
+  };
+  std::vector<StMdbc2AdaptiveHistory> Mdbc2AdaptiveHistory;
+  std::vector<tfloat3> Mdbc2AdaptiveAce;
 
   // Requests qualified by the current execution mode.
   // Enabled corrections still require suitable natural-reference data.

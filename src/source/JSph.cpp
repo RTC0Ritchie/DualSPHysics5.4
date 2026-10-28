@@ -1024,6 +1024,17 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   LoadConfigParameters(cxml);
   //-Execution parameters from commands.
   LoadConfigCommands(cfg);
+  if(User->Mdbc2AdaptiveEnabled){
+    if(!Cpu)
+      Run_Exceptioon("User.Mdbc2Adaptive is supported on CPU only.");
+    if(TBoundary!=BC_MDBC
+        || (SlipMode!=SLIP_NoSlip && SlipMode!=SLIP_FreeSlip))
+      Run_Exceptioon("User.Mdbc2Adaptive requires Boundary=2 and SlipMode=2 or 3.");
+    const double g2=double(Gravity.x)*Gravity.x
+        +double(Gravity.y)*Gravity.y+double(Gravity.z)*Gravity.z;
+    if(!(g2>0))
+      Run_Exceptioon("User.Mdbc2Adaptive head requires nonzero gravity.");
+  }
   //-Selective no-penetration: validate after command-line overrides.
   if(User->NoPenetrationMkEnabled){
     JCaseEParms ordinary;

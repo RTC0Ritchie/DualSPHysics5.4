@@ -813,8 +813,85 @@ void JSphCpuSingle::MdbcBoundCorrection(TpInterStep interstep){
       BoundMode_c->Reserve();       //-BoundMode_c is freed in PosInteraction_Forces().
       BoundMode_c->Memset(0,nmode); //-BoundMode_c[]=0=BMODE_DBC
       TangenVel_c->Reserve();       //-TangenVel_c is freed in PosInteraction_Forces().
+      const tfloat3* cloneace=MotionAce_c->cptr();
+      if(User->Mdbc2AdaptiveEnabled && CaseNflexstruc){
+        const auto ids=Idp_c->cptr();
+        const auto codes=Code_c->cptr();
+        const auto normals=BoundNor_c->cptr();
+        const double g=sqrt(double(Gravity.x)*Gravity.x
+            +double(Gravity.y)*Gravity.y+double(Gravity.z)*Gravity.z);
+        const double headlimit=User->Mdbc2AdaptiveHead;
+        const bool temporal=(User->Mdbc2AdaptiveMode&1)!=0;
+        auto& history=User->Mdbc2AdaptiveHistory;
+        auto& work=User->Mdbc2AdaptiveAce;
+        if(history.size()!=CaseNbound)
+          history.assign(CaseNbound,UserParameters::StMdbc2AdaptiveHistory{});
+        work.assign(cloneace,cloneace+Np);
+
+        // A single preset: half-weight filtering, quarter-threshold release,
+        // eight quiet samples followed by an eight-sample fade-out.
+        for(unsigned p=0;p<Npb;p++){
+          if(!CODE_IsNormal(codes[p]) || !CODE_IsFlexStrucFlex(codes[p]))
+            continue;
+          const tfloat3 b=normals[p];
+          if(b.x==0 && b.y==0 && b.z==0)continue;
+          const unsigned id=ids[p];
+          if(id>=history.size())
+            Run_Exceptioon("Mdbc2Adaptive: boundary ID outside case range.");
+          auto& h=history[id];
+          if(h.Step==Nstep)continue; // Predictor/corrector share one sample.
+          const tfloat3 a=cloneace[p];
+          const double head=(double(b.x)*a.x+double(b.z)*a.z
+              +(Simulate2D? 0.0: double(b.y)*a.y))/g;
+          if(h.Step<0 || Nstep!=h.Step+1){
+            h=UserParameters::StMdbc2AdaptiveHistory{};
+            h.Step=Nstep;
+            h.Head=head;
+            h.Filtered=a;
+            continue;
+          }
+          const double delta=head-h.Head;
+          const double amp=fabs(delta),prev=fabs(h.Delta);
+          const bool trigger=(temporal && delta*h.Delta<0
+              && min(amp,prev)>headlimit && amp>=0.8*prev);
+          h.Filtered=TFloat3(0.5f*(a.x+h.Filtered.x),
+              0.5f*(a.y+h.Filtered.y),0.5f*(a.z+h.Filtered.z));
+          if(!temporal){
+            h.Weight=0;
+            h.Calm=0;
+          }
+          else if(trigger){
+            h.Weight=1;
+            h.Calm=0;
+          }
+          else if(amp<0.25*headlimit){
+            if(h.Calm<8)h.Calm++;
+            if(h.Calm>=8)h.Weight=max(0.f,h.Weight-0.125f);
+          }
+          else h.Calm=0;
+          h.Step=Nstep;
+          h.Head=head;
+          h.Delta=delta;
+        }
+
+        // Apply by stable ID after all normal-particle histories are ready.
+        // Periodic copies can therefore use the same state as their originals.
+        for(unsigned p=0;p<Npb;p++){
+          if(!CODE_IsFlexStrucFlex(codes[p]))continue;
+          const unsigned id=ids[p];
+          if(id>=history.size())continue;
+          const auto& h=history[id];
+          if(h.Step!=Nstep || h.Weight<=0)continue;
+          const tfloat3 a=cloneace[p];
+          const float w=h.Weight;
+          work[p]=TFloat3((1-w)*a.x+w*h.Filtered.x,
+              (1-w)*a.y+w*h.Filtered.y,(1-w)*a.z+w*h.Filtered.z);
+        }
+        cloneace=work.data();
+      }
+
       Interaction_Mdbc2Correction(DivData,Pos_c->cptr(),Code_c->cptr()
-        ,Idp_c->cptr(),BoundNor_c->cptr(),MotionVel_c->cptr(),MotionAce_c->cptr()
+        ,Idp_c->cptr(),BoundNor_c->cptr(),MotionVel_c->cptr(),cloneace
         ,Velrho_c->ptr(),BoundMode_c->ptr(),TangenVel_c->ptr());
     } //<vs_m2dbc_end>
    // else Run_Exceptioon("Error: SlipMode is invalid.");

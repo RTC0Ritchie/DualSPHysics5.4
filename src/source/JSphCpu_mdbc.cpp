@@ -19,6 +19,7 @@
 /// \file JSphCpu.cpp \brief Implements the class \ref JSphCpu.
 
 #include "JSphCpu.h"
+#include "UserParameters.h"
 #include "JCellSearch_inline.h"
 #include "FunSphKernel.h"
 #include "FunctionsMath.h"
@@ -335,6 +336,25 @@ template<TpKernel tker,bool sim2d> void JSphCpu::InteractionMdbc2CorrectionT2
       //--------------------
       if(submerged>0.f){
         boundmode[p1]=BMODE_MDBC2;
+        // Blend only the residual around the shared filtered acceleration.
+        tfloat3 pressureace=motacep1;
+        if(User->Mdbc2AdaptiveEnabled && (User->Mdbc2AdaptiveMode&2)
+            && CODE_IsFlexStrucFlex(code[p1])){
+          const unsigned id=idp[p1];
+          const auto& history=User->Mdbc2AdaptiveHistory;
+          if(id<history.size() && history[id].Step==Nstep){
+            const float s=max(0.f,min(1.f,(sumwab-0.1f)/0.2f));
+            const float trust=s*s*(3.f-2.f*s);
+            const float w=float(User->Mdbc2AdaptiveSupport)*(1.f-trust);
+            if(w>0){
+              const tfloat3 slow=history[id].Filtered;
+              pressureace=TFloat3((1.f-w)*motacep1.x+w*slow.x,
+                  (1.f-w)*motacep1.y+w*slow.y,
+                  (1.f-w)*motacep1.z+w*slow.z);
+            }
+          }
+        }
+
         const tfloat3 dpos=(boundnor[p1]*(-1.f)); //-Boundary particle position - ghost node position.
         if(sim2d){//-2D simulation.
           if(sumwab<0.1f){ //-If kernel sum is small use shepherd density and vel0.
@@ -358,7 +378,7 @@ template<TpKernel tker,bool sim2d> void JSphCpu::InteractionMdbc2CorrectionT2
               rhofinal=float(rhop1/a_corr2.a11);
           }
           //-Final density according to press.
-          const float pressfinal=Mdbc2PressClone(sim2d,rhofinal,bnormalp1,Gravity,motacep1,dpos);
+          const float pressfinal=Mdbc2PressClone(sim2d,rhofinal,bnormalp1,Gravity,pressureace,dpos);
           rhofinal=RhopZero+float(pressfinal/(Cs0*Cs0));
           //-velocity with Shepherd Sum.
           velrhofinal.x=float(velp1.x/a_corr2.a11);
@@ -388,7 +408,7 @@ template<TpKernel tker,bool sim2d> void JSphCpu::InteractionMdbc2CorrectionT2
               rhofinal=float(rhop1/a_corr3.a11);
           }
           //-Final density according to press.
-          const float pressfinal=Mdbc2PressClone(sim2d,rhofinal,bnormalp1,Gravity,motacep1,dpos);
+          const float pressfinal=Mdbc2PressClone(sim2d,rhofinal,bnormalp1,Gravity,pressureace,dpos);
           rhofinal=RhopZero+float(pressfinal/(Cs0*Cs0));
           //-Velocity with Shepherd sum.
           velrhofinal.x=float(velp1.x/a_corr3.a11);
