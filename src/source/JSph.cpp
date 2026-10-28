@@ -1024,6 +1024,36 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   LoadConfigParameters(cxml);
   //-Execution parameters from commands.
   LoadConfigCommands(cfg);
+  //-Selective no-penetration: validate after command-line overrides.
+  if(User->NoPenetrationMkEnabled){
+    JCaseEParms ordinary;
+    ordinary.LoadXml(cxml,"case.execution.parameters");
+
+    // Reject ordinary NoPenetration from either XML or command line.
+    if(ordinary.GetValueBool("NoPenetration",true,false)
+        || cfg->NoPenetration || NoPenetration){
+      Run_Exceptioon(
+          "User.NoPenetrationMk and ordinary NoPenetration "
+          "are mutually exclusive. Set ordinary NoPenetration=0.");
+    }
+
+    if(!Cpu)
+      Run_Exceptioon(
+          "User.NoPenetrationMk is currently supported on CPU only.");
+
+    if(TBoundary!=BC_MDBC
+        || (SlipMode!=SLIP_NoSlip && SlipMode!=SLIP_FreeSlip)){
+      Run_Exceptioon(
+          "User.NoPenetrationMk requires Boundary=2 "
+          "and SlipMode=2 or 3.");
+    }
+
+    // Reuse the existing no-penetration arrays and integration path.
+    // Boundary selection is applied through a private normal view
+    // in JSphCpuSingle::Interaction_Forces().
+    NoPenetration=true;
+    TMdbc2=MDBC2_NoPen;
+  }
   //-Configures other constants according to formulation options and loads more values in CSP structure.
   ConfigConstants2();
 
@@ -1044,6 +1074,32 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   //-Loads and configures MK of particles.
   MkInfo=new JSphMk();
   MkInfo->Config(&parts);
+
+  //-Resolve the selected boundary to a stable particle-ID interval.
+  if(User->NoPenetrationMkEnabled){
+    const unsigned block=MkInfo->GetMkBlockByMkBound(
+        word(User->NoPenetrationMkBound));
+
+    if(block>=MkInfo->Size())
+      Run_Exceptioon(
+          "User.NoPenetrationMk: selected mkbound does not exist.");
+
+    const JSphMkBlock* bed=MkInfo->Mkblock(block);
+
+    if(!bed->Bound || !CODE_IsFixed(bed->Code) || !bed->Count)
+      Run_Exceptioon(
+          "User.NoPenetrationMk requires a non-empty fixed boundary.");
+
+    User->NoPenetrationMkIdBegin=bed->Begin;
+    User->NoPenetrationMkIdEnd=bed->Begin+bed->Count;
+
+    Log->Printf(
+        "Selective NoPenetration: mkbound=%d, IDs=[%u,%u); "
+        "elastic particles excluded.",
+        User->NoPenetrationMkBound,
+        User->NoPenetrationMkIdBegin,
+        User->NoPenetrationMkIdEnd);
+  }
 
   //-Configuration of GaugeSystem.
   GaugeSystem=new JGaugeSystem(GpuCount);

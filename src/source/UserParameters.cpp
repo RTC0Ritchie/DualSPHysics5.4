@@ -34,6 +34,9 @@ void UserParameters::Reset(){
   ElasticViscousDissipation=false;
   ElasticViscousFactor=0.5;
 
+  NoPenetrationMkEnabled=false;
+  NoPenetrationMkBound=-1;
+
   SaveFlexData=false;
   SaveFlexPairData=false;
 
@@ -56,6 +59,9 @@ void UserParameters::Reset(){
   FlexRestartBoundaryCorrectionMaxIterations=2000;
   FlexRestartBoundaryCorrectionQuadraticError=0.0;
   FlexRestartBoundaryCorrectionBoundaryForm=1;
+
+  NoPenetrationMkIdBegin=0;
+  NoPenetrationMkIdEnd=0;
 
   FlexRestartRestorePairs=false;
   FlexRestartGradientCorrection=false;
@@ -174,6 +180,35 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
         xml->GetAttributeStr(ele,"units_comment",true));
   }
 
+  // ------------------------------------------------------------
+  // Selective no-penetration.
+  // ------------------------------------------------------------
+  const auto nopenit=nodes.find("NoPenetrationMk");
+  if(nopenit!=nodes.end()){
+    const TiXmlElement* ele=nopenit->second;
+
+    xml->CheckAttributeNames(
+        ele,"key value mkbound active comment units_comment");
+
+    if(ele->FirstChildElement())
+      Run_Exceptioon(
+          "User.NoPenetrationMk does not accept child elements.");
+
+    const int enabled=xml->GetAttributeInt(ele,"value");
+    if(enabled!=0 && enabled!=1)
+      Run_Exceptioon(
+          "User.NoPenetrationMk value must be 0 or 1.");
+
+    NoPenetrationMkEnabled=(enabled==1);
+
+    if(NoPenetrationMkEnabled){
+      NoPenetrationMkBound=xml->GetAttributeInt(ele,"mkbound");
+
+      if(NoPenetrationMkBound<0 || NoPenetrationMkBound>65535)
+        Run_Exceptioon(
+            "User.NoPenetrationMk mkbound must be in [0,65535].");
+    }
+  }
   // ------------------------------------------------------------
   // Contact algorithm.
   // ------------------------------------------------------------

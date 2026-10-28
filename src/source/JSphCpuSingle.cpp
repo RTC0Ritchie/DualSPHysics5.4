@@ -58,6 +58,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <climits>
+#include <vector>
 
 using namespace std;
 //==============================================================================
@@ -700,6 +701,37 @@ void JSphCpuSingle::ComputeUmbrellaRegion(){
 //==============================================================================
 void JSphCpuSingle::Interaction_Forces(TpInterStep interstep){
   tfloat3* dengradcorr=NULL;
+  //-Private normal view used only by the no-penetration kernel.
+  const tfloat3* nopenNormals=AC_CPTR(BoundNor_c);
+  std::vector<tfloat3> nopenNormalsStorage;
+
+  if(User->NoPenetrationMkEnabled){
+    if(TMdbc2!=MDBC2_NoPen || !nopenNormals)
+      Run_Exceptioon(
+          "Selective NoPenetration: invalid mode or missing normals.");
+
+    // The existing kernel accepts only normals shorter than 1.75*Dp.
+    // A nonzero 4*Dp normal disables the contribution without division by zero.
+    nopenNormalsStorage.assign(
+        Np,TFloat3(0.f,0.f,float(4.0*Dp)));
+
+    const unsigned* ids=Idp_c->cptr();
+    const typecode* codes=Code_c->cptr();
+
+    for(unsigned p=0;p<Npb;p++){
+      if(ids[p]>=User->NoPenetrationMkIdBegin
+          && ids[p]<User->NoPenetrationMkIdEnd
+          && CODE_IsFixed(codes[p])
+          && !CODE_IsFlexStrucAny(codes[p])){
+        const tfloat3 normal=nopenNormals[p];
+
+        if(normal.x!=0.f || normal.y!=0.f || normal.z!=0.f)
+          nopenNormalsStorage[p]=normal;
+      }
+    }
+
+    nopenNormals=nopenNormalsStorage.data();
+  }
 
   Timersc->TmStart(TMC_CfForces);
   //-Interaction of Fluid-Fluid/Bound & Bound-Fluid (forces and DEM).
@@ -707,7 +739,7 @@ void JSphCpuSingle::Interaction_Forces(TpInterStep interstep){
     ,DivData,Dcell_c->cptr()
     ,Pos_c->cptr(),Velrho_c->cptr(),Idp_c->cptr(),Code_c->cptr(),Press_c->cptr()
     ,AC_CPTR(BoundMode_c),AC_CPTR(TangenVel_c),AC_CPTR(MotionVel_c) //<vs_m2dbc>
-    ,AC_CPTR(BoundNor_c),AC_PTR(NoPenShift_c) //<vs_m2dbcNP>
+    ,nopenNormals,AC_PTR(NoPenShift_c) //<vs_m2dbcNP>
     ,dengradcorr
     ,Ar_c->ptr(),Ace_c->ptr(),AC_PTR(Delta_c)
     ,ShiftingMode,AC_PTR(ShiftPosfs_c)

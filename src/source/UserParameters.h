@@ -57,6 +57,11 @@ public:
   bool ElasticViscousDissipation=false;
   double ElasticViscousFactor=0.5;
 
+   // Selective no-penetration for a fixed, non-elastic boundary.
+  bool NoPenetrationMkEnabled;
+  int NoPenetrationMkBound;
+
+  
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
   bool SaveFlexPairData;
@@ -279,6 +284,10 @@ public:
   // Retrieve Fstar by flexible index and verify particle identity.
   const tmatrix3f& GetFlexRestartFstar(
       unsigned pfs,unsigned idp)const;
+
+  // Resolved particle-ID interval: [begin,end).
+  unsigned NoPenetrationMkIdBegin;
+  unsigned NoPenetrationMkIdEnd;
 
   // Requests qualified by the current execution mode.
   // Enabled corrections still require suitable natural-reference data.
