@@ -23,6 +23,7 @@
 
 #include "DualSphDef.h"
 #include "JSphCpu.h"
+#include "UserIceTopProtection.h"
 #include <string>
 
 class JCellDivCpuSingle;
@@ -134,6 +135,22 @@ protected:
     const float* svrho);
 
   //<vs_flexstruc_ini>
+  std::vector<unsigned> IceTopNoPenIds;
+  std::vector<IceTopNoPen::Point> IceTopNoPenOldTop;
+  std::vector<tdouble3> IceTopNoPenOldFluid;
+
+  unsigned long long IceTopNoPenPredictorHits=0;
+  unsigned long long IceTopNoPenCorrectorHits=0;
+  double IceTopNoPenMaxMove=0;
+  double IceTopNoPenImpulseX=0;
+  double IceTopNoPenImpulseZ=0;
+
+  void InitIceTopNoPenetration();
+  std::vector<IceTopNoPen::Point> GetIceTopNoPenProfile()const;
+  void CaptureIceTopNoPenetration(bool predictor);
+  void ApplyIceTopNoPenetration(bool predictor);
+
+  void ClearIceTopFluidOnce();
   void FlexStrucInit();
   void UpdateFlexStrucGeometry();
   //<vs_flexstruc_end>

@@ -1036,7 +1036,7 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
       Run_Exceptioon("User.Mdbc2Adaptive head requires nonzero gravity.");
   }
   //-Selective no-penetration: validate after command-line overrides.
-  if(User->NoPenetrationMkEnabled){
+  if(User->NoPenetrationMkEnabled || User->IceTopNoPenetrationEnabled){
     JCaseEParms ordinary;
     ordinary.LoadXml(cxml,"case.execution.parameters");
 
@@ -1044,7 +1044,7 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     if(ordinary.GetValueBool("NoPenetration",true,false)
         || cfg->NoPenetration || NoPenetration){
       Run_Exceptioon(
-          "User.NoPenetrationMk and ordinary NoPenetration "
+          "User selective/top protection and ordinary NoPenetration "
           "are mutually exclusive. Set ordinary NoPenetration=0.");
     }
 
@@ -1062,8 +1062,10 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     // Reuse the existing no-penetration arrays and integration path.
     // Boundary selection is applied through a private normal view
     // in JSphCpuSingle::Interaction_Forces().
-    NoPenetration=true;
-    TMdbc2=MDBC2_NoPen;
+    if(User->NoPenetrationMkEnabled){
+      NoPenetration=true;
+      TMdbc2=MDBC2_NoPen;
+    }
   }
   //-Configures other constants according to formulation options and loads more values in CSP structure.
   ConfigConstants2();
@@ -1097,7 +1099,8 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
 
     const JSphMkBlock* bed=MkInfo->Mkblock(block);
 
-    if(!bed->Bound || !CODE_IsFixed(bed->Code) || !bed->Count)
+    if(!bed->Bound || !bed->Count
+        || (!CODE_IsFixed(bed->Code) && !User->IceTopNoPenetrationEnabled))
       Run_Exceptioon(
           "User.NoPenetrationMk requires a non-empty fixed boundary.");
 
@@ -1364,6 +1367,48 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
         "User restart and SPH restart are mutually exclusive. "
         "Disable User.restart for direct continuation, "
         "or remove -partbegin for User restart.");
+  }
+
+  if(User->IceTopNoPenetrationEnabled){
+    if(!Cpu || !Simulate2D || PeriActive || InOut || !FlexStruc
+        || FlexStrucCount!=1 || TStep!=STEP_Symplectic)
+    {
+      Run_Exceptioon(
+          "IceTopNoPenetration requires CPU 2-D Symplectic, "
+          "exactly one elastic body, no periodic boundaries or inlet/outlet.");
+    }
+
+    if(User->NoPenetrationMkEnabled){
+      const unsigned block=MkInfo->GetMkBlockByMkBound(
+          word(User->NoPenetrationMkBound));
+
+      const auto* selected=MkInfo->Mkblock(block);
+
+      if(selected->Code==FlexStruc->GetBody(0)->GetBoundCode()){
+        User->NoPenetrationMkEnabled=false;
+        User->NoPenetrationMkIdBegin=0;
+        User->NoPenetrationMkIdEnd=0;
+
+        NoPenetration=false;
+        TMdbc2=MDBC2_Std;
+
+        Log->Print(
+            "IceTopNoPenetration: selected elastic NoPenetrationMk "
+            "is overridden; only its top is protected.");
+      }
+      else if(!CODE_IsFixed(selected->Code)){
+        Run_Exceptioon(
+            "NoPenetrationMk must select a fixed boundary or "
+            "the single elastic body overridden by IceTopNoPenetration.");
+      }
+    }
+  }
+  if(User->IceTopFluidCleanupEnabled &&
+      (!Cpu || !Simulate2D || PeriActive || !FlexStruc || InOut))
+  {
+    Run_Exceptioon(
+        "IceTopFluidCleanup requires CPU 2-D elastic simulation "
+        "without periodic boundaries or inlet/outlet.");
   }
 
   if(User->FlexRestartRequested && !Cpu){

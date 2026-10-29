@@ -53,6 +53,12 @@
 #include "FunSphKernel.h"
 
 #include "UserParameters.h"
+#include "UserIceTopProtection.h"
+
+#include <unordered_map>
+#include <unordered_set>
+#include <fstream>
+#include <iomanip>
 
 #include <algorithm>
 #include <cmath>
@@ -1032,7 +1038,9 @@ double JSphCpuSingle::ComputeStep_Sym(){
   Interaction_Forces(InterStep);          //-Interaction.
   const double dt_p=DtVariable(false);    //-Calculate dt of predictor step.
   if(Shifting)RunShifting(dt*.5);         //-Standard shifting.
+  CaptureIceTopNoPenetration(true);
   ComputeSymplecticPre(dt);               //-Apply Symplectic-Predictor to particles (periodic particles become invalid).
+  ApplyIceTopNoPenetration(true);
   if(CaseNfloat)RunFloating(dt*.5,true);  //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   //-Corrector
@@ -1047,7 +1055,9 @@ double JSphCpuSingle::ComputeStep_Sym(){
   Interaction_Forces(InterStep);          //-Interaction.
   const double dt_c=DtVariable(true);     //-Calculate dt of corrector step.
   if(Shifting)RunShifting(dt);            //-Standard shifting.
+  CaptureIceTopNoPenetration(false);
   ComputeSymplecticCorr(dt);              //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
+  ApplyIceTopNoPenetration(false);
   if(CaseNfloat)RunFloating(dt,false);    //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   if(Damping)RunDamping(dt);              //-Applies Damping.
@@ -1292,9 +1302,12 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   //-Initialisation of execution variables.
   InitRunCpu();
   LoadBoundaryMotionRestart();
-  
-  RunFirstGaugeSystem(TimeStep);
+
+  if(!User->IceTopFluidCleanupEnabled)
+    RunFirstGaugeSystem(TimeStep);
+
   if(InOut)InOutInit(TimeStepIni);
+
   if(FlexStruc){
     FlexStrucInit();
 
@@ -1302,6 +1315,15 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
     BoundChanged=true;
     RunCellDivide(true);
   }
+
+  // Execute once after elastic initialization/continuation,
+  // before initial gauges and particle output.
+  ClearIceTopFluidOnce();
+  InitIceTopNoPenetration();
+
+  if(User->IceTopFluidCleanupEnabled)
+    RunFirstGaugeSystem(TimeStep);
+
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu());
   UpdateMaxValues();
@@ -1378,6 +1400,14 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 /// Genera los ficheros de salida de datos.
 //==============================================================================
 void JSphCpuSingle::SaveData(){
+  if(User->IceTopNoPenetrationEnabled){
+    IceTopNoPenPredictorHits=0;
+    IceTopNoPenCorrectorHits=0;
+    IceTopNoPenMaxMove=0;
+    IceTopNoPenImpulseX=0;
+    IceTopNoPenImpulseZ=0;
+  }
+
   const bool save=(SvData!=SDAT_None && SvData!=SDAT_Info);
   const unsigned npnormal=Np-NpbPer-NpfPer; //-Subtracts the periodic particles if they exist. | Resta las periodicas si las hubiera.
   unsigned npsave=npnormal;
@@ -1686,5 +1716,365 @@ void JSphCpuSingle::UpdateFlexStrucGeometry(){
   Timersc->TmStart(TMC_SuFlexStruc);
   JSphCpu::UpdateFlexStrucGeometry();
   Timersc->TmStop(TMC_SuFlexStruc);
+}
+
+//==============================================================================
+/// Removes fluid above and inside the current ice once during initialization.
+//==============================================================================
+void JSphCpuSingle::ClearIceTopFluidOnce(){
+  if(!User->IceTopFluidCleanupEnabled)return;
+
+  if(!Simulate2D || PeriActive ||
+     !FlexStruc || FlexStrucCount!=1 || InOut)
+  {
+    Run_Exceptioon(
+        "IceTopFluidCleanup requires CPU 2-D, one elastic body, "
+        "no periodic boundaries and no inlet/outlet.");
+  }
+
+  // Read original geometry only to identify material top-surface IDs.
+  JPartsLoad4 initial(false);
+  initial.LoadParticles(DirCase,CaseName,0,"");
+
+  const auto* ids=Idp_c->cptr();
+  const auto* codes=Code_c->cptr();
+  const auto* pos=Pos_c->cptr();
+
+  std::unordered_map<unsigned,unsigned> current;
+
+  for(unsigned p=0;p<Npb;p++){
+    if(CODE_IsNormal(codes[p]) &&
+       CODE_IsFlexStrucFlex(codes[p]))
+    {
+      if(!current.emplace(ids[p],p).second)
+        Run_Exceptioon(
+            "IceTopFluidCleanup: duplicated elastic ID.");
+    }
+  }
+
+  std::vector<IceTopCleanup::Point> ref;
+  ref.reserve(current.size());
+
+  std::unordered_set<unsigned> found;
+
+  for(unsigned i=0;i<initial.GetCount();i++){
+    const unsigned id=initial.GetIdp()[i];
+
+    if(current.find(id)==current.end())continue;
+
+    if(!found.insert(id).second)
+      Run_Exceptioon(
+          "IceTopFluidCleanup: duplicated initial elastic ID.");
+
+    const tdouble3 q=initial.GetPos()[i];
+    ref.push_back({q.x,q.z,id});
+  }
+
+  if(found.size()!=current.size())
+    Run_Exceptioon(
+        "IceTopFluidCleanup: original case lacks current elastic IDs.");
+
+  std::vector<IceTopCleanup::Point> top;
+  std::vector<IceTopCleanup::Point> outline;
+
+  try{
+    top=IceTopCleanup::ReferenceTop(ref,Dp);
+
+    // Keep material identity but use current, possibly deformed positions.
+    for(auto& q:top){
+      const auto& p=pos[current.at(q.id)];
+      q.x=p.x;
+      q.z=p.z;
+    }
+
+    IceTopCleanup::ValidateCurrent(top,Dp);
+    outline=IceTopCleanup::ReferenceOutline(ref,Dp);
+    for(auto& q:outline){
+      const auto& p=pos[current.at(q.id)];
+      q.x=p.x;
+      q.z=p.z;
+    }
+    IceTopCleanup::ValidateOutline(outline,Dp);
+  }
+  catch(const std::exception& e){
+    Run_Exceptioon(
+        std::string("IceTopFluidCleanup: ")+e.what());
+  }
+
+  std::vector<unsigned> remove;
+  std::vector<unsigned> reasons;
+  unsigned nabove=0,ninside=0;
+  unsigned nfluid=0;
+  tdouble3 momentum=TDouble3(0);
+
+  const auto* vr=Velrho_c->cptr();
+
+  for(unsigned p=Npb;p<Np;p++){
+    if(CODE_IsNormal(codes[p]) && CODE_IsFluid(codes[p])){
+      nfluid++;
+
+      const bool above=IceTopCleanup::Above(top,pos[p].x,pos[p].z,Dp);
+      const bool inside=!above &&
+          IceTopCleanup::InsideIce(outline,pos[p].x,pos[p].z,Dp);
+      if(above || inside){
+        remove.push_back(p);
+        reasons.push_back(above?1:2);
+        if(above)nabove++;
+        else ninside++;
+
+        momentum.x+=double(MassFluid)*vr[p].x;
+        momentum.y+=double(MassFluid)*vr[p].y;
+        momentum.z+=double(MassFluid)*vr[p].z;
+      }
+    }
+  }
+
+  if(!remove.empty() && remove.size()==nfluid)
+    Run_Exceptioon(
+        "IceTopFluidCleanup would remove all fluid; "
+        "check the case geometry.");
+
+  // Save an audit record before changing any particle.
+  const std::string file=
+      fun::GetDirWithSlash(DirOut)+"IceTopFluidCleanup.csv";
+
+  std::ofstream audit(file.c_str());
+
+  if(!audit)
+    Run_Exceptioon("Cannot open IceTopFluidCleanup.csv.");
+
+  audit<<std::setprecision(17)
+       <<"Idp;x;y;z;vx;vy;vz;Density_sph;Mass;Time;Reason\n";
+
+  for(size_t i=0;i<remove.size();i++){
+    const unsigned p=remove[i];
+    audit<<ids[p]
+         <<';'<<pos[p].x
+         <<';'<<pos[p].y
+         <<';'<<pos[p].z
+         <<';'<<vr[p].x
+         <<';'<<vr[p].y
+         <<';'<<vr[p].z
+         <<';'<<vr[p].w
+         <<';'<<MassFluid
+         <<';'<<TimeStep
+         <<';'<<(reasons[i]==1?"above_top":"inside_ice")
+         <<'\n';
+  }
+
+  audit.close();
+
+  if(!audit)
+    Run_Exceptioon("Cannot finish IceTopFluidCleanup.csv.");
+
+  // Use the existing particle removal and array-sorting mechanism.
+  // Do not renumber stable IDs.
+  for(unsigned p:remove)
+    Code_c->ptr()[p]=CODE_SetOutIgnore(codes[p]);
+
+  if(!remove.empty())
+    RunCellDivide(true);
+
+  // Intentional initialization removal must not consume the allowance
+  // for subsequent accidental fluid loss.
+  if(!remove.empty()){
+    NpfMinimum=unsigned(
+        MinFluidStop*(nfluid-unsigned(remove.size())));
+  }
+
+  Log->Printf(
+      "IceTopFluidCleanup: time=%g; removed=%u/%u; mass=%g; "
+      "momentum=(%g,%g,%g); top x=[%g,%g]; NpfMinimum=%u; "
+      "above_top=%u; inside_ice=%u.",
+      TimeStep,
+      unsigned(remove.size()),
+      nfluid,
+      double(MassFluid)*remove.size(),
+      momentum.x,momentum.y,momentum.z,
+      top.front().x,top.back().x,
+      NpfMinimum,nabove,ninside);
+}
+
+//==============================================================================
+// Retain the initial material top identity through bending and restarts.
+//==============================================================================
+void JSphCpuSingle::InitIceTopNoPenetration(){
+  IceTopNoPenPredictorHits=0;
+  IceTopNoPenCorrectorHits=0;
+  IceTopNoPenMaxMove=0;
+  IceTopNoPenImpulseX=0;
+  IceTopNoPenImpulseZ=0;
+
+  IceTopNoPenIds.clear();
+  IceTopNoPenOldTop.clear();
+  IceTopNoPenOldFluid.clear();
+
+  if(!User->IceTopNoPenetrationEnabled)return;
+
+  JPartsLoad4 initial(false);
+  initial.LoadParticles(DirCase,CaseName,0,"");
+
+  std::unordered_set<unsigned> elastic;
+
+  for(unsigned p=0;p<Npb;p++){
+    if(CODE_IsNormal(Code_c->cptr()[p])
+        && CODE_IsFlexStrucFlex(Code_c->cptr()[p]))
+    {
+      elastic.insert(Idp_c->cptr()[p]);
+    }
+  }
+
+  std::vector<IceTopCleanup::Point> ref;
+
+  for(unsigned i=0;i<initial.GetCount();i++){
+    const unsigned id=initial.GetIdp()[i];
+
+    if(elastic.erase(id)){
+      const tdouble3 q=initial.GetPos()[i];
+      ref.push_back({q.x,q.z,id});
+    }
+  }
+
+  if(!elastic.empty())
+    Run_Exceptioon(
+        "IceTopNoPenetration: initial case lacks elastic IDs.");
+
+  try{
+    const auto top=IceTopCleanup::ReferenceTop(ref,Dp);
+
+    for(const auto& p:top)
+      IceTopNoPenIds.push_back(p.id);
+  }
+  catch(const std::exception& e){
+    Run_Exceptioon(
+        std::string("IceTopNoPenetration: ")+e.what());
+  }
+
+  Log->Printf(
+      "IceTopNoPenetration: %u material top nodes; finite top only; "
+      "side/bottom excluded; normal velocity clipping, no friction.",
+      unsigned(IceTopNoPenIds.size()));
+}
+
+//==============================================================================
+// Build the current top profile using material particle IDs.
+//==============================================================================
+std::vector<IceTopNoPen::Point>
+JSphCpuSingle::GetIceTopNoPenProfile()const{
+  std::vector<IceTopNoPen::Point> top;
+  top.reserve(IceTopNoPenIds.size());
+
+  for(unsigned id:IceTopNoPenIds){
+    if(id<CaseNfixed || id>=CaseNbound || !RidpMot)
+      Run_Exceptioon(
+          "IceTopNoPenetration: invalid material top ID.");
+
+    const unsigned p=RidpMot[id-CaseNfixed];
+
+    if(p>=Npb || Idp_c->cptr()[p]!=id
+        || !CODE_IsFlexStrucFlex(Code_c->cptr()[p]))
+    {
+      Run_Exceptioon(
+          "IceTopNoPenetration: top-particle lookup failed.");
+    }
+
+    const tdouble3 q=Pos_c->cptr()[p];
+    const tfloat4 v=Velrho_c->cptr()[p];
+
+    if(!std::isfinite(q.x) || !std::isfinite(q.z)
+        || (!top.empty() && q.x-top.back().x<=1e-6*Dp))
+    {
+      Run_Exceptioon(
+          "IceTopNoPenetration: top folds or is not a finite height profile.");
+    }
+
+    top.push_back({q.x,q.z,v.x,v.z});
+  }
+
+  return top;
+}
+
+//==============================================================================
+// Capture the old positions before each integration stage.
+//==============================================================================
+void JSphCpuSingle::CaptureIceTopNoPenetration(bool predictor){
+  if(!User->IceTopNoPenetrationEnabled)return;
+
+  if(predictor)
+    IceTopNoPenOldTop=GetIceTopNoPenProfile();
+
+  // The corrector integrates from the full-step old positions.
+  // Capture them before ComputeSymplecticCorr releases PosPre_c.
+  const tdouble3* oldpos=
+      predictor?Pos_c->cptr():PosPre_c->cptr();
+
+  IceTopNoPenOldFluid.assign(oldpos+Npb,oldpos+Np);
+}
+
+//==============================================================================
+// Correct fluid crossing the finite ice-top surface.
+//==============================================================================
+void JSphCpuSingle::ApplyIceTopNoPenetration(bool predictor){
+  if(!User->IceTopNoPenetrationEnabled)return;
+
+  if(IceTopNoPenOldFluid.size()!=Np-Npb)
+    Run_Exceptioon(
+        "IceTopNoPenetration: stage particle order/count changed.");
+
+  const auto top=GetIceTopNoPenProfile();
+
+  auto* pos=Pos_c->ptr();
+  auto* vr=Velrho_c->ptr();
+  auto* code=Code_c->ptr();
+
+  unsigned count=0;
+  double maxmove=0;
+  double ix=0,iz=0;
+
+  for(unsigned p=Npb;p<Np;p++){
+    if(!CODE_IsNormal(code[p]) || !CODE_IsFluid(code[p]))
+      continue;
+
+    const tdouble3 q=pos[p];
+    const tdouble3 old=IceTopNoPenOldFluid[p-Npb];
+
+    const auto c=IceTopNoPen::Correct(
+        IceTopNoPenOldTop,top,
+        {old.x,old.z,0,0},
+        {q.x,q.z,vr[p].x,vr[p].z},
+        Dp);
+
+    if(!c.hit)continue;
+
+    UpdatePos(
+        q,c.dx,0,c.dz,false,p,
+        pos,Dcell_c->ptr(),code);
+
+    vr[p].x+=float(c.dvx);
+    vr[p].z+=float(c.dvz);
+
+    count++;
+    maxmove=std::max(
+        maxmove,std::sqrt(c.dx*c.dx+c.dz*c.dz));
+
+    ix+=double(MassFluid)*c.dvx;
+    iz+=double(MassFluid)*c.dvz;
+  }
+
+  // Numerical top-fluid constraint:
+  // no equal-and-opposite impulse is imposed on the ice.
+  if(count){
+    if(predictor){
+      IceTopNoPenPredictorHits+=count;
+    }
+    else{
+      IceTopNoPenCorrectorHits+=count;
+      IceTopNoPenImpulseX+=ix;
+      IceTopNoPenImpulseZ+=iz;
+    }
+
+    IceTopNoPenMaxMove=std::max(
+        IceTopNoPenMaxMove,maxmove);
+  }
 }
 //<vs_flexstruc_end>

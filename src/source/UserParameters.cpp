@@ -37,12 +37,16 @@ void UserParameters::Reset(){
   NoPenetrationMkEnabled=false;
   NoPenetrationMkBound=-1;
 
+  IceTopNoPenetrationEnabled=false;
+
   Mdbc2AdaptiveEnabled=false;
   Mdbc2AdaptiveMode=0;
   Mdbc2AdaptiveHead=0;
   Mdbc2AdaptiveSupport=0;
   Mdbc2AdaptiveHistory.clear();
   Mdbc2AdaptiveAce.clear();
+
+  IceTopFluidCleanupEnabled=false;
 
   SaveFlexData=false;
   SaveFlexPairData=false;
@@ -240,6 +244,47 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
           || Mdbc2AdaptiveSupport<0 || Mdbc2AdaptiveSupport>1)
         Run_Exceptioon("User.Mdbc2Adaptive support must be in [0,1].");
     }
+  }
+
+  const auto topnopen=nodes.find("IceTopNoPenetration");
+  if(topnopen!=nodes.end()){
+    const TiXmlElement* ele=topnopen->second;
+
+    xml->CheckAttributeNames(
+        ele,"key value active comment units_comment");
+
+    if(ele->FirstChildElement())
+      Run_Exceptioon(
+          "User.IceTopNoPenetration does not accept child elements.");
+
+    const int enabled=xml->GetAttributeInt(ele,"value");
+
+    if(enabled!=0 && enabled!=1)
+      Run_Exceptioon(
+          "User.IceTopNoPenetration value must be 0 or 1.");
+
+    IceTopNoPenetrationEnabled=(enabled==1);
+  }
+
+  // One-time removal of fluid above the current ice top.
+  const auto cleanit=nodes.find("IceTopFluidCleanup");
+  if(cleanit!=nodes.end()){
+    const TiXmlElement* ele=cleanit->second;
+
+    xml->CheckAttributeNames(
+        ele,"key value active comment units_comment");
+
+    if(ele->FirstChildElement())
+      Run_Exceptioon(
+          "User.IceTopFluidCleanup does not accept child elements.");
+
+    const int enabled=xml->GetAttributeInt(ele,"value");
+
+    if(enabled!=0 && enabled!=1)
+      Run_Exceptioon(
+          "User.IceTopFluidCleanup value must be 0 or 1.");
+
+    IceTopFluidCleanupEnabled=(enabled==1);
   }
   // ------------------------------------------------------------
   // Contact algorithm.

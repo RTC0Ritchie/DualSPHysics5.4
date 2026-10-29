@@ -61,11 +61,15 @@ public:
   bool NoPenetrationMkEnabled;
   int NoPenetrationMkBound;
 
+  bool IceTopNoPenetrationEnabled=false;
+
   // Adaptive mDBC2 pressure-acceleration protection (CPU).
   bool Mdbc2AdaptiveEnabled;
   int Mdbc2AdaptiveMode;
   double Mdbc2AdaptiveHead;
   double Mdbc2AdaptiveSupport;
+
+  bool IceTopFluidCleanupEnabled=false;
   
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
