@@ -1632,7 +1632,8 @@ void JSphCpuSingle::FlexStrucInit(){
   }
   //-Configure code for flexible structures.
   FlexStruc->ConfigCode(Npb,Code_c->ptr());
-  JSphCpu::SetFlexStrucClampCodes(Npb,Pos_c->cptr(),FlexStrucDatac,Code_c->ptr());
+  if(PartBegin)RestoreFlexContinuationClampCodes();
+  else JSphCpu::SetFlexStrucClampCodes(Npb,Pos_c->cptr(),FlexStrucDatac,Code_c->ptr());
   //-Count number of flexible structure particles.
   CaseNflexstruc=JSphCpu::CountFlexStrucParts(Npb,Code_c->cptr());
   //-Allocate arrays.

@@ -69,6 +69,9 @@ void JSphCpuSingle::SaveFlexData(){
   data.SetvUint("Nflex",nf);
 
   unsigned* ids=data.CreateArrayUint("Idp",nf,false);
+  // Optional metadata: old readers ignore these arrays; old files remain readable.
+  unsigned* bodies=data.CreateArrayUint("FlexBody",nf,false);
+  unsigned* roles=data.CreateArrayUint("FlexRole",nf,false); // 0=free, 1=clamp
   tfloat3* row1=data.CreateArrayFloat3("Frow1",nf,false);
   tfloat3* row2=data.CreateArrayFloat3("Frow2",nf,false);
   tfloat3* row3=data.CreateArrayFloat3("Frow3",nf,false);
@@ -92,6 +95,8 @@ void JSphCpuSingle::SaveFlexData(){
       Run_Exceptioon("Duplicated flexible particle ID.");
 
     ids[pfs]=id;
+    bodies[pfs]=CODE_GetIbodyFlexStruc(code);
+    roles[pfs]=CODE_IsFlexStrucClamp(code) ? 1u : 0u;
 
     tmatrix3f f=DefGradc[pfs];
 
@@ -107,6 +112,103 @@ void JSphCpuSingle::SaveFlexData(){
   }
 
   data.SaveFile(file,false,true);
+}
+
+// Restore membership before counting/allocating flexible arrays. A restart must
+// not select new clamps from distances in the deformed configuration.
+void JSphCpuSingle::RestoreFlexContinuationClampCodes(){
+  if(!PartBegin || !FlexStruc)return;
+  const std::string file=fun::GetDirWithSlash(PartBeginDir)
+      +fun::PrintStr("PartFlex_%04u.bi4",unsigned(PartBegin));
+  JBinaryData data;
+  data.LoadFile(file);
+  const unsigned format=data.GetvUint("FormatVer");
+  if(format!=1 && format!=2 && format!=3)
+    Run_ExceptioonFile("Unsupported PartFlex format.",file);
+  if(data.GetvUint("Cpart")!=unsigned(PartBegin))
+    Run_ExceptioonFile("PartFlex frame number does not match.",file);
+  const double savedtime=data.GetvDouble("TimeStep");
+  if(!std::isfinite(savedtime) ||
+      std::fabs(savedtime-TimeStep)>1e-9*(1.0+std::fabs(TimeStep)))
+    Run_ExceptioonFile("PartFlex time does not match restart time.",file);
+  const unsigned nf=data.GetvUint("Nflex");
+  if(nf>Npb)
+    Run_ExceptioonFile("PartFlex count exceeds current boundary count.",file);
+  const unsigned* ids=static_cast<const unsigned*>(data.GetArrayTpSize(
+      "Idp",JBinaryDataDef::DatUint,nf,file)->GetDataPointer());
+  const bool hasbody=data.GetArray("FlexBody")!=nullptr;
+  const bool hasrole=data.GetArray("FlexRole")!=nullptr;
+  if(hasbody!=hasrole)
+    Run_ExceptioonFile("Incomplete PartFlex membership metadata.",file);
+  const unsigned* bodies=hasbody ? static_cast<const unsigned*>(
+      data.GetArrayTpSize("FlexBody",JBinaryDataDef::DatUint,nf,file)
+          ->GetDataPointer()) : nullptr;
+  const unsigned* roles=hasrole ? static_cast<const unsigned*>(
+      data.GetArrayTpSize("FlexRole",JBinaryDataDef::DatUint,nf,file)
+          ->GetDataPointer()) : nullptr;
+
+  std::unordered_map<unsigned,unsigned> saved;
+  saved.reserve(nf);
+  for(unsigned i=0;i<nf;i++){
+    if(!saved.emplace(ids[i],i).second)
+      Run_ExceptioonFile("Duplicated particle ID in PartFlex.",file);
+    if(hasbody && (bodies[i]>=FlexStrucCount || roles[i]>1))
+      Run_ExceptioonFile("Invalid PartFlex membership metadata.",file);
+  }
+  const unsigned* currentids=Idp_c->cptr();
+  const typecode* current=Code_c->cptr();
+  std::vector<typecode> restored(current,current+Npb);
+  std::vector<unsigned char> used(nf,0);
+  unsigned nclamp=0,nfree=0;
+  for(unsigned p=0;p<Npb;p++){
+    const typecode c=current[p];
+    const auto it=saved.find(currentids[p]);
+    if(!CODE_IsNormal(c)){
+      if(CODE_IsPeriodic(c))continue; // regenerated after FlexStrucInit
+      Run_ExceptioonFile("Invalid boundary state during clamp restoration.",file);
+    }
+    if(it==saved.end()){
+      if(CODE_IsFlexStrucAny(c))
+        Run_ExceptioonFile("Current elastic particle is absent from PartFlex.",file);
+      continue; // not a saved clamp: keep the original fixed/moving code
+    }
+    const unsigned i=it->second;
+    if(used[i])
+      Run_ExceptioonFile("Duplicated current boundary ID.",file);
+    used[i]=1;
+    if(CODE_IsFlexStrucFlex(c)){
+      if(hasbody && (roles[i]!=0 || bodies[i]!=CODE_GetIbodyFlexStruc(c)))
+        Run_ExceptioonFile("Elastic body or role differs from PartFlex.",file);
+      nfree++;
+      continue;
+    }
+    if(CODE_IsFlexStrucAny(c) || !(CODE_IsFixed(c)||CODE_IsMoving(c)))
+      Run_ExceptioonFile("Saved clamp is not an unclassified boundary particle.",file);
+    if(hasrole && roles[i]!=1)
+      Run_ExceptioonFile("Saved free elastic particle became a clamp.",file);
+    unsigned body=FlexStrucCount,matches=0;
+    for(unsigned b=0;b<FlexStrucCount;b++){
+      const StFlexStrucData& material=FlexStrucDatac[b];
+      if(std::find(material.clampcode,material.clampcode+material.nc,c)
+          !=material.clampcode+material.nc){
+        if(!hasbody || bodies[i]==b){body=b;matches++;}
+      }
+    }
+    if(matches!=1)
+      Run_ExceptioonFile(hasbody
+          ? "Saved clamp body does not match current XML clamp membership."
+          : "Legacy PartFlex clamp body is missing or ambiguous in current XML; "
+            "do not infer it from deformed distances.",file);
+    restored[p]=CODE_ToFlexStrucClamp(c,body);
+    nclamp++;
+  }
+  if(std::find(used.begin(),used.end(),0)!=used.end())
+    Run_ExceptioonFile("Saved elastic/clamp ID missing from current boundaries.",file);
+  // Commit only after the complete saved identity set has been validated.
+  std::copy(restored.begin(),restored.end(),Code_c->ptr());
+  Log->Printf("FlexRestart.ClampMembership: restored %u free + %u clamp "
+      "particles by stable ID (%s).",nfree,nclamp,
+      hasbody ? "saved body/role" : "legacy IDs and unique XML body");
 }
 
 void JSphCpuSingle::LoadFlexDirectContinuationState(){

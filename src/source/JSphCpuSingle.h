@@ -110,6 +110,7 @@ protected:
   void InitFlexRestartHydrostatic();
   
   void SaveFlexData();
+  void RestoreFlexContinuationClampCodes();
   void LoadFlexDirectContinuationState();
 
   void SaveFlexPairDataOnce();
