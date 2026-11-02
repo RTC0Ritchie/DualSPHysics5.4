@@ -55,6 +55,7 @@
 #include "UserParameters.h"
 #include "UserIceTopProtection.h"
 #include "UserIceBottomProtection.h"
+#include "UserInOutData.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -1308,6 +1309,11 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
     RunFirstGaugeSystem(TimeStep);
 
   if(InOut)InOutInit(TimeStepIni);
+  if(User->SaveInOutData){
+    if(!InOut || PeriActive || !(SvData&SDAT_Binx) || !SvPosDouble || OutputParts)
+      Run_Exceptioon("SaveInOutData requires ordinary CPU InOut, full binary output and SavePosDouble=1; OutputParts is not supported.");
+    UserInOutData::Check(*InOut);
+  }
 
   if(FlexStruc){
     FlexStrucInit();
@@ -1464,6 +1470,14 @@ void JSphCpuSingle::SaveData(){
   JDataArrays arrays;
   AddBasicArrays(arrays,npsave,svpos.cptr(),svidp.cptr(),svvel.cptr(),svrho.cptr());
   JSph::SaveData(npsave,arrays,1,&vdom,infoplus);
+  if(User->SaveInOutData){
+    if(!save || npsave!=Np)
+      Run_Exceptioon("SaveInOutData requires a complete main PART.");
+
+    UserInOutData::Save(*InOut,*MkInfo,DirDataOut,RunCode,Part,Nstep,TimeStep,
+        Np,Idp_c->cptr(),Code_c->cptr(),CaseNp,TotalNp,IdMax,
+        User->InOutHeadWritten);
+  }
   //-Save VTK file with current boundary normals (for debug).
   if(UseNormals && SvNormals)SaveVtkNormals(DirVtkOut+"Normals.vtk",Part
     ,npsave,Npb,Pos_c->cptr(),Idp_c->cptr(),BoundNor_c->cptr(),1.f);

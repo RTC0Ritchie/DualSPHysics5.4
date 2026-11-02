@@ -68,6 +68,7 @@ class JNumexLib;
 /// \brief Manages the info of inlet conditions.
 class JSphInOut : protected JObject
 {
+  friend class UserInOutData;
 private:
   JLog2* Log;
   static const unsigned MaxZones=CODE_TYPE_FLUID_INOUTNUM;  ///<Maximum number of inout configurations.

@@ -52,6 +52,8 @@ void UserParameters::Reset(){
 
   SaveFlexData=false;
   SaveFlexPairData=false;
+  SaveInOutData=false;
+  InOutHeadWritten=false;
 
   FlexRestartRequested=false;
   FlexRestartSourceRequested=0;
@@ -506,6 +508,14 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
           "User.unContact must be non-negative.");
     }
   }
+
+  // ------------------------------------------------------------
+  // Input/output data.
+  // ------------------------------------------------------------
+  const double saveinout=parameters.GetValueDouble("SaveInOutData",true,0);
+  if(saveinout!=0 && saveinout!=1)
+    Run_Exceptioon("User.SaveInOutData must be 0 or 1.");
+  SaveInOutData=(saveinout==1);
     
   // ------------------------------------------------------------
   // Elastic-state output.

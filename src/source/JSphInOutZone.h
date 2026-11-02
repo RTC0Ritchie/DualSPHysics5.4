@@ -66,6 +66,7 @@ namespace jmsh{            //<vs_meeshdat>
 /// \brief Manages one inlet zone.
 class JSphInOutZone : protected JObject
 {
+  friend class UserInOutData;
 public:
   
   static const unsigned CheckInput_MASK  =0x80;  ///<Mask to obtain value (1000 0000).

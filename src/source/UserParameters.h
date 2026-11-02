@@ -74,6 +74,8 @@ public:
 
   bool SaveFlexData; // Enable PartFlex elastic-state output.
   bool SaveFlexPairData;
+  bool SaveInOutData=false;
+  bool InOutHeadWritten=false;
 
   // Explicit User restart request; mutually exclusive with SPH restart.
   bool FlexRestartRequested;

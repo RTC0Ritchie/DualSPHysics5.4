@@ -1325,6 +1325,13 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     ReuseIds=InOut->GetReuseIds();
     if(ReuseIds)Run_Exceptioon("Inlet/Outlet with ReuseIds is not a valid option for now...");
   }
+
+  if(User->SaveInOutData && (!Cpu || !InOut))
+      Run_Exceptioon("SaveInOutData v1 requires ordinary CPU InOut.");
+  #ifdef _WITHMR
+    if(User->SaveInOutData && cfg->VRes)
+      Run_Exceptioon("SaveInOutData v1 does not support VRes.");
+  #endif
   
   //-Configuration of boundary extrapolated correction.
   if(xml.GetNodeSimple("case.execution.special.boundextrap",false))

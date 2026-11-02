@@ -46,6 +46,7 @@ namespace jmsh{       //<vs_meeshdat>
 
 class JSphInOutZsurf : protected JObject
 {
+  friend class UserInOutData;
 protected:
   JLog2* Log;
   const bool Cpu;

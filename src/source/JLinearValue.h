@@ -72,6 +72,7 @@ class TiXmlElement;
 
 class JLinearValue : protected JObject
 {
+  friend class UserInOutData;
 protected:
   static const unsigned SIZEMAX=20000000;
   static const unsigned SIZEINITIAL=500;

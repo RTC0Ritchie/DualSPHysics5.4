@@ -52,6 +52,7 @@ namespace jmsh{            //<vs_meeshdat>
 
 class JSphInOutVel : protected JObject
 {
+  friend class UserInOutData;
 protected:
   JLog2* Log;
   const bool Cpu;
