@@ -1334,8 +1334,6 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     if(cfg->VRes)
       Run_Exceptioon("InOut checkpoints do not support VRes.");
     #endif
-    if(!User->OutputObjects.empty())
-      Run_Exceptioon("User/output is not supported with InOut checkpoints.");
     if(PartBegin && !PartBeginFirst)
       Run_Exceptioon("InOut restart must preserve absolute time; -partbegin:N:0 is unsupported.");
   }

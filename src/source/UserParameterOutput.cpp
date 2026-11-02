@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 UserParameterOutput::UserParameterOutput(){
   ClassName="UserParameterOutput";
@@ -408,7 +409,21 @@ void JSphCpuSingle::SaveUserOutput(
 
     if(!outputDynamic && !outputStatic)continue;
 
+    const unsigned inletMarker=65536u;
+    const bool selectInlet=
+        std::find(config.Mk.begin(),config.Mk.end(),inletMarker)
+        !=config.Mk.end();
+
+    if(selectInlet && !InOut)
+      Run_Exceptioon("Output selector 'inlet' requires InOut.");
+
+    #ifdef _WITHMR
+    if(selectInlet && CfgRun && CfgRun->VRes>0)
+      Run_Exceptioon("Output selector 'inlet' does not support VRes particle creation.");
+    #endif
+
     for(unsigned mk:config.Mk){
+      if(mk==inletMarker)continue;
       if(MkInfo->GetMkBlockByMk(word(mk))>=MkInfo->Size()){
         Run_Exceptioon(
           fun::PrintStr("Unknown output MK: %u",mk));
@@ -417,40 +432,65 @@ void JSphCpuSingle::SaveUserOutput(
 
     std::vector<UserParameterOutput::StVtkParticle> particles;
 
-    for(unsigned q=0;q<npsave;q++){
-      const unsigned id=svidp[q];
-      const unsigned block=MkInfo->GetMkBlockById(id);
+    std::unordered_set<unsigned> writtenIds;
+    const size_t count=size_t(npsave)+(selectInlet? size_t(Np):0);
 
-      if(block>=MkInfo->Size()){
-        Run_Exceptioon(
-          fun::PrintStr("Cannot identify MK for Idp=%u.",id));
+    for(size_t q=0;q<count;q++){
+      const bool live=q>=npsave;
+      const unsigned p=live? unsigned(q-npsave):0;
+      const unsigned id=live? Idp_c->cptr()[p]:svidp[q];
+
+      // Append all current inlet-born particles, even if main PART is filtered.
+      if(live){
+        const typecode code=Code_c->cptr()[p];
+        if(!CODE_IsNormal(code) || !CODE_IsFluid(code) || id<CaseNp)
+          continue;
       }
 
-      const JSphMkBlock* mkblock=MkInfo->Mkblock(block);
-      const unsigned mk=mkblock->Mk;
+      const bool inletBorn=(InOut && id>=CaseNp);
+      const JSphMkBlock* mkblock=nullptr;
+      unsigned mk=inletMarker;
 
-      if(std::find(config.Mk.begin(),config.Mk.end(),mk)
-          ==config.Mk.end()){
-        continue;
+      if(inletBorn){
+        if(!selectInlet)continue;
       }
+      else{
+        const unsigned block=MkInfo->GetMkBlockById(id);
+        if(block>=MkInfo->Size()){
+          Run_Exceptioon(
+              fun::PrintStr("Cannot identify MK for Idp=%u.",id));
+        }
+        mkblock=MkInfo->Mkblock(block);
+        mk=mkblock->Mk;
+        if(std::find(config.Mk.begin(),config.Mk.end(),mk)
+            ==config.Mk.end())continue;
+      }
+
+      // Union of selectors and snapshot/live sources: one record per ID.
+      if(!writtenIds.insert(id).second)continue;
+      const float rhoSPH=live? Velrho_c->cptr()[p].w:svrho[q];
 
       UserParameterOutput::StVtkParticle particle;
 
       particle.Idp=id;
       particle.Mk=mk;
-      particle.Pos=svpos[q];
+      particle.Pos=live? Pos_c->cptr()[p]:svpos[q];
 
       if(dynamic.Velocity){
-        particle.Velocity=svvel[q];
+        if(live){
+          const tfloat4 vr=Velrho_c->cptr()[p];
+          particle.Velocity=TFloat3(vr.x,vr.y,vr.z);
+        }
+        else particle.Velocity=svvel[q];
       }
 
       // Use SPH density from this output frame.
       if(dynamic.PressureSPH){
-        particle.PressureSPH=fsph::ComputePress(svrho[q],CSP);
+        particle.PressureSPH=fsph::ComputePress(rhoSPH,CSP);
       }
 
       if(dynamic.DensitySPH || dynamic.VolumeSPH){
-        const double rho=double(svrho[q]);
+        const double rho=double(rhoSPH);
 
         if(!std::isfinite(rho) || rho<=0.0){
           Run_Exceptioon(fun::PrintStr(
@@ -609,7 +649,7 @@ void JSphCpuSingle::SaveUserOutput(
       }
       else if(needParticleMass){
         // Mass of ordinary SPH and rigid-body particles.
-        const typecode code=mkblock->Code;
+        const typecode code=inletBorn? MkInfo->GetCodeNewFluid():mkblock->Code;
 
         if(CODE_IsFloating(code)){
           const unsigned body=CODE_GetTypeValue(code);
@@ -635,7 +675,7 @@ void JSphCpuSingle::SaveUserOutput(
             id,mk,particle.Mass));
         }
 
-        particle.VolumeSPH=particle.Mass/double(svrho[q]);
+        particle.VolumeSPH=particle.Mass/double(rhoSPH);
       }
 
       particles.push_back(particle);

@@ -1194,6 +1194,11 @@ void UserParameters::LoadOutputXml(
     std::set<unsigned> usedMk;
 
     for(const std::string& text:mkText){
+      // Output-only selector; XML MK values remain in 0..65535.
+      if(text=="inlet"){
+        config.Mk.push_back(65536u);
+        continue;
+      }
       unsigned value=0;
 
       for(char c:text){
