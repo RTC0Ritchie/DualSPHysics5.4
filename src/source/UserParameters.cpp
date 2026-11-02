@@ -4,6 +4,7 @@
 #include "JCaseEParms.h"
 #include "Functions.h"
 #include "UserFlexBoundaryCorrection.h"
+#include "UserIceBottomProtection.h"
 
 #include <algorithm>
 #include <set>
@@ -38,6 +39,7 @@ void UserParameters::Reset(){
   NoPenetrationMkBound=-1;
 
   IceTopNoPenetrationEnabled=false;
+  IceBottomNoPen::Reset(this);
 
   Mdbc2AdaptiveEnabled=false;
   Mdbc2AdaptiveMode=0;
@@ -264,6 +266,42 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
           "User.IceTopNoPenetration value must be 0 or 1.");
 
     IceTopNoPenetrationEnabled=(enabled==1);
+  }
+
+  const auto bottomnopen=nodes.find("IceBottomNoPenetration");
+  if(bottomnopen!=nodes.end()){
+    const TiXmlElement* ele=bottomnopen->second;
+
+    xml->CheckAttributeNames(
+        ele,"key value wettime hcoef active comment units_comment");
+
+    if(ele->FirstChildElement())
+      Run_Exceptioon(
+          "User.IceBottomNoPenetration does not accept child elements.");
+
+    const int enabled=xml->GetAttributeInt(ele,"value");
+
+    if(enabled!=0 && enabled!=1)
+      Run_Exceptioon(
+          "User.IceBottomNoPenetration value must be 0 or 1.");
+
+    auto& bottom=IceBottomNoPen::Get(this);
+    bottom.Enabled=(enabled==1);
+
+    if(bottom.Enabled){
+      bottom.WetTime=
+          xml->GetAttributeDouble(ele,"wettime",true,0.25);
+      bottom.HCoef=
+          xml->GetAttributeDouble(ele,"hcoef",true,4.0);
+
+      if(!std::isfinite(bottom.WetTime) || bottom.WetTime<=0)
+        Run_Exceptioon(
+            "User.IceBottomNoPenetration wettime must be finite and positive.");
+
+      if(!std::isfinite(bottom.HCoef) || bottom.HCoef<0)
+        Run_Exceptioon(
+            "User.IceBottomNoPenetration hcoef must be finite and non-negative.");
+    }
   }
 
   // One-time removal of fluid above the current ice top.

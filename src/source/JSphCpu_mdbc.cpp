@@ -23,6 +23,7 @@
 #include "JCellSearch_inline.h"
 #include "FunSphKernel.h"
 #include "FunctionsMath.h"
+#include "UserIceBottomProtection.h"
 
 #include <climits>
 
@@ -249,6 +250,10 @@ template<TpKernel tker,bool sim2d> void JSphCpu::InteractionMdbc2CorrectionT2
   ,const unsigned* idp,const tfloat3* boundnor,const tfloat3* motionvel
   ,const tfloat3* motionace,tfloat4* velrho,byte* boundmode,tfloat3* tangenvel)
 {
+  auto& bottomsupport=IceBottomNoPen::Get(User.get()).Support;
+  const bool savebottom=IceBottomNoPen::Get(User.get()).Enabled;
+
+  if(savebottom)bottomsupport.assign(CaseNbound,0.0);
   const int nn=int(n);
   #ifdef OMP_USE
     #pragma omp parallel for schedule (guided)
@@ -332,6 +337,9 @@ template<TpKernel tker,bool sim2d> void JSphCpu::InteractionMdbc2CorrectionT2
         }
       }
 
+      if(savebottom && CODE_IsNormal(code[p1])
+          && idp[p1]<bottomsupport.size())
+        bottomsupport[idp[p1]]=sumwab;
       //-Store the results.
       //--------------------
       if(submerged>0.f){

@@ -69,6 +69,7 @@
 #include "JOutputCsv.h"
 #include "JSpVtkData.h"
 #include "JSpVtkShape.h"
+#include "UserIceBottomProtection.h"
 #include <algorithm>
 
 using namespace std;
@@ -1036,7 +1037,8 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
       Run_Exceptioon("User.Mdbc2Adaptive head requires nonzero gravity.");
   }
   //-Selective no-penetration: validate after command-line overrides.
-  if(User->NoPenetrationMkEnabled || User->IceTopNoPenetrationEnabled){
+  if(User->NoPenetrationMkEnabled || User->IceTopNoPenetrationEnabled
+      || IceBottomNoPen::Get(User.get()).Enabled){
     JCaseEParms ordinary;
     ordinary.LoadXml(cxml,"case.execution.parameters");
 
@@ -1100,7 +1102,9 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     const JSphMkBlock* bed=MkInfo->Mkblock(block);
 
     if(!bed->Bound || !bed->Count
-        || (!CODE_IsFixed(bed->Code) && !User->IceTopNoPenetrationEnabled))
+        || (!CODE_IsFixed(bed->Code)
+            && !User->IceTopNoPenetrationEnabled
+            && !IceBottomNoPen::Get(User.get()).Enabled))
       Run_Exceptioon(
           "User.NoPenetrationMk requires a non-empty fixed boundary.");
 
@@ -1369,7 +1373,8 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
         "or remove -partbegin for User restart.");
   }
 
-  if(User->IceTopNoPenetrationEnabled){
+  if(User->IceTopNoPenetrationEnabled
+      || IceBottomNoPen::Get(User.get()).Enabled){
     if(!Cpu || !Simulate2D || PeriActive || InOut || !FlexStruc
         || FlexStrucCount!=1 || TStep!=STEP_Symplectic)
     {
@@ -1393,8 +1398,8 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
         TMdbc2=MDBC2_Std;
 
         Log->Print(
-            "IceTopNoPenetration: selected elastic NoPenetrationMk "
-            "is overridden; only its top is protected.");
+            "Ice top/bottom protection: selected elastic NoPenetrationMk "
+            "is overridden; only the enabled local surfaces are protected.");
       }
       else if(!CODE_IsFixed(selected->Code)){
         Run_Exceptioon(

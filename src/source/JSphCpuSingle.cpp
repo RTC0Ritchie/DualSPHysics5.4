@@ -54,6 +54,7 @@
 
 #include "UserParameters.h"
 #include "UserIceTopProtection.h"
+#include "UserIceBottomProtection.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -1909,7 +1910,8 @@ void JSphCpuSingle::InitIceTopNoPenetration(){
   IceTopNoPenOldTop.clear();
   IceTopNoPenOldFluid.clear();
 
-  if(!User->IceTopNoPenetrationEnabled)return;
+  if(!User->IceTopNoPenetrationEnabled
+      && !IceBottomNoPen::Get(User.get()).Enabled)return;
 
   JPartsLoad4 initial(false);
   initial.LoadParticles(DirCase,CaseName,0,"");
@@ -1940,6 +1942,11 @@ void JSphCpuSingle::InitIceTopNoPenetration(){
         "IceTopNoPenetration: initial case lacks elastic IDs.");
 
   try{
+    auto& bottom=IceBottomNoPen::Get(User.get());
+
+    if(bottom.Enabled)
+      IceBottomNoPen::Init(bottom,ref,Dp,CaseNbound);
+
     const auto top=IceTopCleanup::ReferenceTop(ref,Dp);
 
     for(const auto& p:top)
@@ -1950,10 +1957,17 @@ void JSphCpuSingle::InitIceTopNoPenetration(){
         std::string("IceTopNoPenetration: ")+e.what());
   }
 
-  Log->Printf(
-      "IceTopNoPenetration: %u material top nodes; finite top only; "
-      "side/bottom excluded; normal velocity clipping, no friction.",
-      unsigned(IceTopNoPenIds.size()));
+  if(IceBottomNoPen::Get(User.get()).Enabled)
+    Log->Printf(
+        "IceBottomNoPenetration: wettime=%g s; reach=%g h; history reset.",
+        IceBottomNoPen::Get(User.get()).WetTime,
+        IceBottomNoPen::Get(User.get()).HCoef);
+
+  if(User->IceTopNoPenetrationEnabled)
+    Log->Printf(
+        "IceTopNoPenetration: %u material top nodes; finite top only; "
+        "side/bottom excluded; normal velocity clipping, no friction.",
+        unsigned(IceTopNoPenIds.size()));
 }
 
 //==============================================================================
@@ -1998,13 +2012,36 @@ JSphCpuSingle::GetIceTopNoPenProfile()const{
 // Capture the old positions before each integration stage.
 //==============================================================================
 void JSphCpuSingle::CaptureIceTopNoPenetration(bool predictor){
-  if(!User->IceTopNoPenetrationEnabled)return;
+  auto& bottom=IceBottomNoPen::Get(User.get());
 
-  if(predictor)
+  if(!User->IceTopNoPenetrationEnabled && !bottom.Enabled)return;
+
+  if(predictor && User->IceTopNoPenetrationEnabled)
     IceTopNoPenOldTop=GetIceTopNoPenProfile();
 
-  // The corrector integrates from the full-step old positions.
-  // Capture them before ComputeSymplecticCorr releases PosPre_c.
+  if(predictor && bottom.Enabled){
+    bottom.Old=IceBottomNoPen::Profile(
+        bottom,CaseNfixed,CaseNbound,Npb,
+        RidpMot,Idp_c->cptr(),Pos_c->cptr(),Velrho_c->cptr(),Dp);
+
+    const double dt=bottom.LastTime<0
+        ?0:std::max(0.0,TimeStep-bottom.LastTime);
+
+    bottom.LastTime=TimeStep;
+
+    std::vector<double> support;
+    support.reserve(bottom.Ids.size());
+
+    for(unsigned id:bottom.Ids)
+      support.push_back(bottom.Support.at(id));
+
+    IceBottomNoPen::UpdateActive(
+        bottom.Old,support,dt,bottom.WetTime,
+        bottom.HCoef*KernelH,2*KernelH,
+        bottom.Age,bottom.Active);
+  }
+
+  // Corrector starts from the full-step old positions.
   const tdouble3* oldpos=
       predictor?Pos_c->cptr():PosPre_c->cptr();
 
@@ -2015,11 +2052,49 @@ void JSphCpuSingle::CaptureIceTopNoPenetration(bool predictor){
 // Correct fluid crossing the finite ice-top surface.
 //==============================================================================
 void JSphCpuSingle::ApplyIceTopNoPenetration(bool predictor){
-  if(!User->IceTopNoPenetrationEnabled)return;
+  auto& bottom=IceBottomNoPen::Get(User.get());
+
+  if(!User->IceTopNoPenetrationEnabled && !bottom.Enabled)return;
 
   if(IceTopNoPenOldFluid.size()!=Np-Npb)
     Run_Exceptioon(
         "IceTopNoPenetration: stage particle order/count changed.");
+
+  if(bottom.Enabled
+      && std::find(bottom.Active.begin(),bottom.Active.end(),1)
+          !=bottom.Active.end()){
+    const auto now=IceBottomNoPen::Profile(
+        bottom,CaseNfixed,CaseNbound,Npb,
+        RidpMot,Idp_c->cptr(),Pos_c->cptr(),Velrho_c->cptr(),Dp);
+
+    auto* pos=Pos_c->ptr();
+    auto* vr=Velrho_c->ptr();
+    auto* code=Code_c->ptr();
+
+    for(unsigned p=Npb;p<Np;p++){
+      if(!CODE_IsNormal(code[p]) || !CODE_IsFluid(code[p]))continue;
+
+      const auto q=pos[p];
+      const auto old=IceTopNoPenOldFluid[p-Npb];
+
+      const auto c=IceBottomNoPen::CorrectBottom(
+          bottom.Old,now,
+          {old.x,-old.z,0,0},
+          {q.x,-q.z,vr[p].x,-vr[p].z},
+          Dp,bottom.Active);
+
+      if(!c.hit)continue;
+
+      UpdatePos(
+          q,c.dx,0,-c.dz,false,p,
+          pos,Dcell_c->ptr(),code);
+
+      vr[p].x+=float(c.dvx);
+      vr[p].z-=float(c.dvz);
+    }
+  }
+
+  if(!User->IceTopNoPenetrationEnabled)return;
 
   const auto top=GetIceTopNoPenProfile();
 
