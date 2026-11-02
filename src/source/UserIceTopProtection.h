@@ -154,10 +154,16 @@ inline void ValidateOutline(const std::vector<Point>& poly,double dp){
     for(size_t j=i+1;j<poly.size();j++){
       if(j==i+1 || (i==0 && j+1==poly.size()))continue;
       const auto& c=poly[j];const auto& e=poly[(j+1)%poly.size()];
+      if(std::max(a.x,b.x)+tol<std::min(c.x,e.x)
+          || std::max(c.x,e.x)+tol<std::min(a.x,b.x)
+          || std::max(a.z,b.z)+tol<std::min(c.z,e.z)
+          || std::max(c.z,e.z)+tol<std::min(a.z,b.z))continue;
       const double u=Cross(a,b,c),v=Cross(a,b,e);
       const double w=Cross(c,e,a),t=Cross(c,e,b);
-      if(((u>0 && v<0)||(u<0 && v>0))
-          && ((w>0 && t<0)||(w<0 && t>0)))
+      const double abtol=tol*std::hypot(b.x-a.x,b.z-a.z);
+      const double cetol=tol*std::hypot(e.x-c.x,e.z-c.z);
+      if(((u>abtol && v<-abtol)||(u<-abtol && v>abtol))
+          && ((w>cetol && t<-cetol)||(w<-cetol && t>cetol)))
         throw std::runtime_error("Self-intersecting ice outline.");
       if(OnSegment(a,b,c,tol)||OnSegment(a,b,e,tol)
           ||OnSegment(c,e,a,tol)||OnSegment(c,e,b,tol))

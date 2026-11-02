@@ -38,12 +38,15 @@
 #include "JDsOutputTime.h"
 #include "JDsAccInput.h"
 #include "JDsGaugeSystem.h"
-#include "JSphInOut.h"
 #include "JSphShifting.h"
 #include "JSphShiftingAdv.h" //<vs_advshift>
 
 #include <climits>
 #include <numeric>
+
+namespace sphcpu_inout {
+  const tfloat3* GetDirVel(const JSphInOut* inout);
+}
 
 using namespace std;
 
@@ -1639,7 +1642,7 @@ void JSphCpu::ComputeVelrhoBound(const tfloat4* velrhoold,const byte* boundmode
 void JSphCpu::ComputeVerlet(double dt){
   Timersc->TmStart(TMC_SuComputeStep);
   const bool shift=(Shifting!=NULL);
-  const tfloat3* indirvel=(InOut? InOut->GetDirVel(): NULL);
+  const tfloat3* indirvel=sphcpu_inout::GetDirVel(InOut);
   const byte* boundmode=AC_CPTR(BoundMode_c); //<vs_m2dbc>
   VerletStep++;
   if(VerletStep<VerletSteps){
@@ -1726,7 +1729,7 @@ void JSphCpu::ComputeSymplecticPre(double dt){
   //-Compute displacement, velocity and density for fluid.
   acdouble3 mov_c("movc",Arrays_Cpu,true);
   {
-    const tfloat3*  indirvel=(InOut? InOut->GetDirVel(): NULL);
+    const tfloat3*  indirvel=sphcpu_inout::GetDirVel(InOut);
     const typecode* codec=Code_c->cptr();
     const float*    arc=Ar_c->cptr();
     const tfloat3*  acec=Ace_c->cptr();
@@ -1879,7 +1882,7 @@ void JSphCpu::ComputeSymplecticCorr(double dt){
   //-Compute displacement, velocity and density for fluid.
   acdouble3 mov_c("movc",Arrays_Cpu,true);
   {
-    const tfloat3*  indirvel=(InOut? InOut->GetDirVel(): NULL);
+    const tfloat3*  indirvel=sphcpu_inout::GetDirVel(InOut);
     const typecode* codec=Code_c->cptr();
     const float*    arc=Ar_c->cptr();
     const tfloat3*  acec=Ace_c->cptr();

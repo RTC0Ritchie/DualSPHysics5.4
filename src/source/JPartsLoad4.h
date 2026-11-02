@@ -109,7 +109,7 @@ public:
   ~JPartsLoad4();
   void Reset();
 
-  void LoadParticles(const std::string& casedir,const std::string& casename,unsigned partbegin,const std::string& casedirbegin);
+  void LoadParticles(const std::string& casedir,const std::string& casename,unsigned partbegin,const std::string& casedirbegin,bool preserveorder=false);
   void CheckConfig(ullong casenp,ullong casenfixed,ullong casenmoving,ullong casenfloat,ullong casenfluid,bool simulate2d,double simulate2dposy,TpPeri tperi)const;
   void CheckConfig(ullong casenp,ullong casenfixed,ullong casenmoving,ullong casenfloat,ullong casenfluid)const;
   void RemoveBoundary();

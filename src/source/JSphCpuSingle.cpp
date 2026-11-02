@@ -56,6 +56,8 @@
 #include "UserIceTopProtection.h"
 #include "UserIceBottomProtection.h"
 #include "UserInOutData.h"
+#include "UserIceInOutData.h"
+#include "JDsPartsInit.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -173,7 +175,15 @@ void JSphCpuSingle::ConfigDomain(){
   LoadCodeParticles(Np,Idp_c->cptr(),Code_c->ptr());
 
   //-Creates PartsInit object with initial particle data for automatic configurations.
-  CreatePartsInit(Np,Pos_c->cptr(),Code_c->cptr());
+  if(PartBegin && InOut){
+    JPartsLoad4 original(false);
+    original.LoadParticles(DirCase,CaseName,0,"");
+    std::vector<typecode> originalcode(original.GetCount());
+    for(unsigned p=0;p<original.GetCount();p++)
+      originalcode[p]=MkInfo->GetCodeById(original.GetIdp()[p]);
+    CreatePartsInit(original.GetCount(),original.GetPos(),originalcode.data());
+  }
+  else CreatePartsInit(Np,Pos_c->cptr(),Code_c->cptr());
 
   //-Runs initialization operations from XML.
   RunInitialize(Np,Npb,Pos_c->cptr(),Idp_c->cptr(),Code_c->cptr()
@@ -181,7 +191,9 @@ void JSphCpuSingle::ConfigDomain(){
   if(UseNormals)ConfigBoundNormals(Np,Npb,Pos_c->cptr(),Idp_c->cptr(),BoundNor_c->ptr());
 
   //-Computes MK domain for boundary and fluid particles.
-  MkInfo->ComputeMkDomains(Np,Pos_c->cptr(),Code_c->cptr());
+  if(PartBegin && InOut)
+    MkInfo->ComputeMkDomains(PartsInit->GetNp(),PartsInit->GetPos(),PartsInit->GetCode());
+  else MkInfo->ComputeMkDomains(Np,Pos_c->cptr(),Code_c->cptr());
 
   //-Sets local domain of the simulation within Map_Cells and computes DomCellCode.
   //-Establece dominio de simulacion local dentro de Map_Cells y calcula DomCellCode.
@@ -1334,12 +1346,13 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu());
   UpdateMaxValues();
+  if(PartBegin && InOut)PartNstep=Nstep;
   SaveData();
   Arrays_Cpu->FreeUnusedArrays();
   Timersc->ResetTimes();
   Timersc->TmStop(TMC_Init);
   if(Log->WarningCount())Log->PrintWarningList("\n[WARNINGS]","");
-  PartNstep=0; Part++;
+  PartNstep=Nstep; Part++;
 
   //-Main Loop.
   //------------
@@ -1361,6 +1374,8 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
     if(InOut)InOutComputeStep(stepdt);
     else RunCellDivide(true);
     if(FlexStruc)UpdateFlexStrucGeometry();
+    if(InOut)UserIceInOutData::ValidateBuffers(User.get(),CaseNfixed,Npb,Np,
+        RidpMot,Idp_c->cptr(),Code_c->cptr(),Pos_c->cptr(),Dp);
     TimeStep+=stepdt;
     LastDt=stepdt;
     Nstep++;
@@ -1740,11 +1755,11 @@ void JSphCpuSingle::ClearIceTopFluidOnce(){
   if(!User->IceTopFluidCleanupEnabled)return;
 
   if(!Simulate2D || PeriActive ||
-     !FlexStruc || FlexStrucCount!=1 || InOut)
+     !FlexStruc || FlexStrucCount!=1)
   {
     Run_Exceptioon(
         "IceTopFluidCleanup requires CPU 2-D, one elastic body, "
-        "no periodic boundaries and no inlet/outlet.");
+        "no periodic boundaries.");
   }
 
   // Read original geometry only to identify material top-surface IDs.
@@ -1816,6 +1831,17 @@ void JSphCpuSingle::ClearIceTopFluidOnce(){
         std::string("IceTopFluidCleanup: ")+e.what());
   }
 
+  if(InOut){
+    UserIceInOutData::ConfigureOutline(User.get(),outline);
+    UserIceInOutData::ValidateBuffers(User.get(),CaseNfixed,Npb,Np,
+        RidpMot,Idp_c->cptr(),Code_c->cptr(),Pos_c->cptr(),Dp);
+    for(unsigned p=Npb;p<Np;p++)
+      if(CODE_IsNormal(codes[p]) && CODE_IsFluidInout(codes[p])
+          && (IceTopCleanup::Above(top,pos[p].x,pos[p].z,Dp)
+            || IceTopCleanup::InsideIce(outline,pos[p].x,pos[p].z,Dp)))
+        Run_Exceptioon("IceTopFluidCleanup: inlet buffer overlaps the cleanup target; move the inlet instead of deleting buffer particles.");
+  }
+
   std::vector<unsigned> remove;
   std::vector<unsigned> reasons;
   unsigned nabove=0,ninside=0;
@@ -1825,7 +1851,8 @@ void JSphCpuSingle::ClearIceTopFluidOnce(){
   const auto* vr=Velrho_c->cptr();
 
   for(unsigned p=Npb;p<Np;p++){
-    if(CODE_IsNormal(codes[p]) && CODE_IsFluid(codes[p])){
+    if(CODE_IsNormal(codes[p]) && CODE_IsFluid(codes[p])
+        && !CODE_IsFluidInout(codes[p])){
       nfluid++;
 
       const bool above=IceTopCleanup::Above(top,pos[p].x,pos[p].z,Dp);
@@ -1844,7 +1871,8 @@ void JSphCpuSingle::ClearIceTopFluidOnce(){
     }
   }
 
-  if(!remove.empty() && remove.size()==nfluid)
+  if(!remove.empty() && remove.size()==nfluid
+      && !(InOut && InOut->GetCurrentNp()))
     Run_Exceptioon(
         "IceTopFluidCleanup would remove all fluid; "
         "check the case geometry.");
@@ -1894,7 +1922,7 @@ void JSphCpuSingle::ClearIceTopFluidOnce(){
   // for subsequent accidental fluid loss.
   if(!remove.empty()){
     NpfMinimum=unsigned(
-        MinFluidStop*(nfluid-unsigned(remove.size())));
+        MinFluidStop*(Np-NpbPer-NpfPer-CaseNbound));
   }
 
   Log->Printf(
@@ -1958,9 +1986,28 @@ void JSphCpuSingle::InitIceTopNoPenetration(){
   try{
     auto& bottom=IceBottomNoPen::Get(User.get());
 
-    if(bottom.Enabled)
+    if(bottom.Enabled){
       IceBottomNoPen::Init(bottom,ref,Dp,CaseNbound);
+      bottom.Active.assign(bottom.Ids.size(),0);
+    }
 
+    if(InOut){
+      auto outline=IceTopCleanup::ReferenceOutline(ref,Dp);
+      std::unordered_map<unsigned,unsigned> index;
+      for(unsigned p=0;p<Npb;p++)index.emplace(Idp_c->cptr()[p],p);
+      for(auto& q:outline){
+        const auto ps=Pos_c->cptr()[index.at(q.id)];
+        q.x=ps.x; q.z=ps.z;
+      }
+      IceTopCleanup::ValidateOutline(outline,Dp);
+      UserIceInOutData::ConfigureOutline(User.get(),outline);
+      UserIceInOutData::ValidateBuffers(User.get(),CaseNfixed,Npb,Np,
+          RidpMot,Idp_c->cptr(),Code_c->cptr(),Pos_c->cptr(),Dp);
+      for(unsigned p=Npb;p<Np;p++)
+        if(CODE_IsNormal(Code_c->cptr()[p]) && CODE_IsFluidInout(Code_c->cptr()[p])
+            && IceTopCleanup::InsideIce(outline,Pos_c->cptr()[p].x,Pos_c->cptr()[p].z,Dp))
+          Run_Exceptioon("Ice protection: inlet buffer lies inside ice; move the inlet away from ice.");
+    }
     const auto top=IceTopCleanup::ReferenceTop(ref,Dp);
 
     for(const auto& p:top)
@@ -1971,6 +2018,7 @@ void JSphCpuSingle::InitIceTopNoPenetration(){
         std::string("IceTopNoPenetration: ")+e.what());
   }
 
+  // Wetting history is rebuilt from the current fluid state on every run.
   if(IceBottomNoPen::Get(User.get()).Enabled)
     Log->Printf(
         "IceBottomNoPenetration: wettime=%g s; reach=%g h; history reset.",
@@ -2074,6 +2122,9 @@ void JSphCpuSingle::ApplyIceTopNoPenetration(bool predictor){
     Run_Exceptioon(
         "IceTopNoPenetration: stage particle order/count changed.");
 
+  if(InOut)UserIceInOutData::ValidateBuffers(User.get(),CaseNfixed,Npb,Np,
+      RidpMot,Idp_c->cptr(),Code_c->cptr(),Pos_c->cptr(),Dp);
+
   if(bottom.Enabled
       && std::find(bottom.Active.begin(),bottom.Active.end(),1)
           !=bottom.Active.end()){
@@ -2098,6 +2149,8 @@ void JSphCpuSingle::ApplyIceTopNoPenetration(bool predictor){
           Dp,bottom.Active);
 
       if(!c.hit)continue;
+      if(CODE_IsFluidInout(code[p]))
+        Run_Exceptioon("IceBottomNoPenetration: inlet buffer intersects the active ice-bottom constraint; move the inlet away from ice.");
 
       UpdatePos(
           q,c.dx,0,-c.dz,false,p,
@@ -2134,6 +2187,8 @@ void JSphCpuSingle::ApplyIceTopNoPenetration(bool predictor){
         Dp);
 
     if(!c.hit)continue;
+    if(CODE_IsFluidInout(code[p]))
+      Run_Exceptioon("IceTopNoPenetration: inlet buffer crosses the ice-top constraint; move the inlet away from ice.");
 
     UpdatePos(
         q,c.dx,0,c.dz,false,p,

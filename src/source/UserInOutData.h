@@ -60,7 +60,8 @@ class UserInOutData {
 
   static ullong ConfigHash(JSphInOut& s,const JSphMk& mk){
     Hash h;
-    h.Add(FileHash(s.XmlFile));
+    // Only immutable InOut inputs; User/restart and output duration may change.
+
 
     const unsigned endian=0x01020304;
     const unsigned codebytes=sizeof(typecode);
@@ -97,6 +98,14 @@ class UserInOutData {
       h.Array(z->PtDom,10);
       h.Add(z->BoxLimitMin);
       h.Add(z->BoxLimitMax);
+      const auto& v=*z->InOutVel;
+      const auto& level=*z->InOutZsurf;
+      h.Add(v.VelMode); h.Add(v.VelProfile); h.Add(v.Direction);
+      h.Add(v.InputVel); h.Add(v.InputVel2); h.Add(v.InputVel3);
+      h.Add(v.InputVelPosz); h.Add(v.InputVelPosz2); h.Add(v.InputVelPosz3);
+      h.Add(level.ZsurfMode); h.Add(level.InputZbottom); h.Add(level.RemoveZsurf);
+      if(!level.InputTime)h.Add(level.InputZsurf);
+
 
       for(auto* p:{z->InOutVel->InputTimeVel,z->InOutZsurf->InputTime}){
         const bool present=(p!=NULL);
@@ -276,7 +285,7 @@ public:
     JBinaryData head("PartHeadInOut");
 
     if(!written){
-      head.SetvUint("Version",2);
+      head.SetvUint("Version",3);
       head.SetvText("RunCode",run);
       head.SetvUllong("ConfigHash",signature);
       head.SaveFile(hf);
@@ -284,14 +293,14 @@ public:
     }
     else{
       head.LoadFile(hf,"PartHeadInOut");
-      Require(head.GetvUint("Version")==2
+      Require(head.GetvUint("Version")==3
           && head.GetvText("RunCode")==run
           && head.GetvUllong("ConfigHash")==signature,
           "header/configuration changed.");
     }
 
     JBinaryData frame("PartInOut");
-    frame.SetvUint("Version",2);
+    frame.SetvUint("Version",3);
     frame.SetvText("RunCode",run);
     frame.SetvUint("Part",part);
     frame.SetvDouble("Time",time);
@@ -324,8 +333,8 @@ public:
     Check(s);
     const ullong signature=ConfigHash(s,mk);
 
-    Require(head.GetvUint("Version")==2
-        && frame.GetvUint("Version")==2
+    Require(head.GetvUint("Version")==3
+        && frame.GetvUint("Version")==3
         && head.GetvText("RunCode")==frame.GetvText("RunCode")
         && (main.Get_RunCode()=="00000000"
             || frame.GetvText("RunCode")==main.Get_RunCode())

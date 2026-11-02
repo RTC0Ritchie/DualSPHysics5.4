@@ -1326,6 +1326,19 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     if(ReuseIds)Run_Exceptioon("Inlet/Outlet with ReuseIds is not a valid option for now...");
   }
 
+  if(InOut && (User->SaveInOutData || PartBegin)){
+    if(!Cpu || PeriActive || TStep!=STEP_Symplectic
+        || CaseNfloat || ShiftingAdv || DivCleaning)
+      Run_Exceptioon("InOut checkpoints require ordinary non-periodic CPU Symplectic; floating bodies, advanced shifting and divergence cleaning are unsupported.");
+    #ifdef _WITHMR
+    if(cfg->VRes)
+      Run_Exceptioon("InOut checkpoints do not support VRes.");
+    #endif
+    if(!User->OutputObjects.empty())
+      Run_Exceptioon("User/output is not supported with InOut checkpoints.");
+    if(PartBegin && !PartBeginFirst)
+      Run_Exceptioon("InOut restart must preserve absolute time; -partbegin:N:0 is unsupported.");
+  }
   if(User->SaveInOutData && (!Cpu || !InOut))
       Run_Exceptioon("SaveInOutData v1 requires ordinary CPU InOut.");
   #ifdef _WITHMR
@@ -1382,12 +1395,12 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
 
   if(User->IceTopNoPenetrationEnabled
       || IceBottomNoPen::Get(User.get()).Enabled){
-    if(!Cpu || !Simulate2D || PeriActive || InOut || !FlexStruc
+    if(!Cpu || !Simulate2D || PeriActive || !FlexStruc
         || FlexStrucCount!=1 || TStep!=STEP_Symplectic)
     {
       Run_Exceptioon(
           "IceTopNoPenetration requires CPU 2-D Symplectic, "
-          "exactly one elastic body, no periodic boundaries or inlet/outlet.");
+          "exactly one elastic body and no periodic boundaries.");
     }
 
     if(User->NoPenetrationMkEnabled){
@@ -1416,11 +1429,11 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     }
   }
   if(User->IceTopFluidCleanupEnabled &&
-      (!Cpu || !Simulate2D || PeriActive || !FlexStruc || InOut))
+      (!Cpu || !Simulate2D || PeriActive || !FlexStruc))
   {
     Run_Exceptioon(
         "IceTopFluidCleanup requires CPU 2-D elastic simulation "
-        "without periodic boundaries or inlet/outlet.");
+        "without periodic boundaries.");
   }
 
   if(User->FlexRestartRequested && !Cpu){
@@ -1515,7 +1528,9 @@ void JSph::VisuDemCoefficients()const{
 //==============================================================================
 void JSph::LoadCodeParticles(unsigned np,const unsigned* idp,typecode* code)const{
   //-Assigns code to each group of particles.
-  for(unsigned p=0;p<np;p++)code[p]=MkInfo->GetCodeById(idp[p]);
+  for(unsigned p=0;p<np;p++)
+    code[p]=(PartBegin && InOut && idp[p]>=CaseNp?
+      MkInfo->GetCodeNewFluid(): MkInfo->GetCodeById(idp[p]));
 }
 
 //==============================================================================
@@ -2289,8 +2304,12 @@ void JSph::CheckRhoLimits(){
 //==============================================================================
 void JSph::LoadCaseParticles(){
   Log->Print("Loading initial state of particles...");
+  if(PartBegin && InOut
+      && fun::GetCanonicalPath(AppInfo.GetRunPath(),DirDataOut)
+        ==fun::GetCanonicalPath(AppInfo.GetRunPath(),PartBeginDir))
+    Run_Exceptioon("InOut restart requires a separate output directory.");
   PartsLoaded=new JPartsLoad4(Cpu);
-  PartsLoaded->LoadParticles(DirCase,CaseName,PartBegin,PartBeginDir);
+  PartsLoaded->LoadParticles(DirCase,CaseName,PartBegin,PartBeginDir,InOut!=NULL);
   PartsLoaded->CheckConfig(CaseNp,CaseNfixed,CaseNmoving,CaseNfloat,CaseNfluid
     ,Simulate2D,Simulate2DPosY,TpPeri(PeriActive));
 
@@ -3222,9 +3241,9 @@ void JSph::SavePartData(unsigned npsave,unsigned nout,const JDataArrays& arrays
     if(TStep==STEP_Symplectic)bdpart->SetvDouble("SymplecticDtPre",SymplecticDtPre);
     if(UseDEM)bdpart->SetvDouble("DemDtForce",DemDtForce); //(DEM)
     if(SvData&SDAT_Info){
-      bdpart->SetvDouble("dtmean",(!Nstep? 0: (TimeStep-TimeStepM1)/(Nstep-PartNstep)));
-      bdpart->SetvDouble("dtmin",(!Nstep? 0: PartDtMin));
-      bdpart->SetvDouble("dtmax",(!Nstep? 0: PartDtMax));
+      bdpart->SetvDouble("dtmean",(Nstep==PartNstep? 0: (TimeStep-TimeStepM1)/(Nstep-PartNstep)));
+      bdpart->SetvDouble("dtmin",(Nstep==PartNstep? 0: PartDtMin));
+      bdpart->SetvDouble("dtmax",(Nstep==PartNstep? 0: PartDtMax));
       if(FixedDt)bdpart->SetvDouble("dterror",FixedDt->GetDtError(true));
       bdpart->SetvDouble("timesim",infoplus.timesim);
       bdpart->SetvUint("nct"     ,infoplus.nct);
@@ -3367,7 +3386,7 @@ void JSph::SaveData(unsigned npsave,const JDataArrays& arrays
   PartDtModif=DtModif;
 
   //-Computation of time.
-  if(Part>PartIni || Nstep){
+  if((Part>PartIni || Nstep) && TimeStep>TimeStepM1){
     TimerPart.Stop();
     const double tpart=TimerPart.GetSecs();
     const double tseg=tpart/(TimeStep-TimeStepM1);

@@ -27,6 +27,12 @@
 #include "JSphInOutZone.h"
 #include <climits>
 
+namespace sphcpu_inout {
+  const tfloat3* GetDirVel(const JSphInOut* inout){
+    return(inout? inout->GetDirVel(): nullptr);
+  }
+}
+
 using namespace std;
 
 //==============================================================================

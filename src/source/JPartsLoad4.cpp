@@ -163,7 +163,7 @@ void JPartsLoad4::SortParticles(){
 //==============================================================================
 void JPartsLoad4::LoadParticles(const std::string& casedir
   ,const std::string& casename,unsigned partbegin
-  ,const std::string& casedirbegin)
+  ,const std::string& casedirbegin,bool preserveorder)
 {
   Reset();
   PartBegin=partbegin;
@@ -280,7 +280,7 @@ void JPartsLoad4::LoadParticles(const std::string& casedir
     Simulate2DPosY=Pos[0].y;
   }
   // Restore the particle order required during restart initialization.
-  if(PartBegin){
+  if(PartBegin && !preserveorder){
     SortParticles();
   }
 

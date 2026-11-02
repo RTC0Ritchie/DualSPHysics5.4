@@ -29,6 +29,7 @@
 #include "JAppInfo.h"
 #include "JTimeControl.h"
 #include "JDataArrays.h"
+#include "UserInOutData.h"
 #include <climits>
 
 using namespace std;
@@ -74,7 +75,40 @@ void JSphCpuSingle::InOutInit(double timestepini){
   InOut->Nstep=Nstep; //-For debug.
   Timersc->TmStart(TMC_SuInOut);
   Log->Print("Initialising InOut...");
-  if(PartBegin)Run_Exceptioon("Simulation restart not allowed when Inlet/Outlet is used.");
+  if(PartBegin){
+    // Rebuild geometry from the original GenCase seed particles, at t=0.
+    InOut->Config(0,Stable,PeriActive,MapRealPosMin,MapRealPosMax,
+      MkInfo->GetCodeNewFluid(),PartsInit,GaugeSystem);
+
+    JPartDataBi4 main;
+    main.LoadFilePart(PartBeginDir,PartBegin);
+    if(main.Get_TimeStep()!=TimeStep || main.Get_PosSimple())
+      Run_Exceptioon("InOut restart requires original absolute time and double positions.");
+
+    JBinaryData head("PartHeadInOut"),frame("PartInOut");
+    const string dir=fun::GetDirWithSlash(PartBeginDir);
+    head.LoadFile(dir+"PartHeadInOut.ibi4","PartHeadInOut");
+    frame.LoadFile(dir+fun::FileNameSec("PartInOut.bi4",PartBegin),"PartInOut");
+
+    UserInOutData::Restore(*InOut,*MkInfo,head,frame,main,PartBegin,
+      Np,Idp_c->cptr(),Code_c->ptr());
+
+    Nstep=main.Get_Step();
+    TotalNp=main.Get_NpTotal();
+    IdMax=unsigned(TotalNp-1);
+
+    CellDivSingle->SetIncreaseNp(InOut->GetNpResizePlus1());
+    const unsigned npfnormal=Np-NpbPer-NpfPer-CaseNbound;
+    NpfMinimum=unsigned(MinFluidStop*npfnormal);
+
+    InOut->VisuConfig("\nRestored InOut configuration:"," ");
+    Log->Printf("InOut restart: PART=%u, time=%.17g, step=%u, total-created=%llu, active-inlet=%u.",
+      PartBegin,TimeStep,Nstep,TotalNp,InOut->GetCurrentNp());
+    Log->PrintWarning("InOut identities and table state restored. This does not checkpoint SPS, adaptive mDBC or all Flex history; full-trajectory bitwise equivalence is not guaranteed.");
+
+    Timersc->TmStop(TMC_SuInOut);
+    return; // No seed deletion, buffer creation, proximity cleanup or field update.
+  }
   
   //-Configures InOut zones and prepares new inout particles to create.
   const unsigned newnp=InOut->Config(timestepini,Stable,PeriActive
