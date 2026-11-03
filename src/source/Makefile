@@ -258,3 +258,17 @@ ifeq ($(COMPILE_MOORDYNPLUS), YES)
 	$(MAKE) -C Source_DSphMoorDynPlus -f Makefile_MoorDynPlus clean $(MAKEFLAGS)
 endif
 	rm -rf *.o $(EXECS_DIRECTORY)/$(EXECNAME) $(EXECS_DIRECTORY)/$(EXECNAME)_debug
+
+# GPU elastic module implementation headers.
+UserGInteractionForcesFlexStruc.o: UserGFlexMath_iker.h UserGFlexCore_iker.h UserGFlexBackend_iker.h
+
+# Isolated GPU elastic interface dependencies.
+JSphGpuSingle.o: UserGFlexTypes.h
+JSphGpu_ker.o: UserGFlexCte.h
+UserGInteractionForcesFlexStruc.o: UserGFlexTypes.h UserGFlexCte.h
+
+# Precision implementation is private to the elastic translation unit.
+UserGInteractionForcesFlexStruc.o: UserGFlexPrecision.h UserGFlexPrecisionState.h UserGFlexPrecisionMath_iker.h UserGFlexPrecisionCore_iker.h UserGFlexPrecisionHost_iker.h
+JSphGpuSingle.o: JSphGpuSingle.h UserGFlexPrecision.h UserGFlexTypes.h UserGParameters.h
+main.o JDebugSphGpu.o JSphGpuSingle_InOut.o JSphGpuSingle_VRes.o: JSphGpuSingle.h
+UserGInteractionForcesFlexStruc.o: UserGFlexAccess_iker.h

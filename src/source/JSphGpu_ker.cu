@@ -19,7 +19,7 @@
 /// \file JSphGpu_ker.cu \brief Implements functions and CUDA kernels for the Particle Interaction and System Update.
 
 #include "JSphGpu_ker.h"
-#include "UserGInteractionForcesFlexStruc.h"
+#include "UserGFlexCte.h"
 #include "Functions.h"
 #include "FunctionsCuda.h"
 #include "JLog2.h"
@@ -191,7 +191,7 @@ float ReduMaxFloat_w(unsigned ndata,unsigned inidata,float4* data,float* resu){
 //==============================================================================
 void CteInteractionUp(const StCteInteraction* cte){
   cudaMemcpyToSymbol(CTE,cte,sizeof(StCteInteraction));
-  UserGInteractionForcesFlexStruc::CteInteractionUp(cte);
+  UserGFlexCte::Upload(cte);
 }
 
 //------------------------------------------------------------------------------

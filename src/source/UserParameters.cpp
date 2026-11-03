@@ -1451,11 +1451,11 @@ void UserParameters::VisuConfig(JLog2* log)const{
       GPUFlexPrecisionMode);
 
   log->Printf(
-      "    Precision interface only: effective GPU elastic policy is 0.");
+      "    Precision policies: 0=original, 1=mixed, 2=extended double.");
 
   if(GPUFlexPrecisionMode!=0){
-    log->Printf(
-        "    Policies 1 and 2 are reserved and not implemented yet.");
+    log->Print("    Elastic precision active: 1=mixed, 2=extended double.");
+    log->Print("    Velocity/material inputs and solver output mirrors remain float.");
   }
 
   log->Printf("  FlexBoundContactMode: %d",

@@ -26,6 +26,7 @@
 #include <string>
 
 class JCellDivGpuSingle;
+class UserGFlexPrecision;
 
 //##############################################################################
 //# JSphGpuSingle
@@ -36,6 +37,7 @@ class JSphGpuSingle : public JSphGpu
 {
 protected:
   JCellDivGpuSingle* CellDivSingle;
+  UserGFlexPrecision* FlexPrecision;
 
   llong GetAllocMemoryCpu()const;  
   llong GetAllocMemoryGpu()const;  

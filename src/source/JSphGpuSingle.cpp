@@ -1,3 +1,6 @@
+#include "UserGFlexTypes.h"
+#include "UserGFlexPrecision.h"
+#include "UserGParameters.h"
 //HEAD_DSPH
 /*
  <DUALSPHYSICS>  Copyright (c) 2025 by Dr Jose M. Dominguez et al. (see http://dual.sphysics.org/index.php/developers/). 
@@ -62,6 +65,7 @@ using namespace std;
 JSphGpuSingle::JSphGpuSingle():JSphGpu(false){
   ClassName="JSphGpuSingle";
   CellDivSingle=NULL;
+  FlexPrecision=new UserGFlexPrecision;
 }
 
 //==============================================================================
@@ -69,6 +73,7 @@ JSphGpuSingle::JSphGpuSingle():JSphGpu(false){
 //==============================================================================
 JSphGpuSingle::~JSphGpuSingle(){
   DestructorActive=true;
+  delete FlexPrecision; FlexPrecision=NULL;
   delete CellDivSingle; CellDivSingle=NULL;
 }
 
@@ -91,6 +96,7 @@ llong JSphGpuSingle::GetAllocMemoryGpu()const{
   llong s=JSphGpu::GetAllocMemoryGpu();
   //-Allocated in other objects.
   if(CellDivSingle)s+=CellDivSingle->GetAllocMemoryGpu();
+  if(FlexPrecision)s+=FlexPrecision->GetAllocMemoryGpu();
   return(s);
 }
 
@@ -636,7 +642,7 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
       ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
       ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
       ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-      ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get());
+      ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr());
     cusph::Interaction_ForcesFlexStruc(parmsfs);
     Timersg->TmStop(TMG_SuFlexStruc,false);
   }
@@ -1220,6 +1226,8 @@ void JSphGpuSingle::FlexStrucInit(){
     offset+=numpairs[p];
   }
   cudaMemcpy(PairIdxg,pairidx.data(),sizeof(unsigned*)*CaseNflexstruc,cudaMemcpyHostToDevice);
+  FlexPrecision->Allocate(unsigned(UserGParameters::ReadFlex(User.get()).PrecisionMode)
+    ,CaseNflexstruc,numpairstot);
   //-Set the indices for each particle pair.
   cusph::SetFlexStrucPairs(CaseNflexstruc,PosCell0g,PairIdxg);
   //-Interaction parameters.
@@ -1227,7 +1235,7 @@ void JSphGpuSingle::FlexStrucInit(){
     ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
     ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
     ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get());
+    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr());
   //-Calculate kernel correction and update geometry.
   cusph::CalcFlexStrucKerCorr(parmsfs);
   cusph::UpdateFlexStrucGeometry(parmsfs);
@@ -1245,7 +1253,7 @@ void JSphGpuSingle::UpdateFlexStrucGeometry(){
     ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
     ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
     ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get());
+    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr());
   cusph::UpdateFlexStrucGeometry(parmsfs);
   Timersg->TmStop(TMG_SuFlexStruc,false);
 }
