@@ -1112,6 +1112,9 @@ void JSphGpuSingle::SaveData(){
   JDataArrays arrays;
   AddBasicArrays(arrays,npsave,AuxPos_c->cptr(),Idp_c->cptr(),AuxVel_c->cptr(),AuxRho_c->cptr());
   JSph::SaveData(npsave,arrays,1,&vdom,infoplus);
+  // Output must precede SaveExtraData, which reuses Idp_c/AuxVel_c scratch buffers.
+  if(save)SaveUserOutput(npsave,Idp_c->cptr(),AuxPos_c->cptr()
+    ,AuxVel_c->cptr(),AuxRho_c->cptr());
   //-Save VTK file with current boundary normals (for debug).
   if(UseNormals && SvNormals)SaveVtkNormalsGpu(DirVtkOut+"Normals.vtk",Part
     ,npsave,Npb,Posxy_g->cptr(),Posz_g->cptr(),Idp_g->cptr(),BoundNor_g->cptr());

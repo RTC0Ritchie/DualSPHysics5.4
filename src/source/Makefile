@@ -158,6 +158,9 @@ OBMESH=JMeshData.o JMeshTDatas.o JMeshTDatasLoad.o JMeshTDatasSave.o JMeshTDatas
 OBVRES=JSphVRes.o JSphVResZone.o JSphCpuSingle_VRes.o JSphGpuSingle_VRes.o JSphCpu_VRes.o JCaseVRes.o JVResDataLimits.o JDsVresData.o JBoxDef.o
 OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuation.o UserFlexRestartInitialization.o UserFlexBoundaryCorrection.o UserFlexKinematics.o UserFlexDissipation.o
 
+OBSPHSINGLEGPU:=$(OBSPHSINGLEGPU) UserGParameterOutput.o
+OBCUDA:=$(OBCUDA) UserGParameterOutput_ker.o
+
 OBJECTS=$(OBJXML) $(OBJSPHMOTION) $(OBCOMMON) $(OBCOMMONDSPH) $(OBSPH) $(OBSPHSINGLE)
 OBJECTS:=$(OBJECTS) $(OBCOMMONGPU) $(OBSPHGPU) $(OBSPHSINGLEGPU) $(OBCUDA)
 OBJECTS:=$(OBJECTS) $(OBWAVERZ) $(OBWAVERZCUDA) $(OBCHRONO) $(OBMOORDYNPLUS)
@@ -272,3 +275,8 @@ UserGInteractionForcesFlexStruc.o: UserGFlexPrecision.h UserGFlexPrecisionState.
 JSphGpuSingle.o: JSphGpuSingle.h UserGFlexPrecision.h UserGFlexTypes.h UserGParameters.h
 main.o JDebugSphGpu.o JSphGpuSingle_InOut.o JSphGpuSingle_VRes.o: JSphGpuSingle.h
 UserGInteractionForcesFlexStruc.o: UserGFlexAccess_iker.h
+
+UserGParameterOutput.o: UserGParameterOutput.cpp UserGParameterOutput.h UserParameterOutput.h UserParameters.h UserGParameters.h JSphGpuSingle.h
+UserGParameterOutput_ker.o: UserGParameterOutput_ker.cu UserGParameterOutput.h UserGFlexPrecision.h UserGFlexPrecisionState.h
+	$(NCC) $(NCCFLAGS) UserGParameterOutput_ker.cu
+UserParameterOutput.o: UserParameterOutput.h UserParameters.h

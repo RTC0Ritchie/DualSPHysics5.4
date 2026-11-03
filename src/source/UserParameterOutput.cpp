@@ -56,7 +56,7 @@ void UserParameterOutput::SaveFiles(
 
   // Read a symmetric tensor component.
   const auto Component=[&](
-    const tmatrix3f& tensor,
+    const auto& tensor,
     const std::string& field)->double
   {
     if(field=="xx")return tensor.a11;
@@ -119,7 +119,7 @@ void UserParameterOutput::SaveFiles(
         "Strain_"+field,n);
 
       for(unsigned p=0;p<n;p++){
-        values[p]=Component(particles[p].Strain,field);
+        values[p]=(particles[p].PreciseTensors? Component(particles[p].Strain64,field):Component(particles[p].Strain,field));
       }
     }
 
@@ -129,7 +129,7 @@ void UserParameterOutput::SaveFiles(
         "Stress_"+field,n);
 
       for(unsigned p=0;p<n;p++){
-        values[p]=Component(particles[p].Stress,field);
+        values[p]=(particles[p].PreciseTensors? Component(particles[p].Stress64,field):Component(particles[p].Stress,field));
       }
     }
 
@@ -145,7 +145,10 @@ void UserParameterOutput::SaveFiles(
         "Stress_"+field,n);
 
       for(unsigned p=0;p<n;p++){
-        const tmatrix3f& s=particles[p].Stress;
+        const auto& particle=particles[p];
+        const auto& f=particle.Stress;
+        const tmatrix3d s=particle.PreciseTensors?particle.Stress64:
+          TMatrix3d(f.a11,f.a12,f.a13,f.a21,f.a22,f.a23,f.a31,f.a32,f.a33);
 
         const double xx=s.a11;
         const double yy=s.a22;

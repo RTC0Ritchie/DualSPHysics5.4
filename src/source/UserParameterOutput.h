@@ -29,6 +29,9 @@ public:
 
     tmatrix3f Strain={};
     tmatrix3f Stress={};
+    // Optional high-precision output tensors; CPU callers retain their existing path.
+    bool PreciseTensors=false;
+    tmatrix3d Strain64={},Stress64={};
   };
 
   UserParameterOutput();

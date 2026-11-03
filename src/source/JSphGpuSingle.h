@@ -77,6 +77,8 @@ protected:
   void ComputePips(bool run);
 
   void SaveData();
+  void SaveUserOutput(unsigned npsave,const unsigned* idp,const tdouble3* pos
+    ,const tfloat3* vel,const float* rho);
   void SaveExtraData();
   void FinishRun(bool stop);
 
