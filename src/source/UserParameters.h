@@ -20,6 +20,13 @@ namespace FlexBoundaryCorrection{
 class UserParameters : protected JObject
 {
 public:
+
+  // GPU elastic precision policy requested by the user.
+  // 0: original float-oriented policy.
+  // 1: selective double precision.
+  // 2: extended double precision.
+  int GPUFlexPrecisionMode;
+
   struct StPoint2d{
     double x=0.0;
     double z=0.0;

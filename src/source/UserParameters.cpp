@@ -6,6 +6,7 @@
 #include "UserFlexBoundaryCorrection.h"
 #include "UserIceBottomProtection.h"
 #include "UserIceTopProtection.h"
+#include "UserGParameters.h"
 
 #include <algorithm>
 #include <set>
@@ -21,6 +22,8 @@ UserParameters::UserParameters(){
 
 
 void UserParameters::Reset(){
+  GPUFlexPrecisionMode=0;
+
   FlexBoundContactMode=1;
 
   SurfaceType=StSurface2d{};
@@ -196,6 +199,20 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
         xml->GetAttributeStr(ele,"comment",true),
         xml->GetAttributeStr(ele,"units_comment",true));
   }
+
+  // GPU elastic precision policy.
+  const double gpuflexprecisionmode=
+      parameters.GetValueDouble("GPUFlexPrecisionMode",true,0.0);
+
+  if(gpuflexprecisionmode!=0.0
+      && gpuflexprecisionmode!=1.0
+      && gpuflexprecisionmode!=2.0)
+  {
+    Run_Exceptioon(
+        "User.GPUFlexPrecisionMode must be 0, 1 or 2.");
+  }
+
+  GPUFlexPrecisionMode=int(gpuflexprecisionmode);
 
   // ------------------------------------------------------------
   // Selective no-penetration.
@@ -1428,6 +1445,19 @@ void UserParameters::VisuConfig(JLog2* log)const{
   if(!log)return;
 
   log->Printf("User configuration:");
+
+  log->Printf(
+      "  GPUFlexPrecisionMode: %d (requested GPU elastic policy)",
+      GPUFlexPrecisionMode);
+
+  log->Printf(
+      "    Precision interface only: effective GPU elastic policy is 0.");
+
+  if(GPUFlexPrecisionMode!=0){
+    log->Printf(
+        "    Policies 1 and 2 are reserved and not implemented yet.");
+  }
+
   log->Printf("  FlexBoundContactMode: %d",
               FlexBoundContactMode);
 
@@ -1746,4 +1776,18 @@ void UserParameters::ConfigFlexRestartMode(
         IsFlexRestart() ? "true" : "false",
         source);
   }
+}
+
+UserGParameters::StFlexConfig UserGParameters::ReadFlex(
+    const UserParameters* user)
+{
+  StFlexConfig config;
+
+  if(user){
+    config.PrecisionMode=
+        static_cast<TpFlexPrecisionMode>(
+            user->GPUFlexPrecisionMode);
+  }
+
+  return config;
 }

@@ -636,7 +636,7 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
       ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
       ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
       ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-      ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL);
+      ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get());
     cusph::Interaction_ForcesFlexStruc(parmsfs);
     Timersg->TmStop(TMG_SuFlexStruc,false);
   }
@@ -1227,7 +1227,7 @@ void JSphGpuSingle::FlexStrucInit(){
     ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
     ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
     ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL);
+    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get());
   //-Calculate kernel correction and update geometry.
   cusph::CalcFlexStrucKerCorr(parmsfs);
   cusph::UpdateFlexStrucGeometry(parmsfs);
@@ -1245,7 +1245,7 @@ void JSphGpuSingle::UpdateFlexStrucGeometry(){
     ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
     ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
     ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL);
+    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get());
   cusph::UpdateFlexStrucGeometry(parmsfs);
   Timersg->TmStop(TMG_SuFlexStruc,false);
 }

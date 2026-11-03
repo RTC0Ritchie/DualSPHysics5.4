@@ -217,6 +217,12 @@ JSphGpu_ker.o: JSphGpu_ker.cu
 UserGInteractionForcesFlexStruc.o: UserGInteractionForcesFlexStruc.cu UserGInteractionForcesFlexStruc.h
 	$(NCC) $(NCCFLAGS) UserGInteractionForcesFlexStruc.cu
 
+UserParameters.o: UserParameters.h UserGParameters.h
+
+JSphGpuSingle.o JSphGpu_ker.o: JSphGpu_ker.h
+
+UserGInteractionForcesFlexStruc.o: JSphGpu_ker.h UserGParameters.h
+
 JSphGpuSimple_ker.o: JSphGpuSimple_ker.cu
 	$(NCC) $(NCCFLAGS) JSphGpuSimple_ker.cu
 

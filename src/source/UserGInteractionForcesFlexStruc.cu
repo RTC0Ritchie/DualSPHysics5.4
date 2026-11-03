@@ -17,6 +17,7 @@
 */
 
 #include "UserGInteractionForcesFlexStruc.h"
+#include "UserGParameters.h"
 #include "JSphGpu_ker.h"
 #include "Functions.h"
 #include "FunctionsCuda.h"
@@ -416,6 +417,12 @@ template<TpKernel tker> void UserGInteractionForcesFlexStruc::Interaction_Forces
 /// Fuerzas de interacción para las partículas de estructura flexible.
 //==============================================================================
 void UserGInteractionForcesFlexStruc::Interaction_ForcesFlexStruc(const StInterParmsFlexStrucg& tfs){
+  const UserGParameters::StFlexConfig usercfg=
+      UserGParameters::ReadFlex(tfs.user);
+
+  // Reserved for the precision-policy dispatch.
+  // All requested modes currently execute the existing implementation.
+  (void)usercfg;
 #ifdef FAST_COMPILATION
   if(tfs.tkernel!=KERNEL_Wendland)throw "Extra kernels are disabled for FastCompilation...";
   Interaction_ForcesFlexStruc_gt0<KERNEL_Wendland> (tfs);
@@ -441,6 +448,12 @@ template<TpKernel tker> void UserGInteractionForcesFlexStruc::CalcFlexStrucKerCo
 }
 
 void UserGInteractionForcesFlexStruc::CalcFlexStrucKerCorr(const StInterParmsFlexStrucg& tfs){
+  const UserGParameters::StFlexConfig usercfg=
+      UserGParameters::ReadFlex(tfs.user);
+
+  // Reserved for the precision-policy dispatch.
+  // All requested modes currently execute the existing implementation.
+  (void)usercfg;
 #ifdef FAST_COMPILATION
   if(tfs.tkernel!=KERNEL_Wendland)throw "Extra kernels are disabled for FastCompilation...";
   CalcFlexStrucKerCorr_gt0<KERNEL_Wendland> (tfs);
@@ -466,6 +479,12 @@ template<TpKernel tker> void UserGInteractionForcesFlexStruc::CalcFlexStrucDefGr
 }
 
 void UserGInteractionForcesFlexStruc::UpdateFlexStrucGeometry(const StInterParmsFlexStrucg& tfs){
+  const UserGParameters::StFlexConfig usercfg=
+      UserGParameters::ReadFlex(tfs.user);
+
+  // Reserved for the precision-policy dispatch.
+  // All requested modes currently execute the existing implementation.
+  (void)usercfg;
 #ifdef FAST_COMPILATION
   if(tfs.tkernel!=KERNEL_Wendland)throw "Extra kernels are disabled for FastCompilation...";
   CalcFlexStrucDefGrad_ct0<KERNEL_Wendland> (tfs);

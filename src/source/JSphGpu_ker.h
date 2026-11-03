@@ -34,6 +34,7 @@
 #include "JSphVRes.h"       //<vs_vrres
 
 class JLog2;
+class UserParameters;
 
 #define SPHBSIZE 256
 
@@ -108,6 +109,9 @@ typedef struct StrInterParmsg{
   bool          divclean;        //<vs_divclean> 
   //-Other values and objects.
   cudaStream_t stm;
+
+  // Host-side user configuration; never dereference on the GPU.
+  const UserParameters* user;
   StKerInfo* kerinfo;
 
   ///Structure constructor.
@@ -249,7 +253,7 @@ typedef struct StrInterParmsFlexStrucg{
       ,const unsigned* numpairs,const unsigned* const* pairidx
       ,const tmatrix3f* kercorr,const float3* boundnor0
       ,tmatrix3f* defgrad,float3* boundnor,float* flexstrucdt,float3* ace
-      ,cudaStream_t stm)
+      ,cudaStream_t stm,const UserParameters* user)
   {
     //-Configuration options.
     this->simulate2d=simulate2d; this->tkernel=tkernel; this->tvisco=tvisco; this->mdbc2=mdbc2;
@@ -269,6 +273,7 @@ typedef struct StrInterParmsFlexStrucg{
     this->defgrad=defgrad; this->boundnor=boundnor; this->flexstrucdt=flexstrucdt; this->ace=ace;
     //-Other values and objects.
     this->stm=stm;
+    this->user=user;
   }
 }StInterParmsFlexStrucg;
 //<vs_flexstruc_end>
