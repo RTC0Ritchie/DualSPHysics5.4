@@ -5,6 +5,7 @@
 #include "Functions.h"
 #include "UserFlexBoundaryCorrection.h"
 #include "UserIceBottomProtection.h"
+#include "UserIceTopProtection.h"
 
 #include <algorithm>
 #include <set>
@@ -39,6 +40,7 @@ void UserParameters::Reset(){
   NoPenetrationMkBound=-1;
 
   IceTopNoPenetrationEnabled=false;
+  IceRightNoPen::Reset(this);
   IceBottomNoPen::Reset(this);
 
   Mdbc2AdaptiveEnabled=false;
@@ -255,7 +257,7 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     const TiXmlElement* ele=topnopen->second;
 
     xml->CheckAttributeNames(
-        ele,"key value active comment units_comment");
+        ele,"key value rightside active comment units_comment");
 
     if(ele->FirstChildElement())
       Run_Exceptioon(
@@ -267,7 +269,11 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
       Run_Exceptioon(
           "User.IceTopNoPenetration value must be 0 or 1.");
 
+    const int rightside=xml->GetAttributeInt(ele,"rightside",true,0);
+    if(rightside!=0 && rightside!=1)
+      Run_Exceptioon("User.IceTopNoPenetration rightside must be 0 or 1.");
     IceTopNoPenetrationEnabled=(enabled==1);
+    IceRightNoPen::Get(this).Enabled=(enabled==1 && rightside==1);
   }
 
   const auto bottomnopen=nodes.find("IceBottomNoPenetration");

@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <vector>
 #include <limits>
+#include <map>
 
 namespace IceTopCleanup {
 
@@ -292,5 +293,101 @@ inline Result Correct(
 }
 
 } // namespace IceTopNoPen
+
+
+// Optional ocean-side constraint. State is external to the core CPU classes.
+namespace IceRightNoPen {
+struct State {
+  bool Enabled=false;
+  std::vector<unsigned> Ids;
+  std::vector<IceTopNoPen::Point> Old;
+};
+inline State& Get(const void* owner){
+  static std::map<const void*,State> states;
+  return states[owner];
+}
+inline void Reset(const void* owner){ Get(owner)=State{}; }
+inline void Init(State& s,const std::vector<IceTopCleanup::Point>& ref,double dp){
+  s.Ids.clear(); s.Old.clear();
+  if(!s.Enabled)return;
+  if(ref.empty())throw std::runtime_error("Ice right side: empty reference.");
+  double xmax=ref.front().x;
+  for(const auto& p:ref)xmax=std::max(xmax,p.x);
+  std::vector<IceTopCleanup::Point> edge;
+  for(const auto& p:ref)if(xmax-p.x<=dp*1e-4)edge.push_back(p);
+  std::sort(edge.begin(),edge.end(),[](const IceTopCleanup::Point& a,
+      const IceTopCleanup::Point& b){return a.z>b.z;});
+  if(edge.size()<2)throw std::runtime_error(
+      "Ice right side needs at least two particles in the rightmost column; reduce corner radius.");
+  for(size_t i=0;i<edge.size();i++){
+    if(i && (edge[i-1].z-edge[i].z<=dp*1e-6
+        || edge[i-1].z-edge[i].z>2*dp))
+      throw std::runtime_error("Ice right side: disconnected reference column.");
+    s.Ids.push_back(edge[i].id);
+  }
+}
+template<class Position,class Velocity>
+inline std::vector<IceTopNoPen::Point> Profile(const State& s,
+    unsigned nfixed,unsigned nbound,unsigned npb,const unsigned* ridp,
+    const unsigned* ids,const Position* pos,const Velocity* vel,double dp){
+  std::vector<IceTopNoPen::Point> side;
+  for(unsigned id:s.Ids){
+    if(!ridp || id<nfixed || id>=nbound)
+      throw std::runtime_error("Ice right side: invalid material ID.");
+    const unsigned p=ridp[id-nfixed];
+    if(p>=npb || ids[p]!=id)
+      throw std::runtime_error("Ice right side: particle lookup failed.");
+    const auto q=pos[p];const auto v=vel[p];
+    if(!std::isfinite(q.x)||!std::isfinite(q.z)
+        || (!side.empty() && side.back().z-q.z<=dp*1e-6))
+      throw std::runtime_error("Ice right side folds or is not decreasing in z.");
+    side.push_back({q.x,q.z,v.x,v.z});
+  }
+  return side;
+}
+inline IceTopNoPen::Point Rotate(const IceTopNoPen::Point& p){
+  return {-p.z,p.x,-p.vz,p.vx};
+}
+inline std::vector<IceTopNoPen::Point> Rotate(
+    const std::vector<IceTopNoPen::Point>& p){
+  std::vector<IceTopNoPen::Point> q;q.reserve(p.size());
+  for(const auto& a:p)q.push_back(Rotate(a));
+  return q;
+}
+// The exposed convex top/right vertex gets a quarter-circle offset cap.
+// No cap is added at the lower endpoint: underside water is not constrained.
+inline IceTopNoPen::Result Corner(
+    const std::vector<IceTopNoPen::Point>& oldtop,
+    const std::vector<IceTopNoPen::Point>& top,
+    const std::vector<IceTopNoPen::Point>& oldside,
+    const std::vector<IceTopNoPen::Point>& side,
+    const IceTopNoPen::Point& oldp,const IceTopNoPen::Point& p,double dp){
+  IceTopNoPen::Result c;
+  if(top.size()<2 || side.size()<2 || oldtop.size()!=top.size()
+      || oldside.size()!=side.size())return c;
+  const auto& a=top.back();const auto& oa=oldtop.back();
+  const auto& b=top[top.size()-2];const auto& d=side[1];
+  const double tx=a.x-b.x,tz=a.z-b.z,sx=d.x-a.x,sz=d.z-a.z;
+  const double ex=p.x-a.x,ez=p.z-a.z;
+  if(tx*sz-tz*sx>=0 || ex*tx+ez*tz<0 || ex*sx+ez*sz>0)return c;
+  const double r=.5*dp,tol=1e-6*dp,dist=std::hypot(ex,ez);
+  if(dist>=r || dist<=tol)return c;
+  const double ox=oldp.x-oa.x,oz=oldp.z-oa.z;
+  const auto& ob=oldtop[oldtop.size()-2];const auto& od=oldside[1];
+  if(ox*(oa.x-ob.x)+oz*(oa.z-ob.z)<-tol*std::hypot(oa.x-ob.x,oa.z-ob.z)
+      || ox*(od.x-oa.x)+oz*(od.z-oa.z)>tol*std::hypot(od.x-oa.x,od.z-oa.z)
+      || std::hypot(ox,oz)<r-tol)return c;
+  const double nx=ex/dist,nz=ez/dist;
+  const double vn=(p.vx-a.vx)*nx+(p.vz-a.vz)*nz;
+  c.hit=true;c.dx=(r-dist+tol)*nx;c.dz=(r-dist+tol)*nz;
+  if(vn<0){c.dvx=-vn*nx;c.dvz=-vn*nz;}
+  return c;
+}
+inline IceTopNoPen::Result Combine(IceTopNoPen::Result a,
+    const IceTopNoPen::Result& b){
+  if(b.hit && (!a.hit || b.dx*b.dx+b.dz*b.dz<a.dx*a.dx+a.dz*a.dz))return b;
+  return a;
+}
+} // namespace IceRightNoPen
 
 #endif

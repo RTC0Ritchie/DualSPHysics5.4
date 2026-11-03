@@ -2009,6 +2009,10 @@ void JSphCpuSingle::InitIceTopNoPenetration(){
           Run_Exceptioon("Ice protection: inlet buffer lies inside ice; move the inlet away from ice.");
     }
     const auto top=IceTopCleanup::ReferenceTop(ref,Dp);
+    auto& right=IceRightNoPen::Get(User.get());
+    IceRightNoPen::Init(right,ref,Dp);
+    if(right.Enabled && right.Ids.front()!=top.back().id)
+      Run_Exceptioon("Ice right side does not join the material top.");
 
     for(const auto& p:top)
       IceTopNoPenIds.push_back(p.id);
@@ -2028,7 +2032,7 @@ void JSphCpuSingle::InitIceTopNoPenetration(){
   if(User->IceTopNoPenetrationEnabled)
     Log->Printf(
         "IceTopNoPenetration: %u material top nodes; finite top only; "
-        "side/bottom excluded; normal velocity clipping, no friction.",
+        "optional right side; bottom excluded; normal velocity clipping, no friction.",
         unsigned(IceTopNoPenIds.size()));
 }
 
@@ -2080,6 +2084,11 @@ void JSphCpuSingle::CaptureIceTopNoPenetration(bool predictor){
 
   if(predictor && User->IceTopNoPenetrationEnabled)
     IceTopNoPenOldTop=GetIceTopNoPenProfile();
+
+  auto& right=IceRightNoPen::Get(User.get());
+  if(predictor && right.Enabled)
+    right.Old=IceRightNoPen::Profile(right,CaseNfixed,CaseNbound,Npb,
+        RidpMot,Idp_c->cptr(),Pos_c->cptr(),Velrho_c->cptr(),Dp);
 
   if(predictor && bottom.Enabled){
     bottom.Old=IceBottomNoPen::Profile(
@@ -2164,6 +2173,14 @@ void JSphCpuSingle::ApplyIceTopNoPenetration(bool predictor){
   if(!User->IceTopNoPenetrationEnabled)return;
 
   const auto top=GetIceTopNoPenProfile();
+  const auto& right=IceRightNoPen::Get(User.get());
+  std::vector<IceTopNoPen::Point> side,rotold,rotnow;
+  if(right.Enabled){
+    side=IceRightNoPen::Profile(right,CaseNfixed,CaseNbound,Npb,
+        RidpMot,Idp_c->cptr(),Pos_c->cptr(),Velrho_c->cptr(),Dp);
+    rotold=IceRightNoPen::Rotate(right.Old);
+    rotnow=IceRightNoPen::Rotate(side);
+  }
 
   auto* pos=Pos_c->ptr();
   auto* vr=Velrho_c->ptr();
@@ -2180,15 +2197,29 @@ void JSphCpuSingle::ApplyIceTopNoPenetration(bool predictor){
     const tdouble3 q=pos[p];
     const tdouble3 old=IceTopNoPenOldFluid[p-Npb];
 
-    const auto c=IceTopNoPen::Correct(
+    auto c=IceTopNoPen::Correct(
         IceTopNoPenOldTop,top,
         {old.x,old.z,0,0},
         {q.x,q.z,vr[p].x,vr[p].z},
         Dp);
 
+    if(right.Enabled){
+      const IceTopNoPen::Point op{old.x,old.z,0,0};
+      const IceTopNoPen::Point np{q.x,q.z,vr[p].x,vr[p].z};
+      auto cr=IceTopNoPen::Correct(rotold,rotnow,
+          IceRightNoPen::Rotate(op),IceRightNoPen::Rotate(np),Dp);
+      if(cr.hit){
+        const double dx=cr.dx,dvx=cr.dvx;
+        cr.dx=cr.dz;cr.dz=-dx;cr.dvx=cr.dvz;cr.dvz=-dvx;
+      }
+      c=IceRightNoPen::Combine(c,cr);
+      c=IceRightNoPen::Combine(c,IceRightNoPen::Corner(
+          IceTopNoPenOldTop,top,right.Old,side,op,np,Dp));
+    }
+
     if(!c.hit)continue;
     if(CODE_IsFluidInout(code[p]))
-      Run_Exceptioon("IceTopNoPenetration: inlet buffer crosses the ice-top constraint; move the inlet away from ice.");
+      Run_Exceptioon("IceTopNoPenetration: inlet buffer crosses the ice-top/right constraint; move the inlet away from ice.");
 
     UpdatePos(
         q,c.dx,0,c.dz,false,p,
