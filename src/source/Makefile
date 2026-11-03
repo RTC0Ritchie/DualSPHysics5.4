@@ -146,7 +146,7 @@ OBCOMMONGPU=FunctionsCuda.o JObjectGpu.o
 OBSPHGPU=JArraysGpu.o JDebugSphGpu.o JCellDivGpu.o JSphGpu.o JDsGpuInfo.o 
 OBSPHSINGLEGPU=JCellDivGpuSingle.o JSphGpuSingle.o
 OBCUDA=JCellDivGpu_ker.o JCellDivGpuSingle_ker.o JDsPips_ker.o JDsGauge_ker.o JReduSum_ker.o JSphShifting_ker.o
-OBCUDA:=$(OBCUDA) JDsAccInput_ker.o JSphGpu_ker.o JSphGpuSimple_ker.o JWaveOrder2_ker.o 
+OBCUDA:=$(OBCUDA) JDsAccInput_ker.o JSphGpu_ker.o UserGInteractionForcesFlexStruc.o JSphGpuSimple_ker.o JWaveOrder2_ker.o 
 OBWAVERZ=JMLPistonsGpu.o JRelaxZonesGpu.o
 OBWAVERZCUDA=JRelaxZone_ker.o
 OBCHRONO=JChronoGeoObj.o JChronoObjects.o
@@ -213,6 +213,9 @@ $(EXECS_DIRECTORY)/$(EXECNAME):  $(OBJECTS)
 
 JSphGpu_ker.o: JSphGpu_ker.cu
 	$(NCC) $(NCCFLAGS) JSphGpu_ker.cu
+
+UserGInteractionForcesFlexStruc.o: UserGInteractionForcesFlexStruc.cu UserGInteractionForcesFlexStruc.h
+	$(NCC) $(NCCFLAGS) UserGInteractionForcesFlexStruc.cu
 
 JSphGpuSimple_ker.o: JSphGpuSimple_ker.cu
 	$(NCC) $(NCCFLAGS) JSphGpuSimple_ker.cu
