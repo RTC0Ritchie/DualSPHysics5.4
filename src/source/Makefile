@@ -158,7 +158,7 @@ OBMESH=JMeshData.o JMeshTDatas.o JMeshTDatasLoad.o JMeshTDatasSave.o JMeshTDatas
 OBVRES=JSphVRes.o JSphVResZone.o JSphCpuSingle_VRes.o JSphGpuSingle_VRes.o JSphCpu_VRes.o JCaseVRes.o JVResDataLimits.o JDsVresData.o JBoxDef.o
 OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuation.o UserFlexRestartInitialization.o UserFlexBoundaryCorrection.o UserFlexKinematics.o UserFlexDissipation.o
 
-OBCUDA:=$(OBCUDA) UserGParameterOutput.o UserGFlexContinuation.o
+OBCUDA:=$(OBCUDA) UserGParameterOutput.o UserGFlexContinuation.o UserGFlexRestartInitialization.o
 
 OBJECTS=$(OBJXML) $(OBJSPHMOTION) $(OBCOMMON) $(OBCOMMONDSPH) $(OBSPH) $(OBSPHSINGLE)
 OBJECTS:=$(OBJECTS) $(OBCOMMONGPU) $(OBSPHGPU) $(OBSPHSINGLEGPU) $(OBCUDA)
@@ -275,3 +275,5 @@ JCellDivGpuSingle.o: JCellDivGpuSingle.h JCellDivGpu_ker.h
 JCellDivGpu_ker.o: JCellDivGpu_ker.h
 
 UserGFlexContinuation.o: UserGFlexContinuation.cpp JSphGpuSingle.h UserParameters.h UserGFlexPrecision.h UserGParameters.h
+
+UserGFlexRestartInitialization.o: UserGFlexRestartInitialization.cpp JSphGpuSingle.h UserParameters.h UserGFlexPrecision.h UserGParameters.h

@@ -159,10 +159,13 @@ public:
       float massp2=CTE.massf;
       if(mdbc2>=MDBC2_Std){
         if(boundmode[p1]==BMODE_MDBC2OFF)massp2=0;
-        const float3 tangentvelp1=tangenvel[p1];
-        velrhop1.x=tangentvelp1.x;
-        velrhop1.y=tangentvelp1.y;
-        velrhop1.z=tangentvelp1.z;
+        // Match CPU: a DBC fallback has no reconstructed tangent velocity.
+        if(boundmode[p1]!=BMODE_DBC){
+          const float3 tangentvelp1=tangenvel[p1];
+          velrhop1.x=tangentvelp1.x;
+          velrhop1.y=tangentvelp1.y;
+          velrhop1.z=tangentvelp1.z;
+        }
       }
 
       //-Obtains neighborhood search limits.
@@ -764,10 +767,13 @@ public:
       float massp2=CTE.massf;
       if(mdbc2>=MDBC2_Std){
         if(boundmode[p1]==BMODE_MDBC2OFF)massp2=0;
-        const float3 tangentvelp1=tangenvel[p1];
-        velrhop1.x=tangentvelp1.x;
-        velrhop1.y=tangentvelp1.y;
-        velrhop1.z=tangentvelp1.z;
+        // Match CPU: a DBC fallback has no reconstructed tangent velocity.
+        if(boundmode[p1]!=BMODE_DBC){
+          const float3 tangentvelp1=tangenvel[p1];
+          velrhop1.x=tangentvelp1.x;
+          velrhop1.y=tangentvelp1.y;
+          velrhop1.z=tangentvelp1.z;
+        }
       }
 
       //-Obtains neighborhood search limits.

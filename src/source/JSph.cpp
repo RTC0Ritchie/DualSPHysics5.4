@@ -1434,11 +1434,8 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
         "without periodic boundaries.");
   }
 
-  if(User->FlexRestartRequested && !Cpu){
-    Run_Exceptioon(
-        "FlexRestart: User restart sources "
-        "are currently supported on CPU only.");
-  }
+  // User.restart sources are validated by each backend's initialization module.
+  // GPU supports the prescribed fields; unsupported sources/corrections still fail explicitly.
   if(FlexStruc){
     //if(PartBegin)   Run_Exceptioon("Simulation restart not allowed when flexible structures are used.");
     if(PeriActive)  Run_Exceptioon("Flexible structures are not allowed with periodic conditions.");

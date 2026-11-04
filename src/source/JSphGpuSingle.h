@@ -89,6 +89,10 @@ protected:
   void SaveFlexMaterialDataOnce();
   void LoadFlexMaterialData(const std::string& storage);
   void InitFlexRestartState();
+  void InitFlexRestartFromPrescribed();
+  void InitFlexRestartFromModelTransfer();
+  void InitFlexRestartUndeformed();
+  void InitFlexRestartHydrostatic();
   unsigned InitFlexRestartReferenceAndCorrections(unsigned oldPairs);
   void LoadFlexDirectContinuationPairData();
   void SaveFlexPairDataOnce();
