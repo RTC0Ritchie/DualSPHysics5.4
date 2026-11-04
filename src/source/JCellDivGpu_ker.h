@@ -48,6 +48,9 @@ inline unsigned LimitsPosSize(unsigned ndata){
 }
 
 
+void LimitsFlexCell(unsigned np,unsigned pini,unsigned cellcode,const unsigned* dcell
+  ,const typecode* code,unsigned* aux,tuint3& celmin,tuint3& celmax);
+
 void LimitsCell(unsigned np,unsigned pini,unsigned cellcode,const unsigned* dcell
   ,const typecode* code,unsigned* aux,tuint3& celmin,tuint3& celmax);
 void CalcBeginEndCell(bool full,unsigned np,unsigned npb,unsigned sizebegcell

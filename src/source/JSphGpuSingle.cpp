@@ -227,6 +227,7 @@ void JSphGpuSingle::ConfigDomain(){
   CellDivSingle=new JCellDivGpuSingle(Stable,FtCount!=0,PeriActive,KernelSize2,PosCellSize
     ,CellDomFixed,CellMode,Scell,Map_PosMin,Map_PosMax,Map_Cells,CaseNbound,CaseNfixed,CaseNpb,DirOut);
   CellDivSingle->DefineDomain(DomCellCode,DomCelIni,DomCelFin,DomPosMin,DomPosMax);
+  CellDivSingle->SetFlexDomainEnabled(FlexStruc!=nullptr);
   ConfigCellDiv((JCellDivGpu*)CellDivSingle);
 
   ConfigBlockSizes(false,PeriActive!=0);
@@ -642,7 +643,7 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
       ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
       ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
       ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-      ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr());
+      ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr(),Dp);
     cusph::Interaction_ForcesFlexStruc(parmsfs);
     Timersg->TmStop(TMG_SuFlexStruc,false);
   }
@@ -980,7 +981,11 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   InitRunGpu();
   RunFirstGaugeSystem(TimeStep);
   if(InOut)InOutInit(TimeStepIni);
-  if(FlexStruc)FlexStrucInit(); //<vs_flexstruc>
+  if(FlexStruc){
+    FlexStrucInit();
+    BoundChanged=true;
+    RunCellDivide(true); // Rebuild boundary cells after elastic codes are assigned.
+  }
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu(),GetAllocMemoryGpu());
   UpdateMaxValues();
@@ -1238,7 +1243,7 @@ void JSphGpuSingle::FlexStrucInit(){
     ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
     ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
     ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr());
+    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr(),Dp);
   //-Calculate kernel correction and update geometry.
   cusph::CalcFlexStrucKerCorr(parmsfs);
   cusph::UpdateFlexStrucGeometry(parmsfs);
@@ -1256,7 +1261,7 @@ void JSphGpuSingle::UpdateFlexStrucGeometry(){
     ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()
     ,PosCell_g->cptr(),Velrho_g->cptr(),Code_g->cptr()
     ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
-    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr());
+    ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr(),Dp);
   cusph::UpdateFlexStrucGeometry(parmsfs);
   Timersg->TmStop(TMG_SuFlexStruc,false);
 }

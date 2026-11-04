@@ -436,7 +436,7 @@ void LimitsCellRedu(unsigned cellcode,unsigned nblocks,unsigned* aux
 /// En results[] cada bloque graba cxmin,cymin,czmin,cxmax,cymax,czmax codificando
 /// los valores como celdas en 2 unsigned y agrupando por bloque.
 //------------------------------------------------------------------------------
-template <unsigned int blockSize> __global__ void KerLimitsCell(unsigned n
+template <unsigned int blockSize,bool flexonly=false> __global__ void KerLimitsCell(unsigned n
   ,unsigned pini,unsigned cellcode,const unsigned* dcell,const typecode* code
   ,unsigned* results)
 {
@@ -455,7 +455,7 @@ template <unsigned int blockSize> __global__ void KerLimitsCell(unsigned n
     const unsigned cx=DCEL_Cellx(cellcode,rcell);
     const unsigned cy=DCEL_Celly(cellcode,rcell);
     const unsigned cz=DCEL_Cellz(cellcode,rcell);
-    if(CODE_GetSpecialValue(code[pp])<CODE_OUTIGNORE){ //-Particle not excluded | Particula no excluida.
+    if(CODE_GetSpecialValue(code[pp])<CODE_OUTIGNORE && (!flexonly || CODE_IsFlexStrucFlex(code[pp]))){ //-Particle not excluded | Particula no excluida.
       scx1[tid]=cx; scy1[tid]=cy; scz1[tid]=cz;
       scx2[tid]=cx; scy2[tid]=cy; scz2[tid]=cz;
     }
@@ -486,6 +486,16 @@ template <unsigned int blockSize> __global__ void KerLimitsCell(unsigned n
 /// En results[] cada bloque graba cxmin,cymin,czmin,cxmax,cymax,czmax codificando
 /// los valores como celdas en 2 unsigned y agrupando por bloque.
 //==============================================================================
+void LimitsFlexCell(unsigned np,unsigned pini,unsigned cellcode,const unsigned* dcell
+  ,const typecode* code,unsigned* aux,tuint3& celmin,tuint3& celmax)
+{
+  if(!np){ celmin=TUint3(UINT_MAX); celmax=TUint3(0); return; }
+  const dim3 grid=GetSimpleGridSize(np,DIVBSIZE);
+  KerLimitsCell<DIVBSIZE,true><<<grid,DIVBSIZE,DIVBSIZE*sizeof(unsigned)*6>>>
+    (np,pini,cellcode,dcell,code,aux);
+  LimitsCellRedu(cellcode,grid.x*grid.y,aux,celmin,celmax);
+}
+
 void LimitsCell(unsigned np,unsigned pini,unsigned cellcode,const unsigned* dcell
   ,const typecode* code,unsigned* aux,tuint3& celmin,tuint3& celmax)
 {

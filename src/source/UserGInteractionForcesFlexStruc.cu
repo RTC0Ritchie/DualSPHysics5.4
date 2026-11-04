@@ -19,6 +19,7 @@
 #include "UserGInteractionForcesFlexStruc.h"
 #include "UserGParameters.h"
 #include "UserGFlexTypes.h"
+#include "UserGFlexContact.h"
 #include "UserGFlexCte.h"
 #include "JSphGpu_ker.h"
 #include "Functions.h"
@@ -94,6 +95,7 @@ void UserGInteractionForcesFlexStruc::UpdateFlexStrucGeometry(const StInterParms
 
 void UserGInteractionForcesFlexStruc::Interaction_ForcesFlexStruc(const StInterParmsFlexStrucg& tfs){
   UserGFlexDispatch::Run<UserGFlexStage::Forces>(tfs);
+  UserGFlexContact::Run(tfs);
 }
 
 void UserGInteractionForcesFlexStruc::CteInteractionUp(const StCteInteraction* cte){

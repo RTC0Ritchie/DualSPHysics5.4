@@ -159,7 +159,7 @@ OBVRES=JSphVRes.o JSphVResZone.o JSphCpuSingle_VRes.o JSphGpuSingle_VRes.o JSphC
 OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuation.o UserFlexRestartInitialization.o UserFlexBoundaryCorrection.o UserFlexKinematics.o UserFlexDissipation.o
 
 OBSPHSINGLEGPU:=$(OBSPHSINGLEGPU) UserGParameterOutput.o
-OBCUDA:=$(OBCUDA) UserGParameterOutput_ker.o
+OBCUDA:=$(OBCUDA) UserGParameterOutput_ker.o UserGFlexContact.o
 
 OBJECTS=$(OBJXML) $(OBJSPHMOTION) $(OBCOMMON) $(OBCOMMONDSPH) $(OBSPH) $(OBSPHSINGLE)
 OBJECTS:=$(OBJECTS) $(OBCOMMONGPU) $(OBSPHGPU) $(OBSPHSINGLEGPU) $(OBCUDA)
@@ -280,3 +280,11 @@ UserGParameterOutput.o: UserGParameterOutput.cpp UserGParameterOutput.h UserPara
 UserGParameterOutput_ker.o: UserGParameterOutput_ker.cu UserGParameterOutput.h UserGFlexPrecision.h UserGFlexPrecisionState.h
 	$(NCC) $(NCCFLAGS) UserGParameterOutput_ker.cu
 UserParameterOutput.o: UserParameterOutput.h UserParameters.h
+
+# Isolated elastic contact: user parameter changes do not reach JSphGpu_ker.
+UserGFlexContact.o: UserGFlexContact.cu UserGFlexContact.h UserGFlexContact_iker.h UserGParameters.h UserGFlexTypes.h
+	$(NCC) $(NCCFLAGS) UserGFlexContact.cu
+UserGInteractionForcesFlexStruc.o: UserGFlexContact.h
+JCellDivGpuSingle.o: JCellDivGpuSingle.h JCellDivGpu_ker.h
+JSphGpuSingle.o: JCellDivGpuSingle.h
+JCellDivGpu_ker.o: JCellDivGpu_ker.h

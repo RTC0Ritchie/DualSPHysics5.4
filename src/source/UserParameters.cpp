@@ -1791,3 +1791,25 @@ UserGParameters::StFlexConfig UserGParameters::ReadFlex(
 
   return config;
 }
+
+UserGParameters::StContactConfig UserGParameters::ReadContact(const UserParameters* user){
+  StContactConfig c;
+  if(!user)return c;
+  c.Mode=user->FlexBoundContactMode;
+  c.KnMode=user->KnContactMode; c.Kn=user->KnContact;
+  c.DampingMode=user->unContactMode; c.Damping=user->unContact;
+  c.Linearity=user->KnContactLinearity;
+  c.Surface=(c.Mode==2? user->SurfaceType.value: 0);
+  if(c.Surface==1)c.WallZ=user->SurfaceType.WallZ;
+  if(c.Surface==2){
+    const auto& s=user->SurfaceType;
+    c.X1=s.point1.x; c.Z1=s.point1.z;
+    c.Slope=(s.point2.z-s.point1.z)/(s.point2.x-s.point1.x);
+    c.NormalMode=s.NormalDirectionMode;
+    if(c.NormalMode==2){
+      c.Nz=1.0/sqrt(1.0+c.Slope*c.Slope);
+      c.Nx=-c.Slope*c.Nz;
+    }
+  }
+  return c;
+}

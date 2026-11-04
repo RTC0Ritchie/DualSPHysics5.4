@@ -20,6 +20,7 @@
 
 #include "JCellDivGpuSingle.h"
 #include "JCellDivGpuSingle_ker.h"
+#include "JCellDivGpu_ker.h"
 #include "JDsTimersGpu.h"
 #include "Functions.h"
 #include <climits>
@@ -45,6 +46,19 @@ JCellDivGpuSingle::JCellDivGpuSingle(bool stable,bool floating,byte periactive
 /// Calcula limites del dominio en celdas ajustando al fluido (CellDomainMin/Max). 
 //==============================================================================
 void JCellDivGpuSingle::CalcCellDomain(const unsigned* dcellg,const typecode* codeg){
+  // Include free elastic particles in the active domain, even without fluid.
+  tuint3 flexmin=TUint3(UINT_MAX),flexmax=TUint3(0);
+  if(FlexDomainEnabled){
+    cudiv::LimitsFlexCell(Npb1,0,DomCellCode,dcellg,codeg,(unsigned*)AuxMem,flexmin,flexmax);
+    if(Npb2){
+      tuint3 cmin,cmax;
+      cudiv::LimitsFlexCell(Npb2,Npb1+Npf1,DomCellCode,dcellg,codeg,(unsigned*)AuxMem,cmin,cmax);
+      if(cmin.x<=cmax.x){
+        flexmin=MinValues(flexmin,cmin); flexmax=MaxValues(flexmax,cmax);
+      }
+    }
+    if(flexmin.x<=flexmax.x){ BoundLimitOk=false; BoundDivideOk=false; }
+  }
   //-Define maximum cell domain.
   if(CellDomFixed){
     CellDomainMin=TUint3(0,0,0);
@@ -64,6 +78,12 @@ void JCellDivGpuSingle::CalcCellDomain(const unsigned* dcellg,const typecode* co
     //-Calculate fluid domain | Calcula dominio del fluido.
     tuint3 celfmin,celfmax;
     CalcCellDomainFluid(Npf1,Npb1,Npf2,Npb1+Npf1+Npb2,dcellg,codeg,celfmin,celfmax);
+    if(flexmin.x<=flexmax.x){
+      if(celfmin.x<=celfmax.x && celfmin.y<=celfmax.y && celfmin.z<=celfmax.z){
+        celfmin=MinValues(celfmin,flexmin); celfmax=MaxValues(celfmax,flexmax);
+      }
+      else{ celfmin=flexmin; celfmax=flexmax; }
+    }
     //Log->Printf("----->CalcCellDomain> celfmin/max:%s",fun::Uint3RangeStr(celfmin,celfmax).c_str());
     //-Computes the domain adjusting to the boundary and the fluid (with KernelSize halo).
     //-Calcula dominio ajustando al contorno y al fluido (con halo de KernelSize). 

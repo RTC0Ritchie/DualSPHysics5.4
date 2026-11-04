@@ -42,6 +42,9 @@ struct StrInterParmsFlexStrucg{
   UserGFlexPrecision* precision; // Host-only owner.
   const double2* posxy;
   const double* posz;
+  double dp; // Preserve the CPU double spacing for analytic surface geometry.
+  // Optional device mass indexed by stable elastic index (future restart adapter).
+  const float* contactmass=nullptr;
 
   ///Structure constructor.
   StrInterParmsFlexStrucg(
@@ -57,7 +60,7 @@ struct StrInterParmsFlexStrucg{
       ,const tmatrix3f* kercorr,const float3* boundnor0
       ,tmatrix3f* defgrad,float3* boundnor,float* flexstrucdt,float3* ace
       ,cudaStream_t stm,const UserParameters* user
-      ,UserGFlexPrecision* precision,const double2* posxy,const double* posz)
+      ,UserGFlexPrecision* precision,const double2* posxy,const double* posz,double dp)
   {
     //-Configuration options.
     this->simulate2d=simulate2d; this->tkernel=tkernel; this->tvisco=tvisco; this->mdbc2=mdbc2;
@@ -78,6 +81,7 @@ struct StrInterParmsFlexStrucg{
     //-Other values and objects.
     this->stm=stm;
     this->user=user;
+    this->dp=dp;
     this->precision=precision; this->posxy=posxy; this->posz=posz;
   }
 };
