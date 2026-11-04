@@ -556,7 +556,9 @@ template<TpKernel tker,TpFtMode ftmode,TpVisco tvisco,TpDensity tdensity
   ,const float4* shiftvel,float3& presssym,float3& pressasym,tmatrix3f& lcorr,const float3 shiftp1 //<vs_advshift>
   ,const float* psiclean,float& psicleanr,const float psicleanp1)     //<vs_divclean>
 {
+  const float base_massp2=massp2;
   for(int p2=pini;p2<pfin;p2++){
+    massp2=base_massp2;
     const float4 pscellp2=poscell[p2];
     const float drx=pscellp1.x-pscellp2.x + CTE.poscellsize*(PSCEL_GetfX(pscellp1.w)-PSCEL_GetfX(pscellp2.w));
     const float dry=pscellp1.y-pscellp2.y + CTE.poscellsize*(PSCEL_GetfY(pscellp1.w)-PSCEL_GetfY(pscellp2.w));
