@@ -1,5 +1,7 @@
 #include "UserGInteractionForcesFlexStruc.h"
 #include "UserGFlexPrecision.h"
+#include "UserGFlexDissipation.h"
+#include "UserGMdbc.h"
 #include "UserGParameters.h"
 //HEAD_DSPH
 /*
@@ -66,6 +68,7 @@ JSphGpuSingle::JSphGpuSingle():JSphGpu(false){
   ClassName="JSphGpuSingle";
   CellDivSingle=NULL;
   FlexPrecision=new UserGFlexPrecision;
+  MdbcUser=new UserGMdbc;
 }
 
 //==============================================================================
@@ -73,6 +76,8 @@ JSphGpuSingle::JSphGpuSingle():JSphGpu(false){
 //==============================================================================
 JSphGpuSingle::~JSphGpuSingle(){
   DestructorActive=true;
+  delete MdbcUser;MdbcUser=nullptr;
+  delete FlexDissipation;FlexDissipation=nullptr;
   delete FlexPrecision; FlexPrecision=NULL;
   delete CellDivSingle; CellDivSingle=NULL;
 }
@@ -97,6 +102,8 @@ llong JSphGpuSingle::GetAllocMemoryGpu()const{
   //-Allocated in other objects.
   if(CellDivSingle)s+=CellDivSingle->GetAllocMemoryGpu();
   if(FlexPrecision)s+=FlexPrecision->GetAllocMemoryGpu();
+  if(FlexDissipation)s+=FlexDissipation->GetAllocMemoryGpu();
+  if(MdbcUser)s+=MdbcUser->GetAllocMemoryGpu();
   return(s);
 }
 
@@ -598,8 +605,9 @@ void JSphGpuSingle::ComputeUmbrellaRegion(){
 //==============================================================================
 void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
   float3* dengradcorr=NULL;
-
   Timersg->TmStart(TMG_CfForces,true);
+  const float3* noPenNormals=MdbcUser->NoPenNormals(User.get(),Np,Npb,Dp,
+    Idp_g->cptr(),Code_g->cptr(),AG_CPTR(BoundNor_g));
   const unsigned bsfluid=BlockSizes.forcesfluid;
   const unsigned bsbound=BlockSizes.forcesbound;
 
@@ -621,7 +629,7 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
     ,Posxy_g->cptr(),Posz_g->cptr(),PosCell_g->cptr()
     ,Velrho_g->cptr(),Idp_g->cptr(),Code_g->cptr()
     ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g),AG_CPTR(MotionVel_g)//<vs_m2dbc>
-    ,AG_CPTR(BoundNor_g),AG_PTR(NoPenShift_g) //<vs_m2dbcNP>
+    ,noPenNormals,AG_PTR(NoPenShift_g) //<vs_m2dbcNP>
     ,FtoMasspg,AG_CPTR(SpsTauRho2_g),dengradcorr
     ,ViscDt_g->ptr(),Ar_g->ptr(),Ace_g->ptr(),AG_PTR(Delta_g)
     ,AG_PTR(Sps2Strain_g)
@@ -647,6 +655,9 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
       ,AG_CPTR(BoundMode_g),AG_CPTR(TangenVel_g)
       ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr(),Dp);
     cusph::Interaction_ForcesFlexStruc(parmsfs);
+    if(FlexDissipation)FlexDissipation->Apply(CaseNflexstruc,Posxy_g->cptr(),Posz_g->cptr(),
+      Velrho_g->cptr(),Code_g->cptr(),FlexStrucRidpg,DefGradg,
+      unsigned(UserGParameters::ReadFlex(User.get()).PrecisionMode),FlexPrecision,Ace_g->ptr(),FlexStrucDtg);
     Timersg->TmStop(TMG_SuFlexStruc,false);
   }
   //<vs_flexstruc_end>
@@ -713,10 +724,13 @@ void JSphGpuSingle::MdbcBoundCorrection(TpInterStep interstep){
       BoundMode_g->Reserve();     //-BoundOnOff_g is freed in PosInteraction_Forces().
       BoundMode_g->CuMemset(0,n); //-BoundMode_g[]=0=BMODE_DBC
       TangenVel_g->Reserve();     //-TangenVel_g is freed in PosInteraction_Forces().
+      const float3* cloneace=MdbcUser->Acceleration(User.get(),Np,Npb,CaseNbound,
+        CaseNflexstruc,Nstep,Simulate2D,Gravity,Idp_g->cptr(),Code_g->cptr(),
+        BoundNor_g->cptr(),MotionAce_g->cptr());
       cusph::Interaction_Mdbc2Correction(TKernel,Simulate2D,SlipMode,n,CaseNbound
         ,Gravity,DivData,Map_PosMin,Posxy_g->cptr(),Posz_g->cptr()
         ,PosCell_g->cptr(),Code_g->cptr(),Idp_g->cptr(),BoundNor_g->cptr()
-        ,MotionVel_g->cptr(),MotionAce_g->cptr(),Velrho_g->ptr()
+        ,MotionVel_g->cptr(),cloneace,Velrho_g->ptr()
         ,BoundMode_g->ptr(),TangenVel_g->ptr());
     } //<vs_m2dbc_end>
     //else Run_Exceptioon("Error: SlipMode is invalid.");
@@ -1252,6 +1266,7 @@ void JSphGpuSingle::FlexStrucInit(){
     ,CaseNflexstruc,0);
   cusph::SetFlexStrucPairs(CaseNflexstruc,PosCell0g,PairIdxg);
   InitFlexRestartState();
+  InitFlexDissipation(true);
   const unsigned activePairs=InitFlexRestartReferenceAndCorrections(numpairstot);
   FlexPrecision->AllocatePairs(activePairs);
   //-Interaction parameters.
@@ -1262,6 +1277,7 @@ void JSphGpuSingle::FlexStrucInit(){
     ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr(),Dp);
   //-Calculate kernel correction and update geometry.
   cusph::CalcFlexStrucKerCorr(parmsfs);
+  InitFlexDissipation(false);
   InitFlexRestartBoundaryCorrection();
   auto initialfs=parmsfs;
   initialfs.restart=FlexPrecision->Restart();

@@ -158,7 +158,7 @@ OBMESH=JMeshData.o JMeshTDatas.o JMeshTDatasLoad.o JMeshTDatasSave.o JMeshTDatas
 OBVRES=JSphVRes.o JSphVResZone.o JSphCpuSingle_VRes.o JSphGpuSingle_VRes.o JSphCpu_VRes.o JCaseVRes.o JVResDataLimits.o JDsVresData.o JBoxDef.o
 OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuation.o UserFlexRestartInitialization.o UserFlexBoundaryCorrection.o UserFlexKinematics.o UserFlexDissipation.o
 
-OBCUDA:=$(OBCUDA) UserGParameterOutput.o UserGFlexContinuation.o UserGFlexRestartInitialization.o UserGFlexBoundaryCorrection.o
+OBCUDA:=$(OBCUDA) UserGMdbc.o UserGFlexDissipation.o UserGParameterOutput.o UserGFlexContinuation.o UserGFlexRestartInitialization.o UserGFlexBoundaryCorrection.o
 
 OBJECTS=$(OBJXML) $(OBJSPHMOTION) $(OBCOMMON) $(OBCOMMONDSPH) $(OBSPH) $(OBSPHSINGLE)
 OBJECTS:=$(OBJECTS) $(OBCOMMONGPU) $(OBSPHGPU) $(OBSPHSINGLEGPU) $(OBCUDA)
@@ -194,7 +194,6 @@ ifeq ($(CUDAVER),11)
 endif
 
 all:compile_libs $(EXECS_DIRECTORY)/$(EXECNAME)
-	rm -rf *.o
 ifeq ($(USE_DEBUG), NO)
 	@echo "  --- Compiled Release GPU version ---"
 else
@@ -279,3 +278,12 @@ UserGFlexContinuation.o: UserGFlexContinuation.cpp JSphGpuSingle.h UserParameter
 UserGFlexRestartInitialization.o: UserGFlexRestartInitialization.cpp JSphGpuSingle.h UserParameters.h UserGFlexPrecision.h UserGParameters.h
 
 UserGFlexBoundaryCorrection.o: UserGFlexBoundaryCorrection.cpp JSphGpuSingle.h UserParameters.h UserGFlexPrecision.h UserGParameters.h FunSphKernel.h FunctionsMath.h
+
+JSphGpuSingle.o: UserGFlexDissipation.h
+UserGFlexDissipation.o: UserGFlexDissipation.cu UserGFlexDissipation.h UserGFlexPrecision.h UserParameters.h JSphGpuSingle.h FunSphKernel.h
+	$(NCC) $(NCCFLAGS) $(filter -D% -I%,$(CCFLAGS)) $(addprefix -Xcompiler=,$(filter -fopenmp -ffast-math -march=native,$(CCFLAGS))) --fmad=false UserGFlexDissipation.cu
+
+JSphGpuSingle.o: UserGMdbc.h
+JSphGpu_ker.o: JSphGpu_mdbc_iker.cu UserGMdbc.h
+UserGMdbc.o: UserGMdbc.cu UserGMdbc.h UserParameters.h
+	$(NCC) $(NCCFLAGS) $(filter -D% -I%,$(CCFLAGS)) $(addprefix -Xcompiler=,$(filter -fopenmp -ffast-math -march=native,$(CCFLAGS))) UserGMdbc.cu

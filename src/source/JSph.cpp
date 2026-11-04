@@ -1026,8 +1026,7 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   //-Execution parameters from commands.
   LoadConfigCommands(cfg);
   if(User->Mdbc2AdaptiveEnabled){
-    if(!Cpu)
-      Run_Exceptioon("User.Mdbc2Adaptive is supported on CPU only.");
+
     if(TBoundary!=BC_MDBC
         || (SlipMode!=SLIP_NoSlip && SlipMode!=SLIP_FreeSlip))
       Run_Exceptioon("User.Mdbc2Adaptive requires Boundary=2 and SlipMode=2 or 3.");
@@ -1050,9 +1049,8 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
           "are mutually exclusive. Set ordinary NoPenetration=0.");
     }
 
-    if(!Cpu)
-      Run_Exceptioon(
-          "User.NoPenetrationMk is currently supported on CPU only.");
+    if(!Cpu && (User->IceTopNoPenetrationEnabled || IceBottomNoPen::Get(User.get()).Enabled))
+      Run_Exceptioon("GPU ice top/bottom protection is not implemented.");
 
     if(TBoundary!=BC_MDBC
         || (SlipMode!=SLIP_NoSlip && SlipMode!=SLIP_FreeSlip)){

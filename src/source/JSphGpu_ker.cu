@@ -24,6 +24,7 @@
 #include "FunctionsCuda.h"
 #include "JLog2.h"
 #include <cfloat>
+#include <stdexcept>
 #include <math_constants.h>
 //:#include "JDgKerPrint.h"
 //:#include "JDgKerPrint_ker.h"

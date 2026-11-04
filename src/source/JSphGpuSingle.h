@@ -27,6 +27,8 @@
 
 class JCellDivGpuSingle;
 class UserGFlexPrecision;
+class UserGFlexDissipation;
+class UserGMdbc;
 
 //##############################################################################
 //# JSphGpuSingle
@@ -38,6 +40,8 @@ class JSphGpuSingle : public JSphGpu
 protected:
   JCellDivGpuSingle* CellDivSingle;
   UserGFlexPrecision* FlexPrecision;
+  UserGFlexDissipation* FlexDissipation=nullptr;
+  UserGMdbc* MdbcUser=nullptr;
 
   llong GetAllocMemoryCpu()const;  
   llong GetAllocMemoryGpu()const;  
@@ -101,6 +105,7 @@ protected:
   void CompleteFlexRestartMaterialState(bool validateOnly=false);
   void LoadBoundaryMotionRestart();
   void SaveBoundaryMotionRestart();
+  void InitFlexDissipation(bool beforeCorrection);
   void FlexStrucInit();
   void UpdateFlexStrucGeometry();
   //<vs_flexstruc_end>

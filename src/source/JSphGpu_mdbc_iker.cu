@@ -19,6 +19,12 @@
 /// \file JSphGpu_mdbc_iker.cu \brief Implements functions and CUDA kernels for mDBC.
 
 #include "JSphGpu_mdbc_iker.h"
+#include "UserGMdbc.h"
+__constant__ UserGMdbc::View UserGMdbcView;
+void UserGMdbc::Upload(const View& view){
+  const auto e=cudaMemcpyToSymbol(UserGMdbcView,&view,sizeof(View));
+  if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));
+}
 
 namespace cusph{
 
@@ -383,6 +389,18 @@ template<TpKernel tker,bool sim2d,TpSlipMode tslip,bool sp>
       //--------------------
       if(submerged>0.f){
         boundmode[p1]=BMODE_MDBC2;
+        float3 pressureace=motacep1;
+        const auto adaptive=UserGMdbcView;
+        if(adaptive.Support>0 && CODE_IsFlexStrucFlex(code[p1]) && idp[p1]<adaptive.Count){
+          const auto h=adaptive.State[idp[p1]];
+          if(h.Step==*adaptive.Step){
+            const float s=fmaxf(0.f,fminf(1.f,(sumwab-.1f)/.2f));
+            const float w=adaptive.Support*(1.f-s*s*(3.f-2.f*s));
+            if(w>0)pressureace=make_float3((1-w)*motacep1.x+w*h.Filtered.x,
+              (1-w)*motacep1.y+w*h.Filtered.y,(1-w)*motacep1.z+w*h.Filtered.z);
+          }
+        }
+
         const float3 dpos=make_float3(-bnormalp1.x,-bnormalp1.y,-bnormalp1.z); //-Boundary particle position - ghost node position.
         if(sim2d){//-2D simulation.
           if(sumwab<0.1f){ //-If kernel sum is small use shepherd density and vel0.
@@ -408,7 +426,7 @@ template<TpKernel tker,bool sim2d,TpSlipMode tslip,bool sp>
               rhofinal=float(rhop1/a_corr2.a11);
           }
           //-Final density according to press.
-          const float pressfinal=KerMdbc2PressClone(sim2d,rhofinal,bnormalp1,gravity,motacep1,dpos);
+          const float pressfinal=KerMdbc2PressClone(sim2d,rhofinal,bnormalp1,gravity,pressureace,dpos);
           rhofinal=CTE.rhopzero+float(pressfinal/(CTE.cs0*CTE.cs0));
           //-velocity with Shepherd Sum.
           velrhofinal.x=float(velp1.x/a_corr2.a11);
@@ -440,7 +458,7 @@ template<TpKernel tker,bool sim2d,TpSlipMode tslip,bool sp>
               rhofinal=float(rhop1/a_corr3.a11);
           }
           //-Final density according to press.
-          const float pressfinal=KerMdbc2PressClone(sim2d,rhofinal,bnormalp1,gravity,motacep1,dpos);
+          const float pressfinal=KerMdbc2PressClone(sim2d,rhofinal,bnormalp1,gravity,pressureace,dpos);
           rhofinal=CTE.rhopzero+float(pressfinal/(CTE.cs0*CTE.cs0));
           //-Velocity with Shepherd sum.
           velrhofinal.x=float(velp1.x/a_corr3.a11);
