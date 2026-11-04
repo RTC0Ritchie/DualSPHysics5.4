@@ -89,6 +89,9 @@ protected:
   void SaveFlexMaterialDataOnce();
   void LoadFlexMaterialData(const std::string& storage);
   void InitFlexRestartState();
+  unsigned InitFlexRestartReferenceAndCorrections(unsigned oldPairs);
+  void LoadFlexDirectContinuationPairData();
+  void SaveFlexPairDataOnce();
   void ConfigFlexRestartMode();
   void CompleteFlexRestartMaterialState(bool validateOnly=false);
   void LoadBoundaryMotionRestart();

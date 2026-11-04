@@ -1124,7 +1124,7 @@ void JSphGpuSingle::SaveData(){
   JDataArrays arrays;
   AddBasicArrays(arrays,npsave,AuxPos_c->cptr(),Idp_c->cptr(),AuxVel_c->cptr(),AuxRho_c->cptr());
   JSph::SaveData(npsave,arrays,1,&vdom,infoplus);
-  if(save)SaveFlexData();
+  if(save){SaveFlexData();SaveFlexPairDataOnce();}
   // Output must precede SaveExtraData, which reuses Idp_c/AuxVel_c scratch buffers.
   if(save)SaveUserOutput(npsave,Idp_c->cptr(),AuxPos_c->cptr()
     ,AuxVel_c->cptr(),AuxRho_c->cptr());
@@ -1249,10 +1249,11 @@ void JSphGpuSingle::FlexStrucInit(){
   }
   cudaMemcpy(PairIdxg,pairidx.data(),sizeof(unsigned*)*CaseNflexstruc,cudaMemcpyHostToDevice);
   FlexPrecision->Allocate(unsigned(UserGParameters::ReadFlex(User.get()).PrecisionMode)
-    ,CaseNflexstruc,numpairstot);
-  InitFlexRestartState();
-  //-Set the indices for each particle pair.
+    ,CaseNflexstruc,0);
   cusph::SetFlexStrucPairs(CaseNflexstruc,PosCell0g,PairIdxg);
+  InitFlexRestartState();
+  const unsigned activePairs=InitFlexRestartReferenceAndCorrections(numpairstot);
+  FlexPrecision->AllocatePairs(activePairs);
   //-Interaction parameters.
   const StInterParmsFlexStrucg parmsfs=StrInterParmsFlexStrucg(Simulate2D,TKernel,TVisco,TMdbc2
     ,Visco*ViscoBoundFactor,CaseNflexstruc,DivData,Dcell_g->cptr()

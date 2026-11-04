@@ -108,7 +108,7 @@ static __device__ tmatrix3f ReferenceStress(const tmatrix3f& relative,
 
 //==============================================================================
 // UserGFlexCore (CPU-corresponding elastic implementation).
-template<class Math>
+template<class Math,bool corrected>
 class UserGFlexCore{
 public:
   template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2>
@@ -221,6 +221,37 @@ public:
       //-Loop through pairs and calculate forces.
       for(unsigned pair=0;pair<numpairs[pfs1];pair++){
         const unsigned pfs2=pairidx[pfs1][pair];
+        if(corrected){
+          const size_t q=pairidx[pfs1]+pair-pairidx[0];
+          const tmatrix3f pj=Math::ReferenceStress(defgrad[pfs2],flexstrucdata[CODE_GetIbodyFlexStruc(code[flexstrucridp[pfs2]])].cmat,restart,pfs2);
+          const tfloat3 gi=restart.GradI[q],gj=restart.GradJ[q];
+          const float a[3]={gi.x,gi.y,gi.z},b[3]={gj.x,gj.y,gj.z};
+          float force[3]={};
+          for(int r=0;r<3;r++){
+            float fi=0,fj=0;for(int c=0;c<3;c++){fi+=(&pk1p1.a11)[3*r+c]*a[c];fj+=(&pj.a11)[3*r+c]*b[c];}
+            force[r]=(vol0p1*fi+restart.Volume[pfs2]*fj)/mass0p1;
+          }
+          acep1.x+=force[0];acep1.y+=force[1];acep1.z+=force[2];
+          if(hgfactor){
+            const float4 v=poscell[flexstrucridp[pfs2]];
+            const float d[3]={pscellp1.x-v.x+CTE.poscellsize*(PSCEL_GetfX(pscellp1.w)-PSCEL_GetfX(v.w)),
+              pscellp1.y-v.y+CTE.poscellsize*(PSCEL_GetfY(pscellp1.w)-PSCEL_GetfY(v.w)),
+              pscellp1.z-v.z+CTE.poscellsize*(PSCEL_GetfZ(pscellp1.w)-PSCEL_GetfZ(v.w))};
+            const float rr2=d[0]*d[0]+d[1]*d[1]+d[2]*d[2];
+            if(rr2>0){
+              const auto mi=restart.MapI[q],mj=restart.MapJ[q];
+              const float ai[3]={mi.x,mi.y,mi.z},aj[3]={mj.x,mj.y,mj.z};
+              const auto fj=defgrad[pfs2];float delta=0;
+              for(int r=0;r<3;r++){
+                float bi=0,bj=0;for(int c=0;c<3;c++){bi+=(&defgradp1.a11)[3*r+c]*ai[c];bj+=(&fj.a11)[3*r+c]*aj[c];}
+                delta+=(2*d[r]-bi-bj)*d[r];
+              }
+              const float scale=hgfactor*youngmod*Math::template GetKernel_Wab<tker>(rr2)*restart.HgWeight[q]*.5f*delta/(rr2*mass0p1);
+              acep1.x-=scale*d[0];acep1.y-=scale*d[1];acep1.z-=scale*d[2];
+            }
+          }
+          continue;
+        }
         const float4 pscell0p2=poscell0[pfs2];
         float drx0=pscell0p1.x-pscell0p2.x+CTE.poscellsize*(PSCEL_GetfX(pscell0p1.w)-PSCEL_GetfX(pscell0p2.w));
         float dry0=pscell0p1.y-pscell0p2.y+CTE.poscellsize*(PSCEL_GetfY(pscell0p1.w)-PSCEL_GetfY(pscell0p2.w));
@@ -287,6 +318,7 @@ public:
 {
   const unsigned p=blockIdx.x*blockDim.x + threadIdx.x; //-Number of thread.
   if(p<n){
+    if(corrected){tmatrix3f b={};b.a11=b.a22=b.a33=1;kercorr[p]=b;return;}
     const unsigned pfs1=p;      //-Number of particle.
 
     //-Get number of pairs for this particle.
@@ -333,6 +365,19 @@ public:
 {
   const unsigned p=blockIdx.x*blockDim.x + threadIdx.x; //-Number of thread.
   if(p<n){
+    if(corrected){
+      tmatrix3f f={};const float4 a=poscell[flexstrucridp[p]];
+      for(unsigned k=0;k<numpairs[p];k++){
+        const float4 b=poscell[flexstrucridp[pairidx[p][k]]];
+        const float d[3]={a.x-b.x+CTE.poscellsize*(PSCEL_GetfX(a.w)-PSCEL_GetfX(b.w)),
+          a.y-b.y+CTE.poscellsize*(PSCEL_GetfY(a.w)-PSCEL_GetfY(b.w)),
+          a.z-b.z+CTE.poscellsize*(PSCEL_GetfZ(a.w)-PSCEL_GetfZ(b.w))};
+        const auto v=restart.GradI[pairidx[p]+k-pairidx[0]];const float g[3]={v.x,v.y,v.z};
+        for(int r=0;r<3;r++)for(int c=0;c<3;c++)(&f.a11)[3*r+c]-=d[r]*g[c];
+      }
+      if(simulate2d){f.a12=f.a21=f.a23=f.a32=0;f.a22=1;}
+      defgrad[p]=f;return;
+    }
     const unsigned pfs1=p;      //-Number of particle.
 
     //-Get number of pairs for this particle.
@@ -401,7 +446,7 @@ public:
 };
 
 // CUDA entry points only; all calculation belongs to the class above.
-template<class Math,TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2>
+template<class Math,TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2,bool corrected>
 __global__ void KerInteractionForcesFlexStruc(unsigned n,float visco
     ,int scelldiv,int4 nc,int3 cellzero,const int2* beginendcellfluid,const unsigned* dcell
     ,const float4* poscell,const float4* velrhop,const typecode* code
@@ -410,32 +455,32 @@ __global__ void KerInteractionForcesFlexStruc(unsigned n,float visco
     ,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr,const tmatrix3f* defgrad
     ,float* flexstrucdt,float3* ace,UserGFlexRestartView restart)
 {
-  UserGFlexCore<Math>::template InteractionForcesFlexStruc<tker,tvisco,mdbc2>(n,visco,scelldiv,nc,cellzero,beginendcellfluid,dcell,poscell,velrhop,code,boundmode,tangenvel,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad,flexstrucdt,ace,restart);
+  UserGFlexCore<Math,corrected>::template InteractionForcesFlexStruc<tker,tvisco,mdbc2>(n,visco,scelldiv,nc,cellzero,beginendcellfluid,dcell,poscell,velrhop,code,boundmode,tangenvel,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad,flexstrucdt,ace,restart);
 }
 
-template<class Math,TpKernel tker,bool simulate2d>
+template<class Math,TpKernel tker,bool simulate2d,bool corrected>
 __global__ void KerCalcFlexStrucKerCorr(unsigned n,const typecode* code,const StFlexStrucData* flexstrucdata
     ,const unsigned* flexstrucridp,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx
     ,tmatrix3f* kercorr,UserGFlexRestartView restart)
 {
-  UserGFlexCore<Math>::template CalcFlexStrucKerCorr<tker,simulate2d>(n,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,restart);
+  UserGFlexCore<Math,corrected>::template CalcFlexStrucKerCorr<tker,simulate2d>(n,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,restart);
 }
 
-template<class Math,TpKernel tker,bool simulate2d>
+template<class Math,TpKernel tker,bool simulate2d,bool corrected>
 __global__ void KerCalcFlexStrucDefGrad(unsigned n,const float4* poscell,const typecode* code
     ,const StFlexStrucData* flexstrucdata,const unsigned* flexstrucridp
     ,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr
     ,tmatrix3f* defgrad,UserGFlexRestartView restart)
 {
-  UserGFlexCore<Math>::template CalcFlexStrucDefGrad<tker,simulate2d>(n,poscell,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad,restart);
+  UserGFlexCore<Math,corrected>::template CalcFlexStrucDefGrad<tker,simulate2d>(n,poscell,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad,restart);
 }
 
-template<class Math>
+template<class Math,bool corrected>
 __global__ void KerCalcFlexStrucNormals(unsigned n,const unsigned* flexstrucridp
     ,const tmatrix3f* defgrad,const float3* boundnor0
     ,float3* boundnor)
 {
-  UserGFlexCore<Math>::CalcFlexStrucNormals(n,flexstrucridp,defgrad,boundnor0,boundnor);
+  UserGFlexCore<Math,corrected>::CalcFlexStrucNormals(n,flexstrucridp,defgrad,boundnor0,boundnor);
 }
 
 //==============================================================================
@@ -579,7 +624,21 @@ public:
 
 //==============================================================================
 // Precision device calculations.
-template<class Math> class UserGFlexPrecisionCore{
+// Compile-time scalar selection; no precision-mode branches in the physical law.
+template<class R> class UserGFlexOptionalAccess{
+public:
+  using Vector=UserGFlexVector<R>;
+  using Matrix=UserGFlexMatrix<R>;
+  static __device__ Vector Read(const tfloat3* f,const tdouble3* d,size_t k){
+    if(sizeof(R)==sizeof(double)){const auto a=d[k];return Vector{{R(a.x),R(a.y),R(a.z)}};}
+    const auto a=f[k];return Vector{{R(a.x),R(a.y),R(a.z)}};
+  }
+  static __device__ Matrix Offset(const UserGFlexRestartView& v,unsigned i){
+    Matrix a;for(int k=0;k<9;k++)a.v[k]=sizeof(R)==sizeof(double)?R((&v.Hoffset64[i].a11)[k]):R((&v.Hoffset[i].a11)[k]);return a;
+  }
+};
+
+template<class Math,bool corrected> class UserGFlexPrecisionCore{
 public:
   using R=typename Math::Real;
   using Access=UserGFlexAccess<Math>;
@@ -611,6 +670,10 @@ public:
   }
   template<TpKernel kernel,bool sim2d>
   static __device__ void Correction(const StInterParmsFlexStrucg& t,State s,unsigned i){
+    if(corrected){
+      Matrix b={};b.v[0]=b.v[4]=b.v[8]=1;s.Correction[i]=b;
+      tmatrix3f f={};f.a11=f.a22=f.a33=1;const_cast<tmatrix3f*>(t.kercorr)[i]=f;return;
+    }
     double a[3][6]={};const double3 x=s.Reference[i];
     const double vol=t.flexstrucdata[CODE_GetIbodyFlexStruc(t.code[t.flexstrucridp[i]])].vol0;
     for(unsigned k=0;k<t.numpairs[i];k++){
@@ -641,14 +704,20 @@ public:
   static __device__ void Geometry(const StInterParmsFlexStrucg& t,State s,unsigned i){
     const auto mat=t.flexstrucdata[CODE_GetIbodyFlexStruc(t.code[t.flexstrucridp[i]])];
     const double3 ui=s.Displacement[i];Matrix sum={};
+    if(corrected)sum=UserGFlexOptionalAccess<R>::Offset(t.restart,i);
     for(unsigned k=0;k<t.numpairs[i];k++){
       const unsigned j=t.pairidx[i][k];const double3 uj=s.Displacement[j];
       const R du[3]={R(ui.x-uj.x),R(ui.y-uj.y),R(ui.z-uj.z)};
+      if(corrected){
+        const auto g=UserGFlexOptionalAccess<R>::Read(t.restart.GradI,t.restart.GradI64,t.pairidx[i]+k-t.pairidx[0]);
+        for(int r=0;r<3;r++)for(int c=0;c<3;c++)sum.v[3*r+c]-=du[r]*g.v[c];
+        continue;
+      }
       const auto g=Access::template Gradient<kernel>(t,s,i,k);
       for(int r=0;r<3;r++)for(int c=0;c<3;c++)
         if(!sim2d || (r!=1 && c!=1))sum.v[3*r+c]-=(sizeof(R)==sizeof(double) && t.restart.Volume64?R(t.restart.Volume64[j]):R(t.restart.Volume?t.restart.Volume[j]:mat.vol0))*du[r]*g.v[c];
     }
-    Matrix h=Math::Multiply(sum,Access::Correction(t,s,i));
+    Matrix h=corrected?sum:Math::Multiply(sum,Access::Correction(t,s,i));
     if(sim2d)h.v[1]=h.v[3]=h.v[4]=h.v[5]=h.v[7]=0;
     s.H[i]=h;
     const Matrix pk=Math::ReferenceStress(h,mat.cmat,t.restart,i);
@@ -757,6 +826,35 @@ public:
 
     for(unsigned k=0;k<t.numpairs[i];k++){
       const unsigned j=t.pairidx[i][k];const size_t flat=t.pairidx[i]+k-t.pairidx[0];
+      if(corrected){
+        using Opt=UserGFlexOptionalAccess<R>;const auto& v=t.restart;
+        const auto gi=Opt::Read(v.GradI,v.GradI64,flat),gj=Opt::Read(v.GradJ,v.GradJ64,flat);
+        const Matrix pi=s.PK[i],pj=s.PK[j];
+        const R vj=sizeof(R)==sizeof(double)?R(v.Volume64[j]):R(v.Volume[j]);
+        for(int r=0;r<3;r++){
+          R fi=0,fj=0;for(int c=0;c<3;c++){fi+=pi.v[3*r+c]*gi.v[c];fj+=pj.v[3*r+c]*gj.v[c];}
+          acc[r]+=(vol0p1*fi+vj*fj)/R(mass0p1);
+        }
+        if(mat.hgfactor){
+          const unsigned p2=t.flexstrucridp[j];
+          const double dd[3]={t.posxy[p1].x-t.posxy[p2].x,t.posxy[p1].y-t.posxy[p2].y,t.posz[p1]-t.posz[p2]};
+          const double rr64=dd[0]*dd[0]+dd[1]*dd[1]+dd[2]*dd[2];
+          const R rr2=R(rr64),d[3]={R(dd[0]),R(dd[1]),R(dd[2])};
+          if(rr2>0){
+            const auto mi=Opt::Read(v.MapI,v.MapI64,flat),mj=Opt::Read(v.MapJ,v.MapJ64,flat);
+            const auto hi=s.H[i],hj=s.H[j];R delta=0;
+            for(int r=0;r<3;r++){
+              R bi=0,bj=0;for(int c=0;c<3;c++){bi+=hi.v[3*r+c]*mi.v[c];bj+=hj.v[3*r+c]*mj.v[c];}
+              delta+=((d[r]-mi.v[r]-bi)+(d[r]-mj.v[r]-bj))*d[r];
+            }
+            const R w=sizeof(R)==sizeof(double)?R(Math::template Wab64<tker>(rr64)):R(cufsph::GetKernel_Wab<tker>(float(rr2)));
+            const R weight=sizeof(R)==sizeof(double)?R(v.HgWeight64[flat]):R(v.HgWeight[flat]);
+            const R scale=R(mat.hgfactor)*R(mat.youngmod)*w*weight*R(.5)*delta/(rr2*R(mass0p1));
+            for(int r=0;r<3;r++)acc[r]-=scale*d[r];
+          }
+        }
+        continue;
+      }
       const auto g=Access::template Gradient<tker>(t,s,i,k);
       const Matrix pi=s.PB[i];
       Matrix pj=s.PB[j];
@@ -802,10 +900,10 @@ public:
 };
 
 // Thin CUDA entry points; all physics lives in the policy-independent class.
-template<class Math,int stage,TpKernel kernel,bool sim2d>
+template<class Math,int stage,TpKernel kernel,bool sim2d,bool corrected>
 __global__ void KerUserGFlexPrecision(StInterParmsFlexStrucg t,typename Math::State s){
   const unsigned i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=t.vnpfs)return;
-  using Core=UserGFlexPrecisionCore<Math>;
+  using Core=UserGFlexPrecisionCore<Math,corrected>;
   if(stage==0)Core::Reference(t,s,i);
   if(stage==1)Core::template Pairs<kernel>(t,s,i);
   if(stage==2)Core::template Correction<kernel,sim2d>(t,s,i);
@@ -813,10 +911,10 @@ __global__ void KerUserGFlexPrecision(StInterParmsFlexStrucg t,typename Math::St
   if(stage==4)Core::template Geometry<kernel,sim2d>(t,s,i);
   if(stage==5)Core::Normals(t,s,i);
 }
-template<class Math,TpKernel kernel,TpVisco visco,TpMdbc2Mode mdbc,bool sim2d>
+template<class Math,TpKernel kernel,TpVisco visco,TpMdbc2Mode mdbc,bool sim2d,bool corrected>
 __global__ void KerUserGFlexPrecisionForces(StInterParmsFlexStrucg t,typename Math::State s){
   const unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
-  if(i<t.vnpfs)UserGFlexPrecisionCore<Math>::template Forces<kernel,visco,mdbc,sim2d>(t,s,i);
+  if(i<t.vnpfs)UserGFlexPrecisionCore<Math,corrected>::template Forces<kernel,visco,mdbc,sim2d>(t,s,i);
 }
 
 
@@ -965,7 +1063,7 @@ public:
 // UserGFlexBackend (CPU-corresponding elastic implementation).
 enum class UserGFlexStage{Reference,Geometry,Forces};
 
-template<class Math>
+template<class Math,bool corrected>
 class UserGFlexBackend{
 private:
   UserGFlexBackend()=delete;
@@ -1005,12 +1103,12 @@ public:
   static void Interaction_ForcesFlexStruc(const StInterParmsFlexStrucg& tfs);
 };
 
-template<class Math>
-template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void UserGFlexBackend<Math>::Interaction_ForcesFlexStrucT(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void UserGFlexBackend<Math,corrected>::Interaction_ForcesFlexStrucT(const StInterParmsFlexStrucg& tfs){
   if(tfs.vnpfs){
     const StDivDataGpu& dvd=tfs.divdatag;
     dim3 sgridb=cusph::usergflex::GetSimpleGridSize(tfs.vnpfs,SPHBSIZE);
-    cusph::usergflex::KerInteractionForcesFlexStruc<Math,tker,tvisco,mdbc2> <<<sgridb,SPHBSIZE,0,tfs.stm>>>
+    cusph::usergflex::KerInteractionForcesFlexStruc<Math,tker,tvisco,mdbc2,corrected> <<<sgridb,SPHBSIZE,0,tfs.stm>>>
         (tfs.vnpfs,tfs.viscob,dvd.scelldiv,dvd.nc,dvd.cellzero,dvd.beginendcell+dvd.cellfluid,tfs.dcell,tfs.poscell,tfs.velrhop,tfs.code,tfs.boundmode,tfs.tangenvel,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,tfs.kercorr,tfs.defgrad,tfs.flexstrucdt,tfs.ace,tfs.restart);
   }
 }
@@ -1019,8 +1117,8 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void UserGFlexBackend<M
 /// Interaction forces for the flexible structure particles.
 /// Fuerzas de interacción para las partículas de estructura flexible.
 //==============================================================================
-template<class Math>
-template<TpKernel tker,TpVisco tvisco> void UserGFlexBackend<Math>::Interaction_ForcesFlexStruc_gt1(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+template<TpKernel tker,TpVisco tvisco> void UserGFlexBackend<Math,corrected>::Interaction_ForcesFlexStruc_gt1(const StInterParmsFlexStrucg& tfs){
 #ifdef FAST_COMPILATION
   if(tfs.mdbc2!=MDBC2_None)throw "Extra mDBC options are disabled for FastCompilation...";
   Interaction_ForcesFlexStrucT<tker,tvisco,MDBC2_None>(tfs);
@@ -1035,8 +1133,8 @@ template<TpKernel tker,TpVisco tvisco> void UserGFlexBackend<Math>::Interaction_
 /// Interaction forces for the flexible structure particles.
 /// Fuerzas de interacción para las partículas de estructura flexible.
 //==============================================================================
-template<class Math>
-template<TpKernel tker> void UserGFlexBackend<Math>::Interaction_ForcesFlexStruc_gt0(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+template<TpKernel tker> void UserGFlexBackend<Math,corrected>::Interaction_ForcesFlexStruc_gt0(const StInterParmsFlexStrucg& tfs){
 #ifdef FAST_COMPILATION
   if(tfs.tvisco!=VISCO_Artificial)throw "Extra viscosity options are disabled for FastCompilation...";
   Interaction_ForcesFlexStruc_gt1<tker,VISCO_Artificial> (tfs);
@@ -1051,8 +1149,8 @@ template<TpKernel tker> void UserGFlexBackend<Math>::Interaction_ForcesFlexStruc
 /// Interaction forces for the flexible structure particles.
 /// Fuerzas de interacción para las partículas de estructura flexible.
 //==============================================================================
-template<class Math>
-void UserGFlexBackend<Math>::Interaction_ForcesFlexStruc(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+void UserGFlexBackend<Math,corrected>::Interaction_ForcesFlexStruc(const StInterParmsFlexStrucg& tfs){
 #ifdef FAST_COMPILATION
   if(tfs.tkernel!=KERNEL_Wendland)throw "Extra kernels are disabled for FastCompilation...";
   Interaction_ForcesFlexStruc_gt0<KERNEL_Wendland> (tfs);
@@ -1064,23 +1162,23 @@ void UserGFlexBackend<Math>::Interaction_ForcesFlexStruc(const StInterParmsFlexS
 #endif
 }
 
-template<class Math>
-template<TpKernel tker,bool simulate2d> void UserGFlexBackend<Math>::CalcFlexStrucKerCorrT(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+template<TpKernel tker,bool simulate2d> void UserGFlexBackend<Math,corrected>::CalcFlexStrucKerCorrT(const StInterParmsFlexStrucg& tfs){
   if(tfs.vnpfs){
     dim3 sgridb=cusph::usergflex::GetSimpleGridSize(tfs.vnpfs,SPHBSIZE);
-    cusph::usergflex::KerCalcFlexStrucKerCorr<Math,tker,simulate2d> <<<sgridb,SPHBSIZE>>>
+    cusph::usergflex::KerCalcFlexStrucKerCorr<Math,tker,simulate2d,corrected> <<<sgridb,SPHBSIZE>>>
         (tfs.vnpfs,tfs.code,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,const_cast<tmatrix3f*>(tfs.kercorr),tfs.restart);
   }
 }
 
-template<class Math>
-template<TpKernel tker> void UserGFlexBackend<Math>::CalcFlexStrucKerCorr_gt0(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+template<TpKernel tker> void UserGFlexBackend<Math,corrected>::CalcFlexStrucKerCorr_gt0(const StInterParmsFlexStrucg& tfs){
   if(tfs.simulate2d)CalcFlexStrucKerCorrT<tker,true>  (tfs);
   else              CalcFlexStrucKerCorrT<tker,false> (tfs);
 }
 
-template<class Math>
-void UserGFlexBackend<Math>::CalcFlexStrucKerCorr(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+void UserGFlexBackend<Math,corrected>::CalcFlexStrucKerCorr(const StInterParmsFlexStrucg& tfs){
 #ifdef FAST_COMPILATION
   if(tfs.tkernel!=KERNEL_Wendland)throw "Extra kernels are disabled for FastCompilation...";
   CalcFlexStrucKerCorr_gt0<KERNEL_Wendland> (tfs);
@@ -1092,23 +1190,23 @@ void UserGFlexBackend<Math>::CalcFlexStrucKerCorr(const StInterParmsFlexStrucg& 
 #endif
 }
 
-template<class Math>
-template<TpKernel tker,bool simulate2d> void UserGFlexBackend<Math>::CalcFlexStrucDefGradT(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+template<TpKernel tker,bool simulate2d> void UserGFlexBackend<Math,corrected>::CalcFlexStrucDefGradT(const StInterParmsFlexStrucg& tfs){
   if(tfs.vnpfs){
     dim3 sgridb=cusph::usergflex::GetSimpleGridSize(tfs.vnpfs,SPHBSIZE);
-    cusph::usergflex::KerCalcFlexStrucDefGrad<Math,tker,simulate2d> <<<sgridb,SPHBSIZE,0,tfs.stm>>>
+    cusph::usergflex::KerCalcFlexStrucDefGrad<Math,tker,simulate2d,corrected> <<<sgridb,SPHBSIZE,0,tfs.stm>>>
         (tfs.vnpfs,tfs.poscell,tfs.code,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,tfs.kercorr,tfs.defgrad,tfs.restart);
   }
 }
 
-template<class Math>
-template<TpKernel tker> void UserGFlexBackend<Math>::CalcFlexStrucDefGrad_ct0(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+template<TpKernel tker> void UserGFlexBackend<Math,corrected>::CalcFlexStrucDefGrad_ct0(const StInterParmsFlexStrucg& tfs){
   if(tfs.simulate2d)CalcFlexStrucDefGradT<tker,true>  (tfs);
   else              CalcFlexStrucDefGradT<tker,false> (tfs);
 }
 
-template<class Math>
-void UserGFlexBackend<Math>::UpdateFlexStrucGeometry(const StInterParmsFlexStrucg& tfs){
+template<class Math,bool corrected>
+void UserGFlexBackend<Math,corrected>::UpdateFlexStrucGeometry(const StInterParmsFlexStrucg& tfs){
 #ifdef FAST_COMPILATION
   if(tfs.tkernel!=KERNEL_Wendland)throw "Extra kernels are disabled for FastCompilation...";
   CalcFlexStrucDefGrad_ct0<KERNEL_Wendland> (tfs);
@@ -1120,7 +1218,7 @@ void UserGFlexBackend<Math>::UpdateFlexStrucGeometry(const StInterParmsFlexStruc
 #endif
   if(tfs.vnpfs&&tfs.mdbc2>=MDBC2_Std){
     dim3 sgridb=cusph::usergflex::GetSimpleGridSize(tfs.vnpfs,SPHBSIZE);
-    cusph::usergflex::KerCalcFlexStrucNormals<Math> <<<sgridb,SPHBSIZE,0,tfs.stm>>>(tfs.vnpfs,tfs.flexstrucridp,tfs.defgrad,tfs.boundnor0,tfs.boundnor);
+    cusph::usergflex::KerCalcFlexStrucNormals<Math,corrected> <<<sgridb,SPHBSIZE,0,tfs.stm>>>(tfs.vnpfs,tfs.flexstrucridp,tfs.defgrad,tfs.boundnor0,tfs.boundnor);
   }
 }
 
@@ -1134,7 +1232,7 @@ public:
   size_t WorkCapacity=0;
   std::vector<void*> Buffers;
   UserGFlexRestartView Restart;
-  std::vector<tmatrix3d> HostHstar64;
+  std::vector<tmatrix3d> HostHstar64,HostNatural64;
   UserGFlexState<float> Mixed={};
   UserGFlexState<double> Extended={};
   static void Check(cudaError_t err){
@@ -1167,6 +1265,51 @@ void UserGFlexPrecision::Allocate(unsigned mode,unsigned particles,unsigned pair
     else Data->Allocate(Data->Extended,particles,pairs);
   }
   catch(...){Reset();throw;}
+}
+void UserGFlexPrecision::AllocatePairs(unsigned pairs){
+  if(!Data || !Data->Mode || Data->Restart.Corrected)return;
+  if(Data->Mixed.PairReference || Data->Extended.PairReference)throw std::runtime_error("Pair cache already allocated.");
+  if(Data->Mode==1){Data->Alloc(Data->Mixed.PairReference,pairs);Data->Alloc(Data->Mixed.PairNorm,pairs);}
+  else{Data->Alloc(Data->Extended.PairReference,pairs);Data->Alloc(Data->Extended.PairNorm,pairs);Data->Alloc(Data->Extended.PairGradient,pairs);}
+}
+void UserGFlexPrecision::SetNaturalCorrection64(const std::vector<tmatrix3d>& b){
+  if(!Data)Data=new Impl;Data->HostNatural64=b;
+}
+const std::vector<tmatrix3d>& UserGFlexPrecision::NaturalCorrection64()const{
+  static const std::vector<tmatrix3d> empty;return Data?Data->HostNatural64:empty;
+}
+void UserGFlexPrecision::DownloadCorrection64(unsigned n,std::vector<tmatrix3d>& b)const{
+  if(!Data || Data->Mode!=2 || Data->Particles!=n)throw std::runtime_error("Natural double correction cache mismatch.");
+  static_assert(sizeof(UserGFlexMatrix<double>)==sizeof(tmatrix3d),"Correction layout mismatch");
+  b.resize(n);Impl::Check(cudaMemcpy(b.data(),Data->Extended.Correction,n*sizeof(tmatrix3d),cudaMemcpyDeviceToHost));
+}
+void UserGFlexPrecision::UploadCorrections(unsigned n,unsigned pairs,const tdouble3* gi,const tdouble3* gj,
+  const tdouble3* mi,const tdouble3* mj,const double* weight,const tmatrix3d* h0){
+  if(!Data || !Data->Restart.Fstar || Data->Restart.Corrected)throw std::runtime_error("Invalid optional correction upload order.");
+  auto& v=Data->Restart;
+  if(Data->Mode==2){
+    {tdouble3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,gi,pairs*sizeof(tdouble3),cudaMemcpyHostToDevice));v.GradI64=p;}
+    {tdouble3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,gj,pairs*sizeof(tdouble3),cudaMemcpyHostToDevice));v.GradJ64=p;}
+    {tdouble3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,mi,pairs*sizeof(tdouble3),cudaMemcpyHostToDevice));v.MapI64=p;}
+    {tdouble3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,mj,pairs*sizeof(tdouble3),cudaMemcpyHostToDevice));v.MapJ64=p;}
+    {double* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,weight,pairs*sizeof(double),cudaMemcpyHostToDevice));v.HgWeight64=p;}
+    {tmatrix3d* p=nullptr;Data->Alloc(p,n);Impl::Check(cudaMemcpy(p,h0,n*sizeof(tmatrix3d),cudaMemcpyHostToDevice));v.Hoffset64=p;}
+  }
+  else{
+    {std::vector<tfloat3> a(pairs);for(unsigned i=0;i<pairs;i++)a[i]=TFloat3(float(gi[i].x),float(gi[i].y),float(gi[i].z));
+      tfloat3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,a.data(),pairs*sizeof(tfloat3),cudaMemcpyHostToDevice));v.GradI=p;}
+    {std::vector<tfloat3> a(pairs);for(unsigned i=0;i<pairs;i++)a[i]=TFloat3(float(gj[i].x),float(gj[i].y),float(gj[i].z));
+      tfloat3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,a.data(),pairs*sizeof(tfloat3),cudaMemcpyHostToDevice));v.GradJ=p;}
+    {std::vector<tfloat3> a(pairs);for(unsigned i=0;i<pairs;i++)a[i]=TFloat3(float(mi[i].x),float(mi[i].y),float(mi[i].z));
+      tfloat3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,a.data(),pairs*sizeof(tfloat3),cudaMemcpyHostToDevice));v.MapI=p;}
+    {std::vector<tfloat3> a(pairs);for(unsigned i=0;i<pairs;i++)a[i]=TFloat3(float(mj[i].x),float(mj[i].y),float(mj[i].z));
+      tfloat3* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,a.data(),pairs*sizeof(tfloat3),cudaMemcpyHostToDevice));v.MapJ=p;}
+    {std::vector<float> a(pairs);for(unsigned i=0;i<pairs;i++)a[i]=float(weight[i]);
+      float* p=nullptr;Data->Alloc(p,pairs);Impl::Check(cudaMemcpy(p,a.data(),pairs*sizeof(float),cudaMemcpyHostToDevice));v.HgWeight=p;}
+    {std::vector<tmatrix3f> a(n);for(unsigned i=0;i<n;i++)for(int k=0;k<9;k++)(&a[i].a11)[k]=float((&h0[i].a11)[k]);
+      tmatrix3f* p=nullptr;Data->Alloc(p,n);Impl::Check(cudaMemcpy(p,a.data(),n*sizeof(tmatrix3f),cudaMemcpyHostToDevice));v.Hoffset=p;}
+  }
+  v.Corrected=true;
 }
 void* UserGFlexPrecision::State(unsigned mode,unsigned particles)const{
   if(!Data || Data->Mode!=mode || Data->Particles!=particles)
@@ -1296,7 +1439,7 @@ float2 UserGFlexPrecision::TimeStepMaxPair(unsigned na,const float* a,unsigned n
 }
 
 // Host launch selection only. No precision switch is evaluated on the GPU.
-template<class Math> class UserGFlexPrecisionBackend{
+template<class Math,bool corrected> class UserGFlexPrecisionBackend{
   using State=typename Math::State;
   static void Check(){
     const auto e=cudaGetLastError();
@@ -1305,7 +1448,7 @@ template<class Math> class UserGFlexPrecisionBackend{
   template<TpKernel kernel,TpVisco visco,TpMdbc2Mode mdbc,bool sim2d>
   static void Force(const StInterParmsFlexStrucg& t,State s){
     const unsigned blocks=(t.vnpfs+SPHBSIZE-1)/SPHBSIZE;
-    cusph::usergflex::KerUserGFlexPrecisionForces<Math,kernel,visco,mdbc,sim2d>
+    cusph::usergflex::KerUserGFlexPrecisionForces<Math,kernel,visco,mdbc,sim2d,corrected>
       <<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
   }
   template<TpKernel kernel,TpVisco visco,bool sim2d>
@@ -1324,9 +1467,9 @@ template<class Math> class UserGFlexPrecisionBackend{
   static void Launch(const StInterParmsFlexStrucg& t,State s){
     const unsigned blocks=(t.vnpfs+SPHBSIZE-1)/SPHBSIZE;
     if(stage==UserGFlexStage::Reference){
-      cusph::usergflex::KerUserGFlexPrecision<Math,0,kernel,sim2d><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
-      cusph::usergflex::KerUserGFlexPrecision<Math,1,kernel,sim2d><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
-      cusph::usergflex::KerUserGFlexPrecision<Math,2,kernel,sim2d><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
+      cusph::usergflex::KerUserGFlexPrecision<Math,0,kernel,sim2d,corrected><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
+      if(!corrected)cusph::usergflex::KerUserGFlexPrecision<Math,1,kernel,sim2d,corrected><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
+      cusph::usergflex::KerUserGFlexPrecision<Math,2,kernel,sim2d,corrected><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
       Check();
       // One 4-byte validation download at initialization, never in the time loop.
       unsigned error=0;
@@ -1337,10 +1480,10 @@ template<class Math> class UserGFlexPrecisionBackend{
       if(error)throw std::runtime_error("Singular elastic reference correction matrix.");
     }
     else if(stage==UserGFlexStage::Geometry){
-      cusph::usergflex::KerUserGFlexPrecision<Math,3,kernel,sim2d><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
-      cusph::usergflex::KerUserGFlexPrecision<Math,4,kernel,sim2d><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
+      cusph::usergflex::KerUserGFlexPrecision<Math,3,kernel,sim2d,corrected><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
+      cusph::usergflex::KerUserGFlexPrecision<Math,4,kernel,sim2d,corrected><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
       if(t.mdbc2>=MDBC2_Std)
-        cusph::usergflex::KerUserGFlexPrecision<Math,5,kernel,sim2d><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
+        cusph::usergflex::KerUserGFlexPrecision<Math,5,kernel,sim2d,corrected><<<blocks,SPHBSIZE,0,t.stm>>>(t,s);
     }
     else{
 #ifdef FAST_COMPILATION
@@ -1395,13 +1538,16 @@ public:
 
     switch(config.PrecisionMode){
       case Mode::Original:
-        UserGFlexBackend<OriginalMath>::template Run<stage>(tfs);
+        if(tfs.restart.Corrected)UserGFlexBackend<OriginalMath,true>::template Run<stage>(tfs);
+        else UserGFlexBackend<OriginalMath,false>::template Run<stage>(tfs);
         return;
       case Mode::Mixed:
-        UserGFlexPrecisionBackend<cusph::usergflex::UserGFlexPrecisionMath<float>>::template Run<stage>(tfs);
+        if(tfs.restart.Corrected)UserGFlexPrecisionBackend<cusph::usergflex::UserGFlexPrecisionMath<float>,true>::template Run<stage>(tfs);
+        else UserGFlexPrecisionBackend<cusph::usergflex::UserGFlexPrecisionMath<float>,false>::template Run<stage>(tfs);
         return;
       case Mode::Extended:
-        UserGFlexPrecisionBackend<cusph::usergflex::UserGFlexPrecisionMath<double>>::template Run<stage>(tfs);
+        if(tfs.restart.Corrected)UserGFlexPrecisionBackend<cusph::usergflex::UserGFlexPrecisionMath<double>,true>::template Run<stage>(tfs);
+        else UserGFlexPrecisionBackend<cusph::usergflex::UserGFlexPrecisionMath<double>,false>::template Run<stage>(tfs);
         return;
     }
     throw "Invalid GPUFlexPrecisionMode.";
