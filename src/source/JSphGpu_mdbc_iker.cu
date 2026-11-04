@@ -385,6 +385,9 @@ template<TpKernel tker,bool sim2d,TpSlipMode tslip,bool sp>
         }
       }
 
+      if(UserGMdbcView.BottomSupport && CODE_IsNormal(code[p1]) && idp[p1]<UserGMdbcView.BottomCount)
+        UserGMdbcView.BottomSupport[idp[p1]]=double(sumwab);
+
       //-Store the results.
       //--------------------
       if(submerged>0.f){

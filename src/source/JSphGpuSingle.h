@@ -29,6 +29,7 @@ class JCellDivGpuSingle;
 class UserGFlexPrecision;
 class UserGFlexDissipation;
 class UserGMdbc;
+class UserGIceProtection;
 
 //##############################################################################
 //# JSphGpuSingle
@@ -42,6 +43,10 @@ protected:
   UserGFlexPrecision* FlexPrecision;
   UserGFlexDissipation* FlexDissipation=nullptr;
   UserGMdbc* MdbcUser=nullptr;
+  UserGIceProtection* IceProtection=nullptr;
+  void InitIceProtection();
+  void CaptureIceProtection(bool predictor);
+  void ApplyIceProtection(bool predictor);
 
   llong GetAllocMemoryCpu()const;  
   llong GetAllocMemoryGpu()const;  

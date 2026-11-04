@@ -1049,8 +1049,6 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
           "are mutually exclusive. Set ordinary NoPenetration=0.");
     }
 
-    if(!Cpu && (User->IceTopNoPenetrationEnabled || IceBottomNoPen::Get(User.get()).Enabled))
-      Run_Exceptioon("GPU ice top/bottom protection is not implemented.");
 
     if(TBoundary!=BC_MDBC
         || (SlipMode!=SLIP_NoSlip && SlipMode!=SLIP_FreeSlip)){
@@ -1391,11 +1389,11 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
 
   if(User->IceTopNoPenetrationEnabled
       || IceBottomNoPen::Get(User.get()).Enabled){
-    if(!Cpu || !Simulate2D || PeriActive || !FlexStruc
+    if(!Simulate2D || PeriActive || !FlexStruc
         || FlexStrucCount!=1 || TStep!=STEP_Symplectic)
     {
       Run_Exceptioon(
-          "IceTopNoPenetration requires CPU 2-D Symplectic, "
+          "IceTopNoPenetration requires 2-D Symplectic, "
           "exactly one elastic body and no periodic boundaries.");
     }
 

@@ -2,6 +2,7 @@
 #include "UserGFlexPrecision.h"
 #include "UserGFlexDissipation.h"
 #include "UserGMdbc.h"
+#include "UserGIceProtection.h"
 #include "UserGParameters.h"
 //HEAD_DSPH
 /*
@@ -76,6 +77,7 @@ JSphGpuSingle::JSphGpuSingle():JSphGpu(false){
 //==============================================================================
 JSphGpuSingle::~JSphGpuSingle(){
   DestructorActive=true;
+  delete IceProtection;IceProtection=nullptr;
   delete MdbcUser;MdbcUser=nullptr;
   delete FlexDissipation;FlexDissipation=nullptr;
   delete FlexPrecision; FlexPrecision=NULL;
@@ -104,6 +106,7 @@ llong JSphGpuSingle::GetAllocMemoryGpu()const{
   if(FlexPrecision)s+=FlexPrecision->GetAllocMemoryGpu();
   if(FlexDissipation)s+=FlexDissipation->GetAllocMemoryGpu();
   if(MdbcUser)s+=MdbcUser->GetAllocMemoryGpu();
+  if(IceProtection)s+=IceProtection->GetAllocMemoryGpu();
   return(s);
 }
 
@@ -724,6 +727,7 @@ void JSphGpuSingle::MdbcBoundCorrection(TpInterStep interstep){
       BoundMode_g->Reserve();     //-BoundOnOff_g is freed in PosInteraction_Forces().
       BoundMode_g->CuMemset(0,n); //-BoundMode_g[]=0=BMODE_DBC
       TangenVel_g->Reserve();     //-TangenVel_g is freed in PosInteraction_Forces().
+      MdbcUser->ClearBottomSupport();
       const float3* cloneace=MdbcUser->Acceleration(User.get(),Np,Npb,CaseNbound,
         CaseNflexstruc,Nstep,Simulate2D,Gravity,Idp_g->cptr(),Code_g->cptr(),
         BoundNor_g->cptr(),MotionAce_g->cptr());
@@ -795,6 +799,7 @@ double JSphGpuSingle::ComputeStep_Ver(){
   DemDtForce=dt;                         //-For DEM interaction.
   if(Shifting)RunShifting(dt);           //-Shifting.
   ComputeVerlet(dt);                     //-Update particles using Verlet (periodic particles become invalid).
+  ApplyIceProtection(false);
   if(CaseNfloat)RunFloating(dt,false);   //-Control of floating bodies.
   PosInteraction_Forces();               //-Free memory used for interaction.
   if(Damping)RunDamping(dt);             //-Aplies Damping.
@@ -822,7 +827,9 @@ double JSphGpuSingle::ComputeStep_Sym(){
   Interaction_Forces(InterStep);          //-Interaction.
   const double dt_p=DtVariable(false);    //-Calculate dt of predictor step.
   if(Shifting)RunShifting(dt*.5);         //-Standard shifting.
+  CaptureIceProtection(true);
   ComputeSymplecticPre(dt);               //-Apply Symplectic-Predictor to particles (periodic particles become invalid).
+  ApplyIceProtection(true);
   if(CaseNfloat)RunFloating(dt*.5,true);  //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   //-Corrector
@@ -837,6 +844,7 @@ double JSphGpuSingle::ComputeStep_Sym(){
   Interaction_Forces(InterStep);          //-Interaction.
   const double dt_c=DtVariable(true);     //-Calculate dt of corrector step.
   if(Shifting)RunShifting(dt);            //-Shifting.
+  CaptureIceProtection(false);
   ComputeSymplecticCorr(dt);              //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
   if(CaseNfloat)RunFloating(dt,false);    //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
@@ -1007,6 +1015,7 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
     BoundChanged=true;
     RunCellDivide(true); // Rebuild boundary cells after elastic codes are assigned.
   }
+  InitIceProtection();
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu(),GetAllocMemoryGpu());
   UpdateMaxValues();

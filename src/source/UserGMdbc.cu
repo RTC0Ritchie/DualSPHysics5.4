@@ -56,7 +56,7 @@ class UserGMdbc::Impl{
 public:
   View V={};float3 *Normals=nullptr,*Ace=nullptr;unsigned NormalCapacity=0,AceCapacity=0;
   static void Check(cudaError_t e){if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));}
-  ~Impl(){cudaFree(V.State);cudaFree(V.Step);cudaFree(Normals);cudaFree(Ace);}
+  ~Impl(){cudaFree(V.BottomSupport);cudaFree(V.State);cudaFree(V.Step);cudaFree(Normals);cudaFree(Ace);}
   static void Reserve(float3*& p,unsigned& capacity,unsigned n){
     if(n<=capacity)return;
     float3* next=nullptr;Check(cudaMalloc((void**)&next,n*sizeof(float3)));
@@ -65,10 +65,10 @@ public:
 };
 UserGMdbc::UserGMdbc():Data(new Impl){}
 UserGMdbc::~UserGMdbc(){
-  if(Data->V.State){try{Upload({});}catch(...){} }
+  if(Data->V.State || Data->V.BottomSupport){try{Upload({});}catch(...){} }
   delete Data;
 }
-size_t UserGMdbc::GetAllocMemoryGpu()const{return Data->V.Count*sizeof(History)
+size_t UserGMdbc::GetAllocMemoryGpu()const{return Data->V.BottomCount*sizeof(double)+Data->V.Count*sizeof(History)
   +(Data->V.Step?sizeof(int):0)+(Data->NormalCapacity+Data->AceCapacity)*sizeof(float3);}
 const float3* UserGMdbc::NoPenNormals(const UserParameters* user,unsigned np,unsigned nb,double dp,
     const unsigned* id,const typecode* code,const float3* normals){
@@ -99,4 +99,17 @@ const float3* UserGMdbc::Acceleration(const UserParameters* user,unsigned np,uns
     user->Mdbc2AdaptiveHead,id,code,normals,acceleration,Data->V);
   if(np)UserGMdbcApply<<<(np+255)/256,256>>>(np,nb,step,id,code,acceleration,Data->Ace,Data->V);
   Impl::Check(cudaGetLastError());return Data->Ace;
+}
+
+double* UserGMdbc::EnableBottomSupport(unsigned count){
+  if(Data->V.BottomSupport && Data->V.BottomCount!=count)
+    throw std::runtime_error("Ice bottom: boundary identity count changed.");
+  if(!Data->V.BottomSupport){
+    Impl::Check(cudaMalloc((void**)&Data->V.BottomSupport,size_t(count)*sizeof(double)));
+    Data->V.BottomCount=count;ClearBottomSupport();Upload(Data->V);
+  }
+  return Data->V.BottomSupport;
+}
+void UserGMdbc::ClearBottomSupport(){
+  if(Data->V.BottomSupport)Impl::Check(cudaMemsetAsync(Data->V.BottomSupport,0,size_t(Data->V.BottomCount)*sizeof(double)));
 }
