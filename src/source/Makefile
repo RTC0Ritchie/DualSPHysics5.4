@@ -158,8 +158,7 @@ OBMESH=JMeshData.o JMeshTDatas.o JMeshTDatasLoad.o JMeshTDatasSave.o JMeshTDatas
 OBVRES=JSphVRes.o JSphVResZone.o JSphCpuSingle_VRes.o JSphGpuSingle_VRes.o JSphCpu_VRes.o JCaseVRes.o JVResDataLimits.o JDsVresData.o JBoxDef.o
 OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuation.o UserFlexRestartInitialization.o UserFlexBoundaryCorrection.o UserFlexKinematics.o UserFlexDissipation.o
 
-OBSPHSINGLEGPU:=$(OBSPHSINGLEGPU) UserGParameterOutput.o
-OBCUDA:=$(OBCUDA) UserGParameterOutput_ker.o UserGFlexContact.o
+OBCUDA:=$(OBCUDA) UserGParameterOutput.o
 
 OBJECTS=$(OBJXML) $(OBJSPHMOTION) $(OBCOMMON) $(OBCOMMONDSPH) $(OBSPH) $(OBSPHSINGLE)
 OBJECTS:=$(OBJECTS) $(OBCOMMONGPU) $(OBSPHGPU) $(OBSPHSINGLEGPU) $(OBCUDA)
@@ -262,29 +261,15 @@ ifeq ($(COMPILE_MOORDYNPLUS), YES)
 endif
 	rm -rf *.o $(EXECS_DIRECTORY)/$(EXECNAME) $(EXECS_DIRECTORY)/$(EXECNAME)_debug
 
-# GPU elastic module implementation headers.
-UserGInteractionForcesFlexStruc.o: UserGFlexMath_iker.h UserGFlexCore_iker.h UserGFlexBackend_iker.h
-
-# Isolated GPU elastic interface dependencies.
-JSphGpuSingle.o: UserGFlexTypes.h
+# CPU-corresponding GPU elastic module; precision support remains private.
+JSphGpuSingle.o: UserGInteractionForcesFlexStruc.h JSphGpuSingle.h UserGFlexPrecision.h UserGParameters.h JCellDivGpuSingle.h
 JSphGpu_ker.o: UserGFlexCte.h
-UserGInteractionForcesFlexStruc.o: UserGFlexTypes.h UserGFlexCte.h
-
-# Precision implementation is private to the elastic translation unit.
-UserGInteractionForcesFlexStruc.o: UserGFlexPrecision.h UserGFlexPrecisionState.h UserGFlexPrecisionMath_iker.h UserGFlexPrecisionCore_iker.h UserGFlexPrecisionHost_iker.h
-JSphGpuSingle.o: JSphGpuSingle.h UserGFlexPrecision.h UserGFlexTypes.h UserGParameters.h
+UserGInteractionForcesFlexStruc.o: UserGInteractionForcesFlexStruc.h UserGFlexCte.h UserGParameters.h UserGFlexPrecision.h
 main.o JDebugSphGpu.o JSphGpuSingle_InOut.o JSphGpuSingle_VRes.o: JSphGpuSingle.h
-UserGInteractionForcesFlexStruc.o: UserGFlexAccess_iker.h
 
-UserGParameterOutput.o: UserGParameterOutput.cpp UserGParameterOutput.h UserParameterOutput.h UserParameters.h UserGParameters.h JSphGpuSingle.h
-UserGParameterOutput_ker.o: UserGParameterOutput_ker.cu UserGParameterOutput.h UserGFlexPrecision.h UserGFlexPrecisionState.h
-	$(NCC) $(NCCFLAGS) UserGParameterOutput_ker.cu
+# CPU-corresponding GPU output module: host and device code in one .cu.
+UserGParameterOutput.o: UserGParameterOutput.cu UserGParameterOutput.h UserParameterOutput.h UserParameters.h UserGParameters.h JSphGpuSingle.h UserGFlexPrecision.h
+	$(NCC) $(NCCFLAGS) $(filter -D% -I%,$(CCFLAGS)) $(addprefix -Xcompiler=,$(filter -fopenmp -ffast-math -march=native,$(CCFLAGS))) UserGParameterOutput.cu
 UserParameterOutput.o: UserParameterOutput.h UserParameters.h
-
-# Isolated elastic contact: user parameter changes do not reach JSphGpu_ker.
-UserGFlexContact.o: UserGFlexContact.cu UserGFlexContact.h UserGFlexContact_iker.h UserGParameters.h UserGFlexTypes.h
-	$(NCC) $(NCCFLAGS) UserGFlexContact.cu
-UserGInteractionForcesFlexStruc.o: UserGFlexContact.h
 JCellDivGpuSingle.o: JCellDivGpuSingle.h JCellDivGpu_ker.h
-JSphGpuSingle.o: JCellDivGpuSingle.h
 JCellDivGpu_ker.o: JCellDivGpu_ker.h

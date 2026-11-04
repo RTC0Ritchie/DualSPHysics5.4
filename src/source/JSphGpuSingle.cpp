@@ -1,4 +1,4 @@
-#include "UserGFlexTypes.h"
+#include "UserGInteractionForcesFlexStruc.h"
 #include "UserGFlexPrecision.h"
 #include "UserGParameters.h"
 //HEAD_DSPH
@@ -659,11 +659,21 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
   //-Add Delta-SPH correction to Ar_g[].
   if(AG_CPTR(Delta_g))cusph::AddDelta(Np-Npb,Delta_g->cptr()+Npb,Ar_g->ptr()+Npb);
 
-  cudaDeviceSynchronize();
+  // Synchronous scalar download below completes the preceding default-stream
+  // force kernels. Avoid a redundant device-wide wait before that download.
+  // Read viscosity before ComputeAceMax reuses ViscDt_g as scratch.
+  if(CaseNflexstruc){
+    const float2 maxima=FlexPrecision->TimeStepMaxPair(Np,ViscDt_g->cptr()
+      ,CaseNflexstruc,FlexStrucDtg);
+    if(Np)ViscDtMax=maxima.x;
+    FlexStrucDtMax=maxima.y;
+  }
+  else{
+    // Keep the original synchronization contract for non-elastic callers.
+    cudaDeviceSynchronize();
+    if(Np)ViscDtMax=cusph::ReduMaxFloat(Np,0,ViscDt_g->ptr(),CellDivSingle->GetAuxMem(cusph::ReduMaxFloatSize(Np)));
+  }
   Check_CudaErroor("Failed while executing kernels of interaction.");
-
-  //-Calculates maximum value of ViscDt.
-  if(Np)ViscDtMax=cusph::ReduMaxFloat(Np,0,ViscDt_g->ptr(),CellDivSingle->GetAuxMem(cusph::ReduMaxFloatSize(Np)));
   //-Calculates maximum value of Ace (periodic particles are ignored). ViscDtg is used like auxiliary memory.
   AceMax=ComputeAceMax(ViscDt_g->ptr());
 
@@ -672,14 +682,8 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
     if(Np)CsPsiCleanMax=cusph::ReduMaxFloat(Np,0,CsPsiClean_g->ptr(),CellDivSingle->GetAuxMem(cusph::ReduMaxFloatSize(Np)));
   }
   #endif
-  //<vs_flexstruc_ini>
-  //-Calculates maximum value of FlexStrucDt.
-  if(CaseNflexstruc){
-    Timersg->TmStart(TMG_SuFlexStruc,false);
-    FlexStrucDtMax=cusph::ReduMaxFloat(CaseNflexstruc,0,FlexStrucDtg,CellDivSingle->GetAuxMem(cusph::ReduMaxFloatSize(CaseNflexstruc)));
-    Timersg->TmStop(TMG_SuFlexStruc,false);
-  }
-  //<vs_flexstruc_end> 
+  // FlexStrucDtMax was downloaded together with ViscDtMax above.
+  // Its reduction time is now included in CF-Forces, not SU-FlexStruc. 
 
   InterNum++;
   Timersg->TmStop(TMG_CfForces,true);

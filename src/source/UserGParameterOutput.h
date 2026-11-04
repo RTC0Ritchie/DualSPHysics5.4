@@ -22,7 +22,7 @@ public:
     ,const unsigned* rid,const unsigned* idp,const typecode* code
     ,const unsigned* pairs,const tmatrix3f* f,bool tensors
     ,std::vector<FlexParticle>& out);
-  static void DownloadInlet(unsigned n,unsigned firstId,const unsigned* idp
+  static void DownloadInlet(UserGFlexPrecision* context,unsigned n,unsigned firstId,const unsigned* idp
     ,const typecode* code,const double2* xy,const double* z,const float4* velrho
     ,std::vector<InletParticle>& out);
 };

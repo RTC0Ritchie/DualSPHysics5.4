@@ -54,9 +54,24 @@ void UserParameterOutput::SaveFiles(
     }
   };
 
-  // Read a symmetric tensor component.
+  // C++11 typed lambdas preserve both float and double tensor output.
   const auto Component=[&](
-    const auto& tensor,
+    const tmatrix3f& tensor,
+    const std::string& field)->double
+  {
+    if(field=="xx")return tensor.a11;
+    if(field=="yy")return tensor.a22;
+    if(field=="zz")return tensor.a33;
+    if(field=="xy")return tensor.a12;
+    if(field=="xz")return tensor.a13;
+    if(field=="yz")return tensor.a23;
+
+    Run_Exceptioon("Unsupported tensor component: "+field);
+    return 0.0;
+  };
+
+  const auto Component64=[&](
+    const tmatrix3d& tensor,
     const std::string& field)->double
   {
     if(field=="xx")return tensor.a11;
@@ -119,7 +134,7 @@ void UserParameterOutput::SaveFiles(
         "Strain_"+field,n);
 
       for(unsigned p=0;p<n;p++){
-        values[p]=(particles[p].PreciseTensors? Component(particles[p].Strain64,field):Component(particles[p].Strain,field));
+        values[p]=(particles[p].PreciseTensors? Component64(particles[p].Strain64,field):Component(particles[p].Strain,field));
       }
     }
 
@@ -129,7 +144,7 @@ void UserParameterOutput::SaveFiles(
         "Stress_"+field,n);
 
       for(unsigned p=0;p<n;p++){
-        values[p]=(particles[p].PreciseTensors? Component(particles[p].Stress64,field):Component(particles[p].Stress,field));
+        values[p]=(particles[p].PreciseTensors? Component64(particles[p].Stress64,field):Component(particles[p].Stress,field));
       }
     }
 
