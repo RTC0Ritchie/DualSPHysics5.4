@@ -1262,7 +1262,10 @@ void JSphGpuSingle::FlexStrucInit(){
     ,FlexStrucDatag,FlexStrucRidpg,PosCell0g,NumPairsg,PairIdxg,KerCorrg,BoundNor0g,DefGradg,AG_PTR(BoundNor_g),FlexStrucDtg,Ace_g->ptr(),NULL,User.get(),FlexPrecision,Posxy_g->cptr(),Posz_g->cptr(),Dp);
   //-Calculate kernel correction and update geometry.
   cusph::CalcFlexStrucKerCorr(parmsfs);
-  cusph::UpdateFlexStrucGeometry(parmsfs);
+  InitFlexRestartBoundaryCorrection();
+  auto initialfs=parmsfs;
+  initialfs.restart=FlexPrecision->Restart();
+  cusph::UpdateFlexStrucGeometry(initialfs);
   Log->Print("");
   Timersg->TmStop(TMG_SuFlexStruc,false);
 }

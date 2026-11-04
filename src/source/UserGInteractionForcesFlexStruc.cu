@@ -107,6 +107,48 @@ static __device__ tmatrix3f ReferenceStress(const tmatrix3f& relative,
 };
 
 //==============================================================================
+// CPU counterpart: BuildFlexRestartBoundaryForceMatrix.
+// The feature logic is independent of the precision policy and the constitutive law.
+class UserGFlexBoundaryMath{
+public:
+  template<class R> using Matrix=UserGFlexMatrix<R>;
+  template<class R> static __device__ Matrix<R> Multiply(const Matrix<R>& a,const Matrix<R>& b){
+    Matrix<R> c={};
+    for(int i=0;i<3;i++)for(int j=0;j<3;j++)for(int k=0;k<3;k++)
+      c.v[3*i+j]+=a.v[3*i+k]*b.v[3*k+j];
+    return c;
+  }
+  template<class R> static __device__ Matrix<R> Read(const tmatrix3f* f,const tmatrix3d* d,unsigned i){
+    Matrix<R> m;
+    for(int k=0;k<9;k++)m.v[k]=(sizeof(R)==sizeof(double) && d)?R((&d[i].a11)[k]):R((&f[i].a11)[k]);
+    return m;
+  }
+  template<class R,bool relativeIsH> static __device__ Matrix<R> Apply(
+      const UserGFlexRestartView& state,unsigned i,const Matrix<R>& relative,
+      const Matrix<R>& pk,const Matrix<R>& correction){
+    const int mode=state.BoundaryMode;
+    if(mode==1 && state.BoundarySelected[i])return pk;
+    if(mode==2)return Multiply(pk,Read<R>(state.BoundaryKernel,state.BoundaryKernel64,i));
+    Matrix<R> result=Multiply(pk,correction);
+    if(mode==3 && state.BoundarySelected[i]){
+      const auto initial=Read<R>(state.BoundaryPrestress,state.BoundaryPrestress64,i);
+      auto transported=Multiply(relative,initial);
+      if(relativeIsH)for(int k=0;k<9;k++)transported.v[k]+=initial.v[k];
+      const auto corrected=Multiply(transported,correction);
+      for(int k=0;k<9;k++)result.v[k]+=transported.v[k]-corrected.v[k];
+    }
+    else if(mode==4)for(int k=0;k<9;k++)result.v[k]*=R(state.BoundaryBeta[i]);
+    return result;
+  }
+  static __device__ tmatrix3f Original(const UserGFlexRestartView& state,unsigned i,
+      const tmatrix3f& relative,const tmatrix3f& pk,const tmatrix3f& correction){
+    if(!state.BoundaryMode)return cumath::MulMatrix3x3(pk,correction);
+    const auto m=Apply<float,false>(state,i,Read<float>(&relative,nullptr,0),
+        Read<float>(&pk,nullptr,0),Read<float>(&correction,nullptr,0));
+    tmatrix3f result;for(int k=0;k<9;k++)(&result.a11)[k]=m.v[k];return result;
+  }
+};
+
 // UserGFlexCore (CPU-corresponding elastic implementation).
 template<class Math,bool corrected>
 class UserGFlexCore{
@@ -146,7 +188,7 @@ public:
       const float hgfactor=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].hgfactor;
       const tmatrix6f cmat=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].cmat;
       const tmatrix3f pk1p1=Math::ReferenceStress(defgradp1,cmat,restart,pfs1);
-      const tmatrix3f pk1kercorrp1=cumath::MulMatrix3x3(pk1p1,kercorrp1);
+      const tmatrix3f pk1kercorrp1=UserGFlexBoundaryMath::Original(restart,pfs1,defgradp1,pk1p1,kercorrp1);
 
       //-Get current mass of flexible structure particle.
       const float mass0p1=restart.Mass?restart.Mass[pfs1]:vol0p1*rho0p1;
@@ -264,9 +306,9 @@ public:
         const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
         //-Acceleration due to structure.
         const tmatrix3f defgradp2=defgrad[pfs2];
-        const tmatrix3f pk1p2=Math::ReferenceStress(defgradp2,restart.Fstar?flexstrucdata[CODE_GetIbodyFlexStruc(code[flexstrucridp[pfs2]])].cmat:cmat,restart,pfs2);
+        const tmatrix3f pk1p2=Math::ReferenceStress(defgradp2,(restart.Fstar || restart.BoundaryMode)?flexstrucdata[CODE_GetIbodyFlexStruc(code[flexstrucridp[pfs2]])].cmat:cmat,restart,pfs2);
         const tmatrix3f kercorrp2=kercorr[pfs2];
-        const tmatrix3f pk1kercorrp2=cumath::MulMatrix3x3(pk1p2,kercorrp2);
+        const tmatrix3f pk1kercorrp2=UserGFlexBoundaryMath::Original(restart,pfs2,defgradp2,pk1p2,kercorrp2);
         tmatrix3f pk1kercorrp1p2;
         pk1kercorrp1p2.a11=pk1kercorrp1.a11+pk1kercorrp2.a11; pk1kercorrp1p2.a12=pk1kercorrp1.a12+pk1kercorrp2.a12; pk1kercorrp1p2.a13=pk1kercorrp1.a13+pk1kercorrp2.a13;
         pk1kercorrp1p2.a21=pk1kercorrp1.a21+pk1kercorrp2.a21; pk1kercorrp1p2.a22=pk1kercorrp1.a22+pk1kercorrp2.a22; pk1kercorrp1p2.a23=pk1kercorrp1.a23+pk1kercorrp2.a23;
@@ -724,7 +766,9 @@ public:
     if(sim2d)h.v[1]=h.v[3]=h.v[4]=h.v[5]=h.v[7]=0;
     s.H[i]=h;
     const Matrix pk=Math::ReferenceStress(h,mat.cmat,t.restart,i);
-    s.PK[i]=pk;s.PB[i]=Math::Multiply(pk,s.Correction[i]);
+    s.PK[i]=pk;s.PB[i]=t.restart.BoundaryMode
+      ? UserGFlexBoundaryMath::Apply<R,true>(t.restart,i,h,pk,s.Correction[i])
+      : Math::Multiply(pk,s.Correction[i]);
     tmatrix3f f;
     for(int k=0;k<9;k++)(&f.a11)[k]=float(h.v[k]);
     f.a11+=1;f.a22+=1;f.a33+=1;t.defgrad[i]=f;
@@ -866,7 +910,7 @@ public:
       Matrix pj=s.PB[j];
       // Original law evaluates both stresses with particle i's constitutive tensor.
       // Keep that convention for pairs joining different material/body codes.
-      if(!t.restart.Fstar && CODE_GetIbodyFlexStruc(t.code[t.flexstrucridp[j]])!=CODE_GetIbodyFlexStruc(codep1))
+      if(!t.restart.Fstar && !t.restart.BoundaryMode && CODE_GetIbodyFlexStruc(t.code[t.flexstrucridp[j]])!=CODE_GetIbodyFlexStruc(codep1))
         pj=Math::Multiply(Math::Stress(s.H[j],mat.cmat),s.Correction[j]);
       for(int r=0;r<3;r++){
         R force=0;for(int c=0;c<3;c++)force+=(pi.v[3*r+c]+pj.v[3*r+c])*g.v[c];
@@ -1228,6 +1272,31 @@ void UserGFlexBackend<Math,corrected>::UpdateFlexStrucGeometry(const StInterParm
   }
 }
 
+// Initial reference stress is evaluated once using the same constitutive policy
+// as the force path. Extended mode keeps Hstar64 instead of rounding it to Fstar.
+template<unsigned mode> __global__ void KerUserGFlexBoundaryPrestress(unsigned n,
+    const StFlexStrucData* material,const typecode* code,const unsigned* ridp,
+    UserGFlexRestartView state){
+  const unsigned i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=n)return;
+  const auto cmat=material[CODE_GetIbodyFlexStruc(code[ridp[i]])].cmat;
+  if(mode==0){
+    tmatrix3f identity={};identity.a11=identity.a22=identity.a33=1;
+    tmatrix3f p={};
+    if(state.Fstar)p=cusph::usergflex::UserGFlexMath<UserGParameters::TpFlexPrecisionMode::Original>::ReferenceStress(identity,cmat,state,i);
+    const_cast<tmatrix3f*>(state.BoundaryPrestress)[i]=p;
+  }
+  else{
+    using R=typename std::conditional<mode==2,double,float>::type;
+    using Math=cusph::usergflex::UserGFlexPrecisionMath<R>;
+    typename Math::Matrix zero={},p={};
+    if(state.Fstar)p=Math::ReferenceStress(zero,cmat,state,i);
+    for(int k=0;k<9;k++){
+      if(mode==2)(&const_cast<tmatrix3d*>(state.BoundaryPrestress64)[i].a11)[k]=p.v[k];
+      else (&const_cast<tmatrix3f*>(state.BoundaryPrestress)[i].a11)[k]=p.v[k];
+    }
+  }
+}
+
 //==============================================================================
 // Precision cache ownership and host dispatch.
 class UserGFlexPrecision::Impl{
@@ -1278,6 +1347,44 @@ void UserGFlexPrecision::AllocatePairs(unsigned pairs){
   if(Data->Mode==1){Data->Alloc(Data->Mixed.PairReference,pairs);Data->Alloc(Data->Mixed.PairNorm,pairs);}
   else{Data->Alloc(Data->Extended.PairReference,pairs);Data->Alloc(Data->Extended.PairNorm,pairs);Data->Alloc(Data->Extended.PairGradient,pairs);}
 }
+void UserGFlexPrecision::UploadBoundary(unsigned mode,unsigned n,const byte* selected,
+    const float* beta,const tmatrix3f* forceKernel,const tmatrix3d* forceKernel64,
+    const StFlexStrucData* material,const typecode* code,const unsigned* ridp){
+  if(!mode)return;
+  if(mode>4 || !n || !selected)throw std::runtime_error("Invalid GPU boundary correction configuration.");
+  if(!Data)Data=new Impl;
+  if(Data->Restart.BoundaryMode || Data->Restart.Corrected)
+    throw std::runtime_error("Boundary correction cannot use transported continuation gradients or be uploaded twice.");
+  auto& state=Data->Restart;state.BoundaryMode=int(mode);
+  byte* selection=nullptr;Data->Alloc(selection,n);
+  Impl::Check(cudaMemcpy(selection,selected,n*sizeof(byte),cudaMemcpyHostToDevice));state.BoundarySelected=selection;
+  if(mode==2){
+    if(Data->Mode==2){
+      if(!forceKernel64)throw std::runtime_error("Missing double boundary force kernel.");
+      tmatrix3d* kernel=nullptr;Data->Alloc(kernel,n);
+      Impl::Check(cudaMemcpy(kernel,forceKernel64,n*sizeof(tmatrix3d),cudaMemcpyHostToDevice));state.BoundaryKernel64=kernel;
+    }
+    else{
+      if(!forceKernel)throw std::runtime_error("Missing boundary force kernel.");
+      tmatrix3f* kernel=nullptr;Data->Alloc(kernel,n);
+      Impl::Check(cudaMemcpy(kernel,forceKernel,n*sizeof(tmatrix3f),cudaMemcpyHostToDevice));state.BoundaryKernel=kernel;
+    }
+  }
+  if(mode==3){
+    if(Data->Mode==2){tmatrix3d* p=nullptr;Data->Alloc(p,n);state.BoundaryPrestress64=p;}
+    else{tmatrix3f* p=nullptr;Data->Alloc(p,n);state.BoundaryPrestress=p;}
+    if(Data->Mode==2)KerUserGFlexBoundaryPrestress<2><<<(n+127)/128,128>>>(n,material,code,ridp,state);
+    else if(Data->Mode==1)KerUserGFlexBoundaryPrestress<1><<<(n+127)/128,128>>>(n,material,code,ridp,state);
+    else KerUserGFlexBoundaryPrestress<0><<<(n+127)/128,128>>>(n,material,code,ridp,state);
+    Impl::Check(cudaGetLastError());
+  }
+  if(mode==4){
+    if(!beta)throw std::runtime_error("Missing boundary energy weights.");
+    float* weights=nullptr;Data->Alloc(weights,n);
+    Impl::Check(cudaMemcpy(weights,beta,n*sizeof(float),cudaMemcpyHostToDevice));state.BoundaryBeta=weights;
+  }
+}
+
 void UserGFlexPrecision::SetNaturalCorrection64(const std::vector<tmatrix3d>& b){
   if(!Data)Data=new Impl;Data->HostNatural64=b;
 }

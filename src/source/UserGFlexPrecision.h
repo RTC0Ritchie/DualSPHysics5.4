@@ -3,8 +3,15 @@
 #include <cstddef>
 #include <vector>
 #include "TypesDef.h"
+#include "DualSphDef.h"
 
 struct UserGFlexRestartView{
+  // Boundary force correction only; never substitutes the kinematic correction.
+  int BoundaryMode=0;
+  const byte* BoundarySelected=nullptr;
+  const float* BoundaryBeta=nullptr;
+  const tmatrix3f *BoundaryKernel=nullptr,*BoundaryPrestress=nullptr;
+  const tmatrix3d *BoundaryKernel64=nullptr,*BoundaryPrestress64=nullptr;
   bool Corrected=false;
   const tfloat3 *GradI=nullptr,*GradJ=nullptr,*MapI=nullptr,*MapJ=nullptr;
   const float* HgWeight=nullptr;
@@ -33,6 +40,9 @@ public:
   void UploadRestart(unsigned n,const tmatrix3f* f,const float* j,
       const float* volume,const float* density,const float* mass,
       const float* naturalVolume,const float* naturalDensity);
+  void UploadBoundary(unsigned mode,unsigned n,const byte* selected,
+      const float* beta,const tmatrix3f* forceKernel,const tmatrix3d* forceKernel64,
+      const StFlexStrucData* material,const typecode* code,const unsigned* ridp);
   void SetRestartH64(unsigned n,const tmatrix3d* h);
   tmatrix3d TotalH64(unsigned i,const tmatrix3d& relative)const;
   void DownloadTotalH64(unsigned n,std::vector<tmatrix3d>& total)const;

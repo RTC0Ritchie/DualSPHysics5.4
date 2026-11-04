@@ -33,8 +33,8 @@ void JSphGpuSingle::InitFlexRestartState(){
   User->FlexRestartState.Clear();
   User->FlexReferenceId.clear();User->FlexRestartWriterRunCode.clear();
   User->FlexMaterialDataWritten=false;User->FlexPairDataWritten=false;
-  if(User->FlexRestartBoundaryCorrectionMode)
-    Run_Exceptioon("GPU boundary-layer correction is not migrated.");
+  if(User->FlexRestartBoundaryCorrectionMode==5)
+    Run_Exceptioon("GPU boundarylayercorrection mode 5 is not supported; use mode 0-4.");
   if(!User->IsFlexRestart())return;
   if(!CaseNflexstruc)Run_Exceptioon("GPU restart has no elastic particles.");
   CompleteFlexRestartMaterialState(true);

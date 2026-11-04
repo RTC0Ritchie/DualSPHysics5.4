@@ -280,8 +280,12 @@ void JSphGpuSingle::SaveUserOutput(
         const auto& snapshot=flex[pfs];
         const unsigned body=CODE_GetIbodyFlexStruc(typecode(snapshot.Code));
         if(body>=materials.size())Run_Exceptioon("Invalid GPU flexible body index for output.");
-        if(boundaryCorrectionActive)
-          Run_Exceptioon("GPU Boundary output requires GPU boundary correction support, which is not migrated yet.");
+        if(boundaryCorrectionActive){
+          const auto& boundary=User.FlexRestartBoundaryData;
+          if(pfs>=boundary.Selected.size() || pfs>=boundary.Body.size() || boundary.Body[pfs]!=body)
+            Run_Exceptioon("Invalid boundary correction cache for output.");
+          particle.Boundary=boundary.Selected[pfs] ? 1u : 0u;
+        }
         const auto* bodyData=FlexStruc->GetBody(body);
         if(!bodyData)Run_Exceptioon("Invalid GPU flexible material for output.");
         const StFlexStrucData& material=materials[body];
