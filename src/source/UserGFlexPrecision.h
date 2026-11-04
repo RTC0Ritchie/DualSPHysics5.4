@@ -1,6 +1,16 @@
 #ifndef _UserGFlexPrecision_
 #define _UserGFlexPrecision_
 #include <cstddef>
+#include <vector>
+#include "TypesDef.h"
+
+struct UserGFlexRestartView{
+  const tmatrix3f* Fstar=nullptr;
+  // Optional authoritative mode-2 state. Float mirrors serve modes 0/1 only.
+  const tmatrix3d* Hstar64=nullptr;
+  const double *Jstar64=nullptr,*Volume64=nullptr,*Density64=nullptr;
+  const float *Jstar=nullptr,*Volume=nullptr,*Density=nullptr,*Mass=nullptr;
+};
 #include <vector_types.h>
 
 // Per-solver owner. Its layout does not expose precision policy or CUDA buffers.
@@ -13,6 +23,13 @@ public:
   UserGFlexPrecision(const UserGFlexPrecision&)=delete;
   UserGFlexPrecision& operator=(const UserGFlexPrecision&)=delete;
   void Reset();
+  void UploadRestart(unsigned n,const tmatrix3f* f,const float* j,
+      const float* volume,const float* density,const float* mass,
+      const float* naturalVolume,const float* naturalDensity);
+  void SetRestartH64(unsigned n,const tmatrix3d* h);
+  tmatrix3d TotalH64(unsigned i,const tmatrix3d& relative)const;
+  void DownloadTotalH64(unsigned n,std::vector<tmatrix3d>& total)const;
+  UserGFlexRestartView Restart()const;
   void Allocate(unsigned mode,unsigned particles,unsigned pairs);
   void* State(unsigned mode,unsigned particles)const;
   size_t GetAllocMemoryGpu()const;

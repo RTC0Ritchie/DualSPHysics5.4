@@ -94,6 +94,16 @@ static __device__ tmatrix3f CalcPK1Stress(const tmatrix3f& defgrad,const tmatrix
   //-Convert PK2 to PK1 and return.
   return cumath::MulMatrix3x3(defgrad,pk2);
 }
+
+static __device__ tmatrix3f ReferenceStress(const tmatrix3f& relative,
+    const tmatrix6f& cmat,const UserGFlexRestartView& state,unsigned i){
+  if(!state.Fstar)return CalcPK1Stress(relative,cmat);
+  const auto star=state.Fstar[i];
+  const auto total=cumath::MulMatrix3x3(relative,star);
+  auto p=cumath::MulMatrix3x3(CalcPK1Stress(total,cmat),cumath::TrasMatrix3x3(star));
+  for(int k=0;k<9;k++)(&p.a11)[k]/=state.Jstar[i];
+  return p;
+}
 };
 
 //==============================================================================
@@ -108,7 +118,7 @@ public:
     ,const byte* boundmode,const float3* tangenvel
     ,const StFlexStrucData* flexstrucdata,const unsigned* flexstrucridp
     ,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr,const tmatrix3f* defgrad
-    ,float* flexstrucdt,float3* ace)
+    ,float* flexstrucdt,float3* ace,UserGFlexRestartView restart)
 {
   const unsigned p=blockIdx.x*blockDim.x + threadIdx.x; //-Number of thread.
   if(p<n){
@@ -129,17 +139,17 @@ public:
       const tmatrix3f defgradp1=defgrad[pfs1];
 
       //-Obtains flexible structure data.
-      const float vol0p1=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].vol0;
-      const float rho0p1=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].rho0;
+      const float vol0p1=restart.Volume?restart.Volume[pfs1]:flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].vol0;
+      const float rho0p1=restart.Density?restart.Density[pfs1]:flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].rho0;
       const float youngmod=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].youngmod;
       const float poissratio=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].poissratio;
       const float hgfactor=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].hgfactor;
       const tmatrix6f cmat=flexstrucdata[CODE_GetIbodyFlexStruc(codep1)].cmat;
-      const tmatrix3f pk1p1=Math::CalcPK1Stress(defgradp1,cmat);
+      const tmatrix3f pk1p1=Math::ReferenceStress(defgradp1,cmat,restart,pfs1);
       const tmatrix3f pk1kercorrp1=cumath::MulMatrix3x3(pk1p1,kercorrp1);
 
       //-Get current mass of flexible structure particle.
-      const float mass0p1=vol0p1*rho0p1;
+      const float mass0p1=restart.Mass?restart.Mass[pfs1]:vol0p1*rho0p1;
       const float rhop1=rho0p1/cumath::Determinant3x3(defgradp1);
 
       //-Calculate structural speed of sound.
@@ -220,7 +230,7 @@ public:
         const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
         //-Acceleration due to structure.
         const tmatrix3f defgradp2=defgrad[pfs2];
-        const tmatrix3f pk1p2=Math::CalcPK1Stress(defgradp2,cmat);
+        const tmatrix3f pk1p2=Math::ReferenceStress(defgradp2,restart.Fstar?flexstrucdata[CODE_GetIbodyFlexStruc(code[flexstrucridp[pfs2]])].cmat:cmat,restart,pfs2);
         const tmatrix3f kercorrp2=kercorr[pfs2];
         const tmatrix3f pk1kercorrp2=cumath::MulMatrix3x3(pk1p2,kercorrp2);
         tmatrix3f pk1kercorrp1p2;
@@ -231,7 +241,11 @@ public:
         pk1kercorrdw.x=pk1kercorrp1p2.a11*frx0+pk1kercorrp1p2.a12*fry0+pk1kercorrp1p2.a13*frz0;
         pk1kercorrdw.y=pk1kercorrp1p2.a21*frx0+pk1kercorrp1p2.a22*fry0+pk1kercorrp1p2.a23*frz0;
         pk1kercorrdw.z=pk1kercorrp1p2.a31*frx0+pk1kercorrp1p2.a32*fry0+pk1kercorrp1p2.a33*frz0;
-        acep1.x+=pk1kercorrdw.x*vol0p1/rho0p1; acep1.y+=pk1kercorrdw.y*vol0p1/rho0p1; acep1.z+=pk1kercorrdw.z*vol0p1/rho0p1;
+        if(restart.Fstar){
+          const float scale=vol0p1*restart.Volume[pfs2]/mass0p1;
+          acep1.x+=pk1kercorrdw.x*scale;acep1.y+=pk1kercorrdw.y*scale;acep1.z+=pk1kercorrdw.z*scale;
+        }
+        else{acep1.x+=pk1kercorrdw.x*vol0p1/rho0p1; acep1.y+=pk1kercorrdw.y*vol0p1/rho0p1; acep1.z+=pk1kercorrdw.z*vol0p1/rho0p1;}
         //-Hourglass correction.
         if(hgfactor){
           const unsigned p2=flexstrucridp[pfs2];
@@ -252,7 +266,7 @@ public:
           const float rr=sqrt(rr2);
           const float deltaij=(epsij.x*drx+epsij.y*dry+epsij.z*drz)/rr;
           const float deltaji=-(epsji.x*drx+epsji.y*dry+epsji.z*drz)/rr;
-          const float mulfac=(hgfactor*vol0p1*vol0p1*wab*youngmod/(rr20*rr*mass0p1)*0.5f*(deltaij+deltaji));
+          const float mulfac=(hgfactor*vol0p1*(restart.Volume?restart.Volume[pfs2]:vol0p1)*wab*youngmod/(rr20*rr*mass0p1)*0.5f*(deltaij+deltaji));
           acep1.x-=mulfac*drx; acep1.y-=mulfac*dry; acep1.z-=mulfac*drz;
         }
       }
@@ -269,7 +283,7 @@ public:
   template<TpKernel tker,bool simulate2d>
   static __device__ __forceinline__ void CalcFlexStrucKerCorr(unsigned n,const typecode* code,const StFlexStrucData* flexstrucdata
     ,const unsigned* flexstrucridp,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx
-    ,tmatrix3f* kercorr)
+    ,tmatrix3f* kercorr,UserGFlexRestartView restart)
 {
   const unsigned p=blockIdx.x*blockDim.x + threadIdx.x; //-Number of thread.
   if(p<n){
@@ -289,6 +303,7 @@ public:
       //-Calculate kernel correction matrix.
       for(unsigned pair=0;pair<numpairsp1;pair++){
         const unsigned pfs2=pairidx[pfs1][pair];
+        const float weight=restart.Volume?restart.Volume[pfs2]:vol0p1;
         const float4 pscell0p2=poscell0[pfs2];
         float drx0=pscell0p1.x-pscell0p2.x + CTE.poscellsize*(PSCEL_GetfX(pscell0p1.w)-PSCEL_GetfX(pscell0p2.w));
         float dry0=pscell0p1.y-pscell0p2.y + CTE.poscellsize*(PSCEL_GetfY(pscell0p1.w)-PSCEL_GetfY(pscell0p2.w));
@@ -297,9 +312,9 @@ public:
         //-Computes kernel.
         const float fac0=Math::template GetKernel_Fac<tker>(rr20);
         const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
-        kercorrp1.a11-=vol0p1*drx0*frx0; kercorrp1.a12-=vol0p1*drx0*fry0; kercorrp1.a13-=vol0p1*drx0*frz0;
-        kercorrp1.a21-=vol0p1*dry0*frx0; kercorrp1.a22-=vol0p1*dry0*fry0; kercorrp1.a23-=vol0p1*dry0*frz0;
-        kercorrp1.a31-=vol0p1*drz0*frx0; kercorrp1.a32-=vol0p1*drz0*fry0; kercorrp1.a33-=vol0p1*drz0*frz0;
+        kercorrp1.a11-=weight*drx0*frx0; kercorrp1.a12-=weight*drx0*fry0; kercorrp1.a13-=weight*drx0*frz0;
+        kercorrp1.a21-=weight*dry0*frx0; kercorrp1.a22-=weight*dry0*fry0; kercorrp1.a23-=weight*dry0*frz0;
+        kercorrp1.a31-=weight*drz0*frx0; kercorrp1.a32-=weight*drz0*fry0; kercorrp1.a33-=weight*drz0*frz0;
       }
       if(simulate2d){
         kercorrp1.a12=kercorrp1.a21=kercorrp1.a23=kercorrp1.a32=0.0;
@@ -314,7 +329,7 @@ public:
   static __device__ __forceinline__ void CalcFlexStrucDefGrad(unsigned n,const float4* poscell,const typecode* code
     ,const StFlexStrucData* flexstrucdata,const unsigned* flexstrucridp
     ,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr
-    ,tmatrix3f* defgrad)
+    ,tmatrix3f* defgrad,UserGFlexRestartView restart)
 {
   const unsigned p=blockIdx.x*blockDim.x + threadIdx.x; //-Number of thread.
   if(p<n){
@@ -337,6 +352,7 @@ public:
       //-Calculate deformation gradient.
       for(unsigned pair=0;pair<numpairsp1;pair++){
         const unsigned pfs2=pairidx[pfs1][pair];
+        const float weight=restart.Volume?restart.Volume[pfs2]:vol0p1;
         const unsigned p2=flexstrucridp[pfs2];
         const float4 pscellp2=poscell[p2];
         const float4 pscell0p2=poscell0[pfs2];
@@ -349,9 +365,9 @@ public:
         const float rr20=drx0*drx0+dry0*dry0+drz0*drz0;
         const float fac0=Math::template GetKernel_Fac<tker>(rr20);
         const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
-        defgradp1.a11-=vol0p1*drx*frx0; defgradp1.a12-=vol0p1*drx*fry0; defgradp1.a13-=vol0p1*drx*frz0;
-        defgradp1.a21-=vol0p1*dry*frx0; defgradp1.a22-=vol0p1*dry*fry0; defgradp1.a23-=vol0p1*dry*frz0;
-        defgradp1.a31-=vol0p1*drz*frx0; defgradp1.a32-=vol0p1*drz*fry0; defgradp1.a33-=vol0p1*drz*frz0;
+        defgradp1.a11-=weight*drx*frx0; defgradp1.a12-=weight*drx*fry0; defgradp1.a13-=weight*drx*frz0;
+        defgradp1.a21-=weight*dry*frx0; defgradp1.a22-=weight*dry*fry0; defgradp1.a23-=weight*dry*frz0;
+        defgradp1.a31-=weight*drz*frx0; defgradp1.a32-=weight*drz*fry0; defgradp1.a33-=weight*drz*frz0;
       }
       if(simulate2d){
         defgradp1.a12=defgradp1.a21=defgradp1.a23=defgradp1.a32=0.0;
@@ -392,26 +408,26 @@ __global__ void KerInteractionForcesFlexStruc(unsigned n,float visco
     ,const byte* boundmode,const float3* tangenvel
     ,const StFlexStrucData* flexstrucdata,const unsigned* flexstrucridp
     ,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr,const tmatrix3f* defgrad
-    ,float* flexstrucdt,float3* ace)
+    ,float* flexstrucdt,float3* ace,UserGFlexRestartView restart)
 {
-  UserGFlexCore<Math>::template InteractionForcesFlexStruc<tker,tvisco,mdbc2>(n,visco,scelldiv,nc,cellzero,beginendcellfluid,dcell,poscell,velrhop,code,boundmode,tangenvel,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad,flexstrucdt,ace);
+  UserGFlexCore<Math>::template InteractionForcesFlexStruc<tker,tvisco,mdbc2>(n,visco,scelldiv,nc,cellzero,beginendcellfluid,dcell,poscell,velrhop,code,boundmode,tangenvel,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad,flexstrucdt,ace,restart);
 }
 
 template<class Math,TpKernel tker,bool simulate2d>
 __global__ void KerCalcFlexStrucKerCorr(unsigned n,const typecode* code,const StFlexStrucData* flexstrucdata
     ,const unsigned* flexstrucridp,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx
-    ,tmatrix3f* kercorr)
+    ,tmatrix3f* kercorr,UserGFlexRestartView restart)
 {
-  UserGFlexCore<Math>::template CalcFlexStrucKerCorr<tker,simulate2d>(n,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr);
+  UserGFlexCore<Math>::template CalcFlexStrucKerCorr<tker,simulate2d>(n,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,restart);
 }
 
 template<class Math,TpKernel tker,bool simulate2d>
 __global__ void KerCalcFlexStrucDefGrad(unsigned n,const float4* poscell,const typecode* code
     ,const StFlexStrucData* flexstrucdata,const unsigned* flexstrucridp
     ,const float4* poscell0,const unsigned* numpairs,const unsigned* const* pairidx,const tmatrix3f* kercorr
-    ,tmatrix3f* defgrad)
+    ,tmatrix3f* defgrad,UserGFlexRestartView restart)
 {
-  UserGFlexCore<Math>::template CalcFlexStrucDefGrad<tker,simulate2d>(n,poscell,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad);
+  UserGFlexCore<Math>::template CalcFlexStrucDefGrad<tker,simulate2d>(n,poscell,code,flexstrucdata,flexstrucridp,poscell0,numpairs,pairidx,kercorr,defgrad,restart);
 }
 
 template<class Math>
@@ -470,6 +486,32 @@ public:
     for(int i=0;i<3;i++)for(int j=0;j<3;j++)
       for(int k=0;k<3;k++)c.v[3*i+j]+=a.v[3*i+k]*b.v[3*k+j];
     return c;
+  }
+  static __device__ Matrix ReferenceStress(const Matrix& h,const tmatrix6f& material,
+      const UserGFlexRestartView& state,unsigned i){
+    if(!state.Fstar)return Stress(h,material);
+    if(sizeof(Real)==sizeof(double) && state.Hstar64){
+      Matrix hs,transpose;
+      for(int r=0;r<3;r++)for(int c=0;c<3;c++){
+        hs.v[3*r+c]=Real((&state.Hstar64[i].a11)[3*r+c]);
+        transpose.v[3*r+c]=Real((&state.Hstar64[i].a11)[3*c+r])+(r==c?Real(1):Real(0));
+      }
+      Matrix product=Multiply(h,hs),total;
+      for(int k=0;k<9;k++)total.v[k]=(hs.v[k]+h.v[k])+product.v[k];
+      Matrix p=Multiply(Stress(total,material),transpose);
+      for(int k=0;k<9;k++)p.v[k]/=Real(state.Jstar64[i]);
+      return p;
+    }
+    Matrix star,transpose;
+    for(int r=0;r<3;r++)for(int c=0;c<3;c++){
+      star.v[3*r+c]=Real((&state.Fstar[i].a11)[3*r+c]);
+      transpose.v[3*r+c]=Real((&state.Fstar[i].a11)[3*c+r]);
+    }
+    Matrix total=Multiply(h,star);
+    for(int r=0;r<3;r++)for(int c=0;c<3;c++)total.v[3*r+c]+=star.v[3*r+c]-(r==c?Real(1):Real(0));
+    Matrix p=Multiply(Stress(total,material),transpose);
+    for(int k=0;k<9;k++)p.v[k]/=Real(state.Jstar[i]);
+    return p;
   }
   static __device__ Matrix Stress(const Matrix& h,const tmatrix6f& material){
     // E = (H + H^T + H^T H)/2, exactly the full Green-Lagrange law.
@@ -575,7 +617,7 @@ public:
       const unsigned j=t.pairidx[i][k];const double3 y=s.Reference[j];
       const double d[3]={x.x-y.x,x.y-y.y,x.z-y.z};
       const auto g=Access::template Gradient<kernel>(t,s,i,k);
-      for(int r=0;r<3;r++)for(int c=0;c<3;c++)a[r][c]-=vol*d[r]*double(g.v[c]);
+      for(int r=0;r<3;r++)for(int c=0;c<3;c++)a[r][c]-=(sizeof(R)==sizeof(double) && t.restart.Volume64?t.restart.Volume64[j]:(t.restart.Volume?double(t.restart.Volume[j]):vol))*d[r]*double(g.v[c]);
     }
     if(sim2d){for(int k=0;k<3;k++)a[1][k]=a[k][1]=0;a[1][1]=1;}
     for(int r=0;r<3;r++)a[r][r+3]=1;
@@ -604,12 +646,12 @@ public:
       const R du[3]={R(ui.x-uj.x),R(ui.y-uj.y),R(ui.z-uj.z)};
       const auto g=Access::template Gradient<kernel>(t,s,i,k);
       for(int r=0;r<3;r++)for(int c=0;c<3;c++)
-        if(!sim2d || (r!=1 && c!=1))sum.v[3*r+c]-=R(mat.vol0)*du[r]*g.v[c];
+        if(!sim2d || (r!=1 && c!=1))sum.v[3*r+c]-=(sizeof(R)==sizeof(double) && t.restart.Volume64?R(t.restart.Volume64[j]):R(t.restart.Volume?t.restart.Volume[j]:mat.vol0))*du[r]*g.v[c];
     }
     Matrix h=Math::Multiply(sum,Access::Correction(t,s,i));
     if(sim2d)h.v[1]=h.v[3]=h.v[4]=h.v[5]=h.v[7]=0;
     s.H[i]=h;
-    const Matrix pk=Math::Stress(h,mat.cmat);
+    const Matrix pk=Math::ReferenceStress(h,mat.cmat,t.restart,i);
     s.PK[i]=pk;s.PB[i]=Math::Multiply(pk,s.Correction[i]);
     tmatrix3f f;
     for(int k=0;k<9;k++)(&f.a11)[k]=float(h.v[k]);
@@ -634,7 +676,9 @@ public:
     const unsigned p1=t.flexstrucridp[i];const typecode codep1=t.code[p1];
     if(!CODE_IsFlexStrucFlex(codep1))return;
     const auto mat=t.flexstrucdata[CODE_GetIbodyFlexStruc(codep1)];
-    const float vol0p1=mat.vol0,rho0p1=mat.rho0,mass0p1=vol0p1*rho0p1;
+    const R vol0p1=(sizeof(R)==sizeof(double) && t.restart.Volume64)?R(t.restart.Volume64[i]):R(t.restart.Volume?t.restart.Volume[i]:mat.vol0);
+    const R rho0p1=(sizeof(R)==sizeof(double) && t.restart.Density64)?R(t.restart.Density64[i]):R(t.restart.Density?t.restart.Density[i]:mat.rho0);
+    const float mass0p1=t.restart.Mass?t.restart.Mass[i]:mat.vol0*mat.rho0;
     float4 velrhop1=t.velrhop[p1];
     const float pressp1=cufsph::ComputePressCte(velrhop1.w);
     const R rhop1=R(rho0p1)/Math::DeterminantF(s.H[i]);
@@ -718,11 +762,12 @@ public:
       Matrix pj=s.PB[j];
       // Original law evaluates both stresses with particle i's constitutive tensor.
       // Keep that convention for pairs joining different material/body codes.
-      if(CODE_GetIbodyFlexStruc(t.code[t.flexstrucridp[j]])!=CODE_GetIbodyFlexStruc(codep1))
+      if(!t.restart.Fstar && CODE_GetIbodyFlexStruc(t.code[t.flexstrucridp[j]])!=CODE_GetIbodyFlexStruc(codep1))
         pj=Math::Multiply(Math::Stress(s.H[j],mat.cmat),s.Correction[j]);
       for(int r=0;r<3;r++){
         R force=0;for(int c=0;c<3;c++)force+=(pi.v[3*r+c]+pj.v[3*r+c])*g.v[c];
-        acc[r]+=force*R(vol0p1)/R(rho0p1);
+        if(t.restart.Fstar)acc[r]+=force*(R(vol0p1)*(sizeof(R)==sizeof(double) && t.restart.Volume64?R(t.restart.Volume64[j]):R(t.restart.Volume[j]))/R(mass0p1));
+        else acc[r]+=force*R(vol0p1)/R(rho0p1);
       }
       if(mat.hgfactor){
         const unsigned p2=t.flexstrucridp[j];
@@ -745,7 +790,7 @@ public:
         }
         // Mixed keeps the original float HG denominator; extended keeps it double.
         const R rr0=ref.v[0]*ref.v[0]+ref.v[1]*ref.v[1]+ref.v[2]*ref.v[2];
-        const R scale=R(mat.hgfactor)*R(vol0p1)*R(vol0p1)*wab*R(mat.youngmod)
+        const R scale=R(mat.hgfactor)*R(vol0p1)*(sizeof(R)==sizeof(double) && t.restart.Volume64?R(t.restart.Volume64[j]):R(t.restart.Volume?t.restart.Volume[j]:vol0p1))*wab*R(mat.youngmod)
           /(rr0*rr*R(mass0p1))*R(.5)*delta;
         for(int r=0;r<3;r++)acc[r]-=scale*d[r];
       }
@@ -966,7 +1011,7 @@ template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2> void UserGFlexBackend<M
     const StDivDataGpu& dvd=tfs.divdatag;
     dim3 sgridb=cusph::usergflex::GetSimpleGridSize(tfs.vnpfs,SPHBSIZE);
     cusph::usergflex::KerInteractionForcesFlexStruc<Math,tker,tvisco,mdbc2> <<<sgridb,SPHBSIZE,0,tfs.stm>>>
-        (tfs.vnpfs,tfs.viscob,dvd.scelldiv,dvd.nc,dvd.cellzero,dvd.beginendcell+dvd.cellfluid,tfs.dcell,tfs.poscell,tfs.velrhop,tfs.code,tfs.boundmode,tfs.tangenvel,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,tfs.kercorr,tfs.defgrad,tfs.flexstrucdt,tfs.ace);
+        (tfs.vnpfs,tfs.viscob,dvd.scelldiv,dvd.nc,dvd.cellzero,dvd.beginendcell+dvd.cellfluid,tfs.dcell,tfs.poscell,tfs.velrhop,tfs.code,tfs.boundmode,tfs.tangenvel,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,tfs.kercorr,tfs.defgrad,tfs.flexstrucdt,tfs.ace,tfs.restart);
   }
 }
 
@@ -1024,7 +1069,7 @@ template<TpKernel tker,bool simulate2d> void UserGFlexBackend<Math>::CalcFlexStr
   if(tfs.vnpfs){
     dim3 sgridb=cusph::usergflex::GetSimpleGridSize(tfs.vnpfs,SPHBSIZE);
     cusph::usergflex::KerCalcFlexStrucKerCorr<Math,tker,simulate2d> <<<sgridb,SPHBSIZE>>>
-        (tfs.vnpfs,tfs.code,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,const_cast<tmatrix3f*>(tfs.kercorr));
+        (tfs.vnpfs,tfs.code,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,const_cast<tmatrix3f*>(tfs.kercorr),tfs.restart);
   }
 }
 
@@ -1052,7 +1097,7 @@ template<TpKernel tker,bool simulate2d> void UserGFlexBackend<Math>::CalcFlexStr
   if(tfs.vnpfs){
     dim3 sgridb=cusph::usergflex::GetSimpleGridSize(tfs.vnpfs,SPHBSIZE);
     cusph::usergflex::KerCalcFlexStrucDefGrad<Math,tker,simulate2d> <<<sgridb,SPHBSIZE,0,tfs.stm>>>
-        (tfs.vnpfs,tfs.poscell,tfs.code,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,tfs.kercorr,tfs.defgrad);
+        (tfs.vnpfs,tfs.poscell,tfs.code,tfs.flexstrucdata,tfs.flexstrucridp,tfs.poscell0,tfs.numpairs,tfs.pairidx,tfs.kercorr,tfs.defgrad,tfs.restart);
   }
 }
 
@@ -1088,6 +1133,8 @@ public:
   void* WorkBuffer=nullptr;
   size_t WorkCapacity=0;
   std::vector<void*> Buffers;
+  UserGFlexRestartView Restart;
+  std::vector<tmatrix3d> HostHstar64;
   UserGFlexState<float> Mixed={};
   UserGFlexState<double> Extended={};
   static void Check(cudaError_t err){
@@ -1125,6 +1172,75 @@ void* UserGFlexPrecision::State(unsigned mode,unsigned particles)const{
   if(!Data || Data->Mode!=mode || Data->Particles!=particles)
     throw std::runtime_error("GPU elastic precision cache mismatch. Reinitialize before changing mode or topology.");
   return mode==1?static_cast<void*>(&Data->Mixed):static_cast<void*>(&Data->Extended);
+}
+UserGFlexRestartView UserGFlexPrecision::Restart()const{
+  return Data?Data->Restart:UserGFlexRestartView();
+}
+void UserGFlexPrecision::UploadRestart(unsigned n,const tmatrix3f* f,const float* j,
+    const float* volume,const float* density,const float* mass,
+    const float* naturalVolume,const float* naturalDensity){
+  if(!Data)Data=new Impl;
+  if(Data->Restart.Fstar)throw std::runtime_error("Elastic restart is already uploaded.");
+  tmatrix3f* fg=nullptr;float *jg=nullptr,*vg=nullptr,*rg=nullptr,*mg=nullptr;
+  Data->Alloc(fg,n);Data->Alloc(jg,n);Data->Alloc(vg,n);Data->Alloc(rg,n);Data->Alloc(mg,n);
+  Impl::Check(cudaMemcpy(fg,f,n*sizeof(tmatrix3f),cudaMemcpyHostToDevice));
+  Impl::Check(cudaMemcpy(jg,j,n*sizeof(float),cudaMemcpyHostToDevice));
+  Impl::Check(cudaMemcpy(vg,volume,n*sizeof(float),cudaMemcpyHostToDevice));
+  Impl::Check(cudaMemcpy(rg,density,n*sizeof(float),cudaMemcpyHostToDevice));
+  Impl::Check(cudaMemcpy(mg,mass,n*sizeof(float),cudaMemcpyHostToDevice));
+  Data->Restart.Fstar=fg;Data->Restart.Jstar=jg;Data->Restart.Volume=vg;
+  Data->Restart.Density=rg;Data->Restart.Mass=mg;
+  if(Data->Mode==2){
+    if(Data->HostHstar64.size()!=n)throw std::runtime_error("Missing double elastic reference state.");
+    std::vector<double> j64(n),v64(n),r64(n);
+    for(unsigned i=0;i<n;i++){
+      const auto& h=Data->HostHstar64[i];
+      const double a=1+h.a11,b=h.a12,c=h.a13,d=h.a21,e=1+h.a22,
+          f=h.a23,g=h.a31,k=h.a32,l=1+h.a33;
+      j64[i]=a*(e*l-f*k)-b*(d*l-f*g)+c*(d*k-e*g);
+      v64[i]=double(naturalVolume[i])*j64[i];
+      r64[i]=double(naturalDensity[i])/j64[i];
+      if(!std::isfinite(j64[i]) || j64[i]<=0 || !std::isfinite(v64[i]) || v64[i]<=0 ||
+         !std::isfinite(r64[i]) || r64[i]<=0)throw std::runtime_error("Invalid double elastic reference material.");
+    }
+    tmatrix3d* hg=nullptr;double *jd=nullptr,*vd=nullptr,*rd=nullptr;
+    Data->Alloc(hg,n);Data->Alloc(jd,n);Data->Alloc(vd,n);Data->Alloc(rd,n);
+    Impl::Check(cudaMemcpy(hg,Data->HostHstar64.data(),n*sizeof(tmatrix3d),cudaMemcpyHostToDevice));
+    Impl::Check(cudaMemcpy(jd,j64.data(),n*sizeof(double),cudaMemcpyHostToDevice));
+    Impl::Check(cudaMemcpy(vd,v64.data(),n*sizeof(double),cudaMemcpyHostToDevice));
+    Impl::Check(cudaMemcpy(rd,r64.data(),n*sizeof(double),cudaMemcpyHostToDevice));
+    Data->Restart.Hstar64=hg;Data->Restart.Jstar64=jd;
+    Data->Restart.Volume64=vd;Data->Restart.Density64=rd;
+  }
+}
+// Host methods used only at initialisation and saved frames.
+void UserGFlexPrecision::SetRestartH64(unsigned n,const tmatrix3d* h){
+  if(!Data || Data->Mode!=2 || Data->Particles!=n || Data->Restart.Fstar)
+    throw std::runtime_error("Invalid double restart setup order.");
+  for(unsigned i=0;i<n;i++)for(int k=0;k<9;k++)
+    if(!std::isfinite((&h[i].a11)[k]))throw std::runtime_error("Non-finite double restart H.");
+  Data->HostHstar64.assign(h,h+n);
+}
+tmatrix3d UserGFlexPrecision::TotalH64(unsigned i,const tmatrix3d& relative)const{
+  if(!Data || Data->Mode!=2 || i>=Data->Particles)
+    throw std::runtime_error("Double elastic output cache mismatch.");
+  if(Data->HostHstar64.empty())return relative;
+  const auto& star=Data->HostHstar64[i];tmatrix3d total;
+  // (I+Hr)(I+Hs)-I = Hs+Hr+Hr*Hs. Never subtract I from rounded F.
+  for(int r=0;r<3;r++)for(int c=0;c<3;c++){
+    double v=(&star.a11)[3*r+c]+(&relative.a11)[3*r+c];
+    for(int k=0;k<3;k++)v+=(&relative.a11)[3*r+k]*(&star.a11)[3*k+c];
+    (&total.a11)[3*r+c]=v;
+  }
+  return total;
+}
+void UserGFlexPrecision::DownloadTotalH64(unsigned n,std::vector<tmatrix3d>& total)const{
+  if(!Data || Data->Mode!=2 || Data->Particles!=n)
+    throw std::runtime_error("Double elastic save cache mismatch.");
+  static_assert(sizeof(UserGFlexMatrix<double>)==sizeof(tmatrix3d),"Double H layout mismatch");
+  total.resize(n);
+  Impl::Check(cudaMemcpy(total.data(),Data->Extended.H,n*sizeof(tmatrix3d),cudaMemcpyDeviceToHost));
+  for(unsigned i=0;i<n;i++)total[i]=TotalH64(i,total[i]);
 }
 size_t UserGFlexPrecision::GetAllocMemoryGpu()const{return Data?Data->Bytes+Data->WorkCapacity:0;}
 void* UserGFlexPrecision::WorkScratch(size_t bytes){

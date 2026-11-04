@@ -83,6 +83,16 @@ protected:
   void FinishRun(bool stop);
 
   //<vs_flexstruc_ini>
+  void SaveFlexData();
+  void RestoreFlexContinuationClampCodes();
+  void LoadFlexDirectContinuationState();
+  void SaveFlexMaterialDataOnce();
+  void LoadFlexMaterialData(const std::string& storage);
+  void InitFlexRestartState();
+  void ConfigFlexRestartMode();
+  void CompleteFlexRestartMaterialState(bool validateOnly=false);
+  void LoadBoundaryMotionRestart();
+  void SaveBoundaryMotionRestart();
   void FlexStrucInit();
   void UpdateFlexStrucGeometry();
   //<vs_flexstruc_end>

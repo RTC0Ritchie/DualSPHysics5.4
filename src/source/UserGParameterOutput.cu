@@ -1,5 +1,6 @@
 #include "JSphGpuSingle.h"
 #include "UserGParameterOutput.h"
+#include "UserGFlexPrecision.h"
 #include "UserParameterOutput.h"
 #include "UserGParameters.h"
 #include "JSphGpu_ker.h"
@@ -108,8 +109,7 @@ void JSphGpuSingle::SaveUserOutput(
     needTensors|=HasMaterialFields(c.Dynamic);
     needLive|=std::find(c.Mk.begin(),c.Mk.end(),65536u)!=c.Mk.end();
   }
-  if(needFlexMap && User.IsFlexRestart())
-    Run_Exceptioon("GPU user material output requires GPU elastic restart support, which is not migrated yet.");
+
 
   std::vector<UserGParameterOutput::FlexParticle> flex;
   std::vector<StFlexStrucData> materials;
@@ -285,18 +285,30 @@ void JSphGpuSingle::SaveUserOutput(
         const auto* bodyData=FlexStruc->GetBody(body);
         if(!bodyData)Run_Exceptioon("Invalid GPU flexible material for output.");
         const StFlexStrucData& material=materials[body];
-        const double naturalDensity=double(material.rho0);
-        const double naturalVolume=double(material.vol0);
-        if(needParticleMass)particle.Mass=naturalDensity*naturalVolume;
+        const double naturalDensity=User.IsFlexRestart()?User.FlexRestartState.NaturalDensity[pfs]:double(material.rho0);
+        const double naturalVolume=User.IsFlexRestart()?User.FlexRestartState.NaturalVolume[pfs]:double(material.vol0);
+        if(needParticleMass)particle.Mass=User.IsFlexRestart()?User.FlexRestartState.ParticleMass[pfs]:naturalDensity*naturalVolume;
         if(outputMaterial){
           if(!snapshot.Pairs)Run_Exceptioon("Cannot compute material fields without structural neighbours.");
           double j=0;
           if(precisionMode){
-            j=UserGOutputMath::Calculate(snapshot.H,material,bodyData->GetConstitModel()
+            tmatrix3d totalH=snapshot.H;
+            if(precisionMode==2)totalH=FlexPrecision->TotalH64(pfs,snapshot.H);
+            else if(User.IsFlexRestart()){
+              const auto& star=User.GetFlexRestartFstar(pfs,id);
+              tmatrix3d composed={};
+              for(int r=0;r<3;r++)for(int c=0;c<3;c++){
+                double h=double((&star.a11)[3*r+c])-(r==c?1.:0.);
+                for(int k=0;k<3;k++)h+=(&totalH.a11)[3*r+k]*double((&star.a11)[3*k+c]);
+                (&composed.a11)[3*r+c]=h;
+              }
+              totalH=composed;
+            }
+            j=UserGOutputMath::Calculate(totalH,material,bodyData->GetConstitModel()
               ,outputStrain,outputStress,particle);
           }
           else{
-            const tmatrix3f f=snapshot.F;
+            const tmatrix3f f=User.IsFlexRestart()?fmath::MulMatrix3x3(snapshot.F,User.GetFlexRestartFstar(pfs,id)):snapshot.F;
             j=fmath::Determinant3x3(f);
             if(outputStrain){
               const tmatrix3f c=fmath::MulMatrix3x3(fmath::TrasMatrix3x3(f),f);
@@ -387,6 +399,7 @@ void JSphGpuSingle::SaveUserOutput(
 //==============================================================================
 // Device gathers and download adapters.
 #include "UserGParameterOutput.h"
+#include "UserGFlexPrecision.h"
 #include "UserGFlexPrecision.h"
 #include <stdexcept>
 #include <string>

@@ -2,6 +2,7 @@
 #define _UserGInteractionForcesFlexStruc_
 
 #include "JSphGpu_ker.h"
+#include "UserGFlexPrecision.h"
 
 class UserGFlexPrecision;
 
@@ -45,6 +46,7 @@ struct StrInterParmsFlexStrucg{
   double dp; // Preserve the CPU double spacing for analytic surface geometry.
   // Optional device mass indexed by stable elastic index (future restart adapter).
   const float* contactmass=nullptr;
+  UserGFlexRestartView restart;
 
   ///Structure constructor.
   StrInterParmsFlexStrucg(
@@ -82,6 +84,7 @@ struct StrInterParmsFlexStrucg{
     this->stm=stm;
     this->user=user;
     this->dp=dp;
+    if(precision){restart=precision->Restart();contactmass=restart.Mass;}
     this->precision=precision; this->posxy=posxy; this->posz=posz;
   }
 };

@@ -174,11 +174,13 @@ void JSphGpuSingle::ConfigDomain(){
   acfloat3 boundnorc("boundnor",Arrays_Cpu,UseNormals);
   if(UseNormals){
     boundnorc.Memset(0,Np);
-    if(PartsLoaded->GetBoundNor())boundnorc.CopyFrom(PartsLoaded->GetBoundNor(),CaseNbound);
-    else if(AbortNoNormals)Run_ExceptioonFile(
-      "No normal data for mDBC in the input file.",PartsLoaded->GetFileLoaded());
-    else Log->PrintWarning(fun::PrintStr("No normal data for mDBC in the input file (%s)."
-      ,PartsLoaded->GetFileLoaded().c_str()));
+    if(!PartBegin){
+      if(PartsLoaded->GetBoundNor())boundnorc.CopyFrom(PartsLoaded->GetBoundNor(),CaseNbound);
+      else if(AbortNoNormals)Run_ExceptioonFile(
+        "No normal data for mDBC in the input file.",PartsLoaded->GetFileLoaded());
+      else Log->PrintWarning(fun::PrintStr("No normal data for mDBC in the input file (%s)."
+        ,PartsLoaded->GetFileLoaded().c_str()));
+    }
   }
 
   //-Computes radius of floating bodies.
@@ -976,6 +978,7 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   //-Load parameters and input data.
   LoadConfig(cfg);
   LoadCaseParticles();
+  ConfigFlexRestartMode();
   VisuConfig();
   ConfigDomain();
   ConfigRunMode();
@@ -1121,6 +1124,7 @@ void JSphGpuSingle::SaveData(){
   JDataArrays arrays;
   AddBasicArrays(arrays,npsave,AuxPos_c->cptr(),Idp_c->cptr(),AuxVel_c->cptr(),AuxRho_c->cptr());
   JSph::SaveData(npsave,arrays,1,&vdom,infoplus);
+  if(save)SaveFlexData();
   // Output must precede SaveExtraData, which reuses Idp_c/AuxVel_c scratch buffers.
   if(save)SaveUserOutput(npsave,Idp_c->cptr(),AuxPos_c->cptr()
     ,AuxVel_c->cptr(),AuxRho_c->cptr());
@@ -1150,6 +1154,7 @@ void JSphGpuSingle::SaveExtraData(){
       SvExtraDataBi4->AddNormals(UseNormalsFt,Np,Npb,Idp_c->cptr()
         ,(PeriActive? Code_c->cptr(): NULL),nor_c->cptr());
     }
+    SaveBoundaryMotionRestart();
     //-Saves file.
     SvExtraDataBi4->SavePartData();
   }
@@ -1206,7 +1211,12 @@ void JSphGpuSingle::FlexStrucInit(){
   cudaMemcpy(Code_c->ptr(),Code_g->ptr(),sizeof(typecode)*Npb,cudaMemcpyDeviceToHost);
   FlexStruc->ConfigCode(Npb,Code_c->ptr());
   cudaMemcpy(Code_g->ptr(),Code_c->ptr(),sizeof(typecode)*Npb,cudaMemcpyHostToDevice);
-  cusph::SetFlexStrucClampCodes(Npb,PosCell_g->cptr(),FlexStrucDatag,Code_g->ptr());
+  if(PartBegin){
+    RestoreFlexContinuationClampCodes();
+    cudaMemcpy(Code_g->ptr(),Code_c->cptr(),sizeof(typecode)*Npb,cudaMemcpyHostToDevice);
+    LoadBoundaryMotionRestart();
+  }
+  else cusph::SetFlexStrucClampCodes(Npb,PosCell_g->cptr(),FlexStrucDatag,Code_g->ptr());
   cudaMemcpy(Code_c->ptr(),Code_g->cptr(),sizeof(typecode)*Npb,cudaMemcpyDeviceToHost);
   //-Count number of flexible structure particles.
   CaseNflexstruc=cusph::CountFlexStrucParts(Npb,Code_g->cptr());
@@ -1240,6 +1250,7 @@ void JSphGpuSingle::FlexStrucInit(){
   cudaMemcpy(PairIdxg,pairidx.data(),sizeof(unsigned*)*CaseNflexstruc,cudaMemcpyHostToDevice);
   FlexPrecision->Allocate(unsigned(UserGParameters::ReadFlex(User.get()).PrecisionMode)
     ,CaseNflexstruc,numpairstot);
+  InitFlexRestartState();
   //-Set the indices for each particle pair.
   cusph::SetFlexStrucPairs(CaseNflexstruc,PosCell0g,PairIdxg);
   //-Interaction parameters.
