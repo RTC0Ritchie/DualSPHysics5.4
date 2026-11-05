@@ -138,9 +138,9 @@ public:
   using Point=UserGIceMath::Point;using View=UserGIceMath::View;
   unsigned Nbound,Ntop,Nright,Nbottom;bool Top,Right,Bottom;
   double Dp,H,WetTime,HCoef;
-  unsigned *Map,*TopIds,*RightIds,*BottomIds,*SeedCount;
+  unsigned *Map,*TopIds,*RightIds,*BottomIds;
   Point *TopNow,*TopOld,*RightNow,*RightOld,*BottomNow,*BottomOld;
-  double *Support,*Age,*Arc,*Seeds;
+  double *Support,*Age,*Edge;
   unsigned char* Active;
   double2* OldFluid;
   unsigned Noutline,*OutlineIds,*Invalid;
@@ -163,31 +163,44 @@ __global__ void UserGIceProfile(unsigned n,const unsigned* identity,unsigned nb,
     if(previous>=nb || (right?z[previous]-rz:q.x-xy[previous].x)<=1e-6*d.Dp){asm("trap;");return;}
   }
   out[i]={q.x,mirror?-rz:rz,v.x,mirror?-double(v.z):double(v.z)};
+  // Current bottom edge lengths, computed in parallel before the history pass.
+  if(mirror && out==d.BottomOld){
+    if(i){const unsigned previous=d.Map[identity[i-1]];
+      d.Edge[i]=hypot(q.x-xy[previous].x,rz-z[previous]);
+    }
+    else d.Edge[0]=0;
+  }
 }
 __global__ void UserGIceOldFluid(unsigned np,unsigned nb,const double2* xy,const double* z,double2* out){
   const unsigned p=nb+blockIdx.x*blockDim.x+threadIdx.x;if(p<np)out[p-nb]=make_double2(xy[p].x,z[p]);
 }
-// Preserve CPU arclength summation order. This is O(surface nodes), not O(fluid).
+// Each material node owns its age and active flag. Only a local arclength
+// neighbourhood is needed; no global prefix sum or dry-seed compaction.
+// This retains the CPU thresholds, wet hold time, active latch and end margin.
 __global__ void UserGIceWetHistory(UserGIceDevice d,double dt){
-  if(blockIdx.x || threadIdx.x)return;
-  unsigned count=0;double arc=0;
-  for(unsigned j=0;j<d.Nbottom;j++){
-    if(j)arc+=hypot(d.BottomOld[j].x-d.BottomOld[j-1].x,d.BottomOld[j].z-d.BottomOld[j-1].z);
-    d.Arc[j]=arc;const double support=d.Support[d.BottomIds[j]];
-    d.Age[j]=support>=.6?fmin(d.WetTime,d.Age[j]+dt):0;
-    if(support<.3)d.Seeds[count++]=arc;
-  }
-  *d.SeedCount=count;
-}
-__global__ void UserGIceActivate(UserGIceDevice d){
   const unsigned j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=d.Nbottom)return;
-  const unsigned count=*d.SeedCount;unsigned lo=0,hi=count;
-  while(lo<hi){const unsigned m=lo+(hi-lo)/2;if(d.Seeds[m]<d.Arc[j])lo=m+1;else hi=m;}
-  double dist=1.7976931348623157e308;
-  if(lo<count)dist=fabs(d.Seeds[lo]-d.Arc[j]);
-  if(lo)dist=fmin(dist,fabs(d.Seeds[lo-1]-d.Arc[j]));
-  d.Active[j]=((dist<=d.HCoef*d.H || d.Active[j]) && d.Age[j]<d.WetTime
-      && d.Arc[j]>2*d.H && d.Arc[d.Nbottom-1]-d.Arc[j]>2*d.H);
+  const double support=d.Support[d.BottomIds[j]];
+  const double age=support>=.6?fmin(d.WetTime,d.Age[j]+dt):0;
+  d.Age[j]=age;
+  if(age>=d.WetTime || j==0 || j+1==d.Nbottom){d.Active[j]=0;return;}
+  const double reach=d.HCoef*d.H,margin=2*d.H;
+  bool active=d.Active[j] || support<.3;
+  double distance=0;
+  for(unsigned k=j;k>0;){
+    distance+=d.Edge[k];--k;
+    if(distance<=reach && d.Support[d.BottomIds[k]]<.3)active=true;
+    if(k==0 && distance<=margin){d.Active[j]=0;return;}
+    // Once activation is known, only the endpoint margin remains relevant.
+    if(distance>margin && (active || distance>reach))break;
+  }
+  distance=0;
+  for(unsigned k=j;k+1<d.Nbottom;){
+    ++k;distance+=d.Edge[k];
+    if(distance<=reach && d.Support[d.BottomIds[k]]<.3)active=true;
+    if(k+1==d.Nbottom && distance<=margin){d.Active[j]=0;return;}
+    if(distance>margin && (active || distance>reach))break;
+  }
+  d.Active[j]=active;
 }
 // Equivalent to KerUpdatePos<false>; the protection disallows periodic domains.
 __device__ void UserGIceMove(unsigned p,double dx,double dz,double2* xy,double* z,
@@ -304,8 +317,8 @@ UserGIceProtection::UserGIceProtection(const std::vector<Reference>& ref,bool to
     IceBottomNoPen::State state;IceBottomNoPen::Init(state,source,dp,nbound);
     d.Nbottom=state.Ids.size();d.BottomIds=a.Ids(state.Ids);
     d.BottomNow=a.Allocate<UserGIceDevice::Point>(d.Nbottom);d.BottomOld=a.Allocate<UserGIceDevice::Point>(d.Nbottom);
-    d.Age=a.Allocate<double>(d.Nbottom);d.Arc=a.Allocate<double>(d.Nbottom);d.Seeds=a.Allocate<double>(d.Nbottom);
-    d.Active=a.Allocate<unsigned char>(d.Nbottom);d.SeedCount=a.Allocate<unsigned>(1);
+    d.Age=a.Allocate<double>(d.Nbottom);d.Edge=a.Allocate<double>(d.Nbottom);
+    d.Active=a.Allocate<unsigned char>(d.Nbottom);
   }
   d.Map=a.Allocate<unsigned>(nbound);Impl::Check(cudaMemset(d.Map,0xff,size_t(nbound)*sizeof(unsigned)));
   if(inout){
@@ -345,7 +358,7 @@ void UserGIceProtection::Capture(bool predictor,double time,unsigned np,unsigned
     a.Profiles(nb,ids,code,xy,z,vel,true);
     if(d.Bottom){
       const double dt=a.LastTime<0?0:std::max(0.,time-a.LastTime);a.LastTime=time;
-      UserGIceWetHistory<<<1,1>>>(d,dt);UserGIceActivate<<<(d.Nbottom+127)/128,128>>>(d);
+      UserGIceWetHistory<<<(d.Nbottom+127)/128,128>>>(d,dt);
     }
   }
   Impl::Check(cudaGetLastError());

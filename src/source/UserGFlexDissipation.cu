@@ -1,3 +1,4 @@
+#include <cstring>
 // CPU counterpart: UserFlexDissipation.cpp. Reference cache is uploaded once;
 // both stage passes, including the time-step bound, remain on the GPU.
 // Build this module with --fmad=false: cR gates the complete vector jump on
@@ -353,6 +354,8 @@ public:
   using R=typename std::conditional<mode==0,float,double>::type;
   using B=typename std::conditional<mode==2,double,float>::type;
   template<unsigned n,class T=R> struct Array{
+    using Scalar=T;
+    static constexpr unsigned Count=n;
     T v[n];
     __host__ __device__ T& operator[](unsigned i){return v[i];}
     __host__ __device__ const T& operator[](unsigned i)const{return v[i];}
@@ -366,20 +369,41 @@ public:
   struct CRWeight{V R;B p,s;};
   struct KVWeight{Array<3,B> q;B norm;};
 };
-// A warp reads the same neighbour ordinal from adjacent rows. Interleave
-// rows in groups of 32 without changing each particle's summation order.
+// Word-interleaved storage: adjacent threads load the same field contiguously.
+// memcpy preserves the exact cached bits, including double components.
 template<class T> struct UserGDissSpan{
-  T* p;unsigned n,stride;
+  unsigned* p;unsigned n,stride;
+  __device__ T operator[](unsigned i)const{
+    T value;
+    #pragma unroll
+    for(unsigned k=0;k<sizeof(T)/sizeof(unsigned);k++){
+      const unsigned word=p[(size_t(i)*(sizeof(T)/sizeof(unsigned))+k)*stride];
+      memcpy(reinterpret_cast<unsigned char*>(&value)+k*sizeof(unsigned),&word,sizeof(unsigned));
+    }
+    return value;
+  }
   struct Iterator{
-    const T* p;unsigned k,stride;
-    __device__ const T& operator*()const{return p[size_t(k)*stride];}
+    const UserGDissSpan* span;unsigned k;
+    __device__ T operator*()const{return (*span)[k];}
     __device__ Iterator& operator++(){++k;return *this;}
     __device__ bool operator!=(const Iterator& b)const{return k!=b.k;}
   };
-  __device__ Iterator begin()const{return {p,0,stride};}
-  __device__ Iterator end()const{return {p,n,stride};}
+  __device__ Iterator begin()const{return {this,0};}
+  __device__ Iterator end()const{return {this,n};}
   __device__ unsigned size()const{return n;}
-  __device__ const T& operator[](unsigned i)const{return p[size_t(i)*stride];}
+};
+template<class T> struct UserGDissField{
+  typename T::Scalar* p;unsigned n;
+  __device__ T operator[](unsigned i)const{
+    T value;
+    #pragma unroll
+    for(unsigned k=0;k<T::Count;k++)value[k]=p[size_t(k)*n+i];
+    return value;
+  }
+  __device__ void Store(unsigned i,const T& value){
+    #pragma unroll
+    for(unsigned k=0;k<T::Count;k++)p[size_t(k)*n+i]=value[k];
+  }
 };
 struct UserGDissPositions{
   const double2* xy;const double* z;
@@ -401,8 +425,9 @@ public:
   __device__ static R Min(R x,R y){return mode==0?R(fminf(float(x),float(y))):R(fmin(double(x),double(y)));}
   unsigned N;B H,MaxCp;
   Span<Edge>* Rows;Span<CRWeight>* Weights;Span<KVWeight>* ViscWeights;
-  M *Grad;BM *Pv;
+  UserGDissField<M> Grad;UserGDissField<BM> Pv;
   B *Rho,*Eta0,*SumG,*NormSumG,*Q;
+  B* SignedSumG;
   unsigned char* ReuseF;
   __device__ static V Scale(V a,R s){for(R& q:a)q*=s;return a;}
   __device__ static R Dot(const V& a,const V& b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
@@ -448,7 +473,7 @@ __device__ bool BuildKV(unsigned i,const M& F,const M& L){
   }
   if(!isfinite(Q[i]))return false;
   for(R q:P)if(!isfinite(q))return false;
-  for(unsigned k=0;k<9;k++)Pv[i][k]=B(P[k]);
+  BM packed;for(unsigned k=0;k<9;k++)packed[k]=B(P[k]);Pv.Store(i,packed);
   return true;
 }
 
@@ -458,7 +483,7 @@ __device__ bool PrepareT(
     const unsigned* rid,const M& existingF)
 {
   if(kv){
-    Pv[i]=BM{{0}};
+    Pv.Store(i,BM{{0}});
     Q[i]=0;
   }
 
@@ -520,7 +545,7 @@ __device__ bool PrepareT(
 
   for(R q:L)if(!isfinite(q))return false;
 
-  if(cr)Grad[i]=L;
+  if(cr)Grad.Store(i,L);
 
   if(!kv || Eta0[i]==0 || SumG[i]==0)return true;
 
@@ -552,7 +577,14 @@ __device__ bool AddParticleT(
     Li=Grad[i];
   }
 
-  if(kv)Pi=Pv[i];
+  if(kv){
+    Pi=Pv[i];
+    // Reference gradients are constant over the lifetime of this cache.
+    // Move the repeated self-stress product outside the neighbour loop.
+    for(unsigned a=0;a<3;a++)if(!twoD || a!=1)
+      for(unsigned b=0;b<3;b++)if(!twoD || b!=1)
+        av[a]+=Pi[3*a+b]*SignedSumG[size_t(b)*N+i];
+  }
 
   const auto& row=Rows[i];
 
@@ -631,14 +663,13 @@ __device__ bool AddParticleT(
       const auto& Pj=Pv[j];
 
       for(unsigned a=0;a<3;a++)if(!twoD || a!=1){
-        B ai=0,aj=0;
+        B aj=0;
 
         for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
-          ai+=Pi[3*a+b]*B(e.g[b]);
           aj+=Pj[3*a+b]*w.q[b];
         }
 
-        av[a]+=ai+aj;
+        av[a]+=aj;
       }
 
       rate+=Q[j]*w.norm;
@@ -733,33 +764,33 @@ public:
   }
   template<class T> UserGDissSpan<T>* Flatten(const std::vector<std::vector<T>>& rows){
     if(rows.empty())return nullptr;
-    std::vector<T> flat;
+    static_assert(sizeof(T)%sizeof(unsigned)==0,"Cache word alignment");
+    constexpr unsigned words=sizeof(T)/sizeof(unsigned);
+    std::vector<unsigned> flat;
     std::vector<size_t> offsets(rows.size());
     std::vector<unsigned> strides(rows.size(),1);
     for(size_t first=0;first<rows.size();first+=32){
-      const size_t end=std::min(first+32,rows.size());
-      size_t count=0,total=0;
-      for(size_t i=first;i<end;i++){
-        count=std::max(count,rows[i].size());total+=rows[i].size();
-      }
+      const size_t end=std::min(first+32,rows.size());size_t count=0,total=0;
+      for(size_t i=first;i<end;i++){count=std::max(count,rows[i].size());total+=rows[i].size();}
       const size_t width=end-first;
-      // Bound padding to at most the live entries. Irregular groups retain
-      // compact rows; this is a storage bound, not a physics/user parameter.
       if(width*count<=2*total){
-        const size_t base=flat.size();flat.resize(base+width*count);
+        const size_t base=flat.size();flat.resize(base+width*count*words);
         for(size_t i=first;i<end;i++){
           offsets[i]=base+i-first;strides[i]=unsigned(width);
-          for(size_t k=0;k<rows[i].size();k++)flat[base+k*width+i-first]=rows[i][k];
+          for(size_t k=0;k<rows[i].size();k++)for(unsigned c=0;c<words;c++){
+            unsigned word;std::memcpy(&word,reinterpret_cast<const unsigned char*>(&rows[i][k])+c*sizeof(unsigned),sizeof(unsigned));
+            flat[base+(k*words+c)*width+i-first]=word;
+          }
         }
       }else{
         for(size_t i=first;i<end;i++){
-          offsets[i]=flat.size();flat.insert(flat.end(),rows[i].begin(),rows[i].end());
+          offsets[i]=flat.size();const size_t base=flat.size();flat.resize(base+rows[i].size()*words);
+          if(!rows[i].empty())std::memcpy(flat.data()+base,rows[i].data(),rows[i].size()*sizeof(T));
         }
       }
     }
-    T* p=Copy(flat);std::vector<UserGDissSpan<T>> spans;
-    for(size_t i=0;i<rows.size();i++)
-      spans.push_back({rows[i].empty()?nullptr:p+offsets[i],unsigned(rows[i].size()),strides[i]});
+    unsigned* p=Copy(flat);std::vector<UserGDissSpan<T>> spans;
+    for(size_t i=0;i<rows.size();i++)spans.push_back({rows[i].empty()?nullptr:p+offsets[i],unsigned(rows[i].size()),strides[i]});
     return Copy(spans);
   }
   template<unsigned mode> void Init(UserGDissDevice<mode>& d,const UserGDissCache& c){
@@ -777,9 +808,16 @@ public:
     for(unsigned i=0;i<visc.size();i++)for(const auto& e:c.ViscWeights[i]){
       typename P::KVWeight a={};a.norm=R(e.norm);for(unsigned k=0;k<3;k++)a.q[k]=e.q[k];visc[i].push_back(a);
     }
+    std::vector<B> signedg(size_t(c.N)*3,0);
+    if(c.KV)for(unsigned i=0;i<c.N;i++)for(unsigned b=0;b<3;b++){
+      double sum=0;
+      for(const auto& e:rows[i])sum+=double(B(e.g[b]));
+      signedg[size_t(b)*c.N+i]=B(sum);
+    }
+    d.SignedSumG=Copy(signedg);
     d.Rows=Flatten(rows);d.Weights=Flatten(weights);d.ViscWeights=Flatten(visc);
-    d.Grad=Copy(std::vector<typename P::M>(c.Grad.size()));
-    d.Pv=Copy(std::vector<typename P::BM>(c.Pv.size()));
+    d.Grad={Copy(std::vector<R>(c.Grad.size()*9)),c.N};
+    d.Pv={Copy(std::vector<B>(c.Pv.size()*9)),c.N};
     d.Rho=Copy(std::vector<B>(c.Rho.begin(),c.Rho.end()));
     d.Eta0=Copy(std::vector<B>(c.Eta0.begin(),c.Eta0.end()));
     d.SumG=Copy(std::vector<B>(c.SumG.begin(),c.SumG.end()));
