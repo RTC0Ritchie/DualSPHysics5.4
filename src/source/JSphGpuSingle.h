@@ -45,6 +45,7 @@ protected:
   UserGMdbc* MdbcUser=nullptr;
   UserGIceProtection* IceProtection=nullptr;
   void InitIceProtection();
+  void ValidateIceInOut();
   void CaptureIceProtection(bool predictor);
   void ApplyIceProtection(bool predictor);
 
@@ -124,6 +125,9 @@ public:
 //--------------------------------------------
 protected:
   void InOutInit(double timestepini);
+  bool InOutSaveEnabled()const;
+  void InOutCheckSaveData();
+  void InOutSaveData(bool save,unsigned npsave);
   void InOutIgnoreFluidDef(const std::vector<unsigned>& mkfluidlist,typecode* codeg);
   void InOutCheckProximity(unsigned newnp);
   void InOutComputeStep(double stepdt);

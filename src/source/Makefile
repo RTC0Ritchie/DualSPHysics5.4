@@ -292,3 +292,7 @@ UserGMdbc.o: UserGMdbc.cu UserGMdbc.h UserParameters.h
 JSphGpuSingle.o: UserGIceProtection.h
 UserGIceProtection.o: UserGIceProtection.cu UserGIceProtection.h UserIceTopProtection.h UserIceBottomProtection.h UserGMdbc.h UserParameters.h JSphGpuSingle.h
 	$(NCC) $(NCCFLAGS) $(filter -D% -I%,$(CCFLAGS)) $(addprefix -Xcompiler=,$(filter -fopenmp -ffast-math -march=native,$(CCFLAGS))) --fmad=false UserGIceProtection.cu
+
+# INOUT checkpoint helpers; no JSphGpu_ker dependency is introduced.
+JSphCpuSingle.o JSphCpuSingle_InOut.o JSphGpuSingle_InOut.o: UserInOutData.h
+JSphGpuSingle_InOut.o: UserParameters.h

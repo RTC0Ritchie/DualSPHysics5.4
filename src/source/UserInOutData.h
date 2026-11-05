@@ -10,6 +10,8 @@
 #include "JBinaryData.h"
 #include "JPartDataBi4.h"
 #include "Functions.h"
+#include "JLog2.h"
+#include <cmath>
 
 #include <fstream>
 #include <algorithm>
@@ -58,7 +60,7 @@ class UserInOutData {
     return h.value;
   }
 
-  static ullong ConfigHash(JSphInOut& s,const JSphMk& mk){
+  static ullong ConfigHash(JSphInOut& s,const JSphMk& mk,unsigned cornerOrder=0){
     Hash h;
     // Only immutable InOut inputs; User/restart and output duration may change.
 
@@ -95,7 +97,26 @@ class UserInOutData {
     h.Array(s.PtPos,s.PtCount);
 
     for(auto* z:s.List){
-      h.Array(z->PtDom,10);
+      // Legacy v3 hashes include a derived parallelogram corner. Host fast-math
+      // may reassociate (p0+up)+far into (p1+p3)-p0, changing only its last bit.
+      // Try these exact formula hashes on restore; never ignore configuration
+      // bytes or relax main-file integrity, input tables or particle identities.
+      tdouble3 domain[10];std::copy(z->PtDom,z->PtDom+10,domain);
+      if(cornerOrder && s.CSP.simulate2d){
+        for(unsigned axis=0;axis<3;axis++){
+          const double a=(&domain[0].x)[axis],b=(&domain[1].x)[axis],c=(&domain[3].x)[axis];
+          // Volatile intermediates preserve each requested rounding order even
+          // when the CPU executable is compiled with -ffast-math.
+          volatile double ab=b+c,ca=c-a,ba=b-a;
+          const double value=cornerOrder==1?ab-a:cornerOrder==2?b+ca:c+ba;
+          const double current=(&domain[2].x)[axis];
+          const double scale=std::max(s.CSP.dp,std::max(std::abs(a),std::max(std::abs(b),std::abs(c))));
+          Require(std::abs(value-current)<=16*std::numeric_limits<double>::epsilon()*scale,
+              "invalid derived 2-D inlet domain corner.");
+          (&domain[2].x)[axis]=value;
+        }
+      }
+      h.Array(domain,10);
       h.Add(z->BoxLimitMin);
       h.Add(z->BoxLimitMax);
       const auto& v=*z->InOutVel;
@@ -194,8 +215,8 @@ class UserInOutData {
 
 public:
   static void Check(JSphInOut& s){
-    Require(s.Cpu && !s.PeriActive && !s.ReuseIds && s.ListSize,
-        "requires non-periodic CPU InOut without ID reuse.");
+    Require(!s.PeriActive && !s.ReuseIds && s.ListSize,
+        "requires non-periodic InOut without ID reuse.");
 
     for(auto* z:s.List){
       const auto& v=*z->InOutVel;
@@ -332,6 +353,11 @@ public:
       unsigned np,const unsigned* idp,typecode* code){
     Check(s);
     const ullong signature=ConfigHash(s,mk);
+    const ullong savedSignature=head.GetvUllong("ConfigHash");
+    bool compatible=(savedSignature==signature);
+    if(!compatible && s.CSP.simulate2d)
+      for(unsigned order=1;order<=3 && !compatible;order++)
+        compatible=(savedSignature==ConfigHash(s,mk,order));
 
     Require(head.GetvUint("Version")==3
         && frame.GetvUint("Version")==3
@@ -341,9 +367,10 @@ public:
         && frame.GetvUllong("MainHash")==FileHash(main.GetFileLoaded())
         && frame.GetvUint("Part")==part
         && frame.GetvDouble("Time")==main.Get_TimeStep()
-        && head.GetvUllong("ConfigHash")==signature
-        && frame.GetvUllong("ConfigHash")==signature,
+        && compatible && frame.GetvUllong("ConfigHash")==savedSignature,
         "incompatible checkpoint/configuration.");
+    if(savedSignature!=signature)
+      s.Log->PrintWarning("InOut checkpoint: equivalent 2-D corner rounding order verified by full configuration hash (CPU/GPU host fast-math compatibility).");
 
     Require(np==main.Get_Npok(),"main PART particle count mismatch.");
 

@@ -137,6 +137,9 @@ public:
   double *Support,*Age,*Arc,*Seeds;
   unsigned char* Active;
   double2* OldFluid;
+  unsigned Noutline,*OutlineIds,*Invalid;
+  double2* Outline;
+  double4* OutlineBox;
 };
 __global__ void UserGIceMap(unsigned n,const unsigned* id,const typecode* code,UserGIceDevice d){
   const unsigned p=blockIdx.x*blockDim.x+threadIdx.x;
@@ -220,6 +223,48 @@ __global__ void UserGIceCorrect(unsigned np,unsigned nb,UserGIceDevice d,
     UserGIceMove(p,c.dx,c.dz,xy,z,code,cells,dom);vel[p].x+=float(c.dvx);vel[p].z+=float(c.dvz);
   }
 }
+
+// Same material outline, strict interior and half-Dp skin as UserIceInOutData.
+// Bounds are built once per check; distant inlet buffers skip the edge scan.
+__global__ void UserGIceOutline(unsigned nb,const unsigned* ids,const typecode* code,
+    const double2* xy,const double* z,UserGIceDevice d){
+  if(blockIdx.x || threadIdx.x)return;
+  *d.Invalid=0;
+  double xmin=DBL_MAX,xmax=-DBL_MAX,zmin=DBL_MAX,zmax=-DBL_MAX;
+  for(unsigned i=0;i<d.Noutline;i++){
+    const unsigned id=d.OutlineIds[i],p=d.Map[id];
+    if(p>=nb || ids[p]!=id || !CODE_IsNormal(code[p]) || !CODE_IsFlexStrucFlex(code[p])){*d.Invalid=2;return;}
+    const double x=xy[p].x,rz=z[p];
+    if(!isfinite(x)||!isfinite(rz)){*d.Invalid=2;return;}
+    d.Outline[i]=make_double2(x,rz);
+    xmin=fmin(xmin,x);xmax=fmax(xmax,x);zmin=fmin(zmin,rz);zmax=fmax(zmax,rz);
+  }
+  *d.OutlineBox=make_double4(xmin,xmax,zmin,zmax);
+}
+__global__ void UserGIceCheckBuffers(unsigned np,unsigned nb,const typecode* code,
+    const double2* xy,const double* z,UserGIceDevice d){
+  const unsigned p=nb+blockIdx.x*blockDim.x+threadIdx.x;
+  if(p>=np || !CODE_IsNormal(code[p]) || !CODE_IsFluidInout(code[p]))return;
+  // Outline errors leave an incomplete polygon; check the validity flag first.
+  if(atomicAdd(d.Invalid,0u)==2)return;
+  const auto box=*d.OutlineBox;const double x=xy[p].x,rz=z[p],r=.5*d.Dp;
+  if(x<box.x-r||x>box.y+r||rz<box.z-r||rz>box.w+r)return;
+  bool inside=false;double nearest=DBL_MAX;
+  for(unsigned i=0,j=d.Noutline-1;i<d.Noutline;j=i++){
+    const auto a=d.Outline[j],b=d.Outline[i];
+    const double dx=b.x-a.x,dz=b.y-a.y,l2=dx*dx+dz*dz;
+    if(!(l2>0)){atomicMax(d.Invalid,2u);return;}
+    const double u=fmax(0.,fmin(1.,((x-a.x)*dx+(rz-a.y)*dz)/l2));
+    const double ex=x-a.x-u*dx,ez=rz-a.y-u*dz;
+    nearest=fmin(nearest,ex*ex+ez*ez);
+    if((a.y>rz)!=(b.y>rz)){
+      const double crossx=a.x+(rz-a.y)*(b.x-a.x)/(b.y-a.y);
+      if(x<crossx)inside=!inside;
+    }
+  }
+  const double tol=1e-4*d.Dp;
+  if(nearest<r*r || (inside && nearest>tol*tol))atomicMax(d.Invalid,1u);
+}
 class UserGIceProtection::Impl{
 public:
   UserGIceDevice D={};std::vector<void*> Owned;size_t Bytes=0;unsigned Capacity=0,StageNp=0,StageNb=0;double LastTime=-1;
@@ -235,7 +280,7 @@ public:
   }
 };
 UserGIceProtection::UserGIceProtection(const std::vector<Reference>& ref,bool top,bool right,bool bottom,
-    double dp,double h,double wettime,double hcoef,unsigned nbound,double* support):Data(nullptr){
+    double dp,double h,double wettime,double hcoef,unsigned nbound,double* support,bool inout):Data(nullptr){
   std::unique_ptr<Impl> next(new Impl);auto& a=*next;auto& d=a.D;
   d.Top=top;d.Right=right;d.Bottom=bottom;d.Dp=dp;d.H=h;d.WetTime=wettime;d.HCoef=hcoef;d.Nbound=nbound;d.Support=support;
   std::vector<IceTopCleanup::Point> source;for(const auto& q:ref)source.push_back({q.x,q.z,q.id});
@@ -257,15 +302,35 @@ UserGIceProtection::UserGIceProtection(const std::vector<Reference>& ref,bool to
     d.Active=a.Allocate<unsigned char>(d.Nbottom);d.SeedCount=a.Allocate<unsigned>(1);
   }
   d.Map=a.Allocate<unsigned>(nbound);Impl::Check(cudaMemset(d.Map,0xff,size_t(nbound)*sizeof(unsigned)));
+  if(inout){
+    const auto outline=IceTopCleanup::ReferenceOutline(source,dp);
+    std::vector<unsigned> outlineids;for(const auto& q:outline)outlineids.push_back(q.id);
+    d.Noutline=outlineids.size();d.OutlineIds=a.Ids(outlineids);
+    d.Outline=a.Allocate<double2>(d.Noutline);d.OutlineBox=a.Allocate<double4>(1);
+    d.Invalid=a.Allocate<unsigned>(1);
+  }
   Data=next.release();
 }
 UserGIceProtection::~UserGIceProtection(){delete Data;}
 size_t UserGIceProtection::GetAllocMemoryGpu()const{return Data->Bytes+size_t(Data->Capacity)*sizeof(double2);}
+void UserGIceProtection::ValidateBuffers(unsigned np,unsigned nb,const unsigned* ids,
+    const typecode* code,const double2* xy,const double* z){
+  auto& d=Data->D;if(!d.Noutline)return;
+  if(nb)UserGIceMap<<<(nb+127)/128,128>>>(nb,ids,code,d);
+  UserGIceOutline<<<1,1>>>(nb,ids,code,xy,z,d);
+  if(np>nb)UserGIceCheckBuffers<<<(np-nb+127)/128,128>>>(np,nb,code,xy,z,d);
+  unsigned invalid=0;Impl::Check(cudaMemcpy(&invalid,d.Invalid,sizeof(invalid),cudaMemcpyDeviceToHost));
+  if(invalid==2)throw std::runtime_error("Ice/InOut compatibility: missing/nonfinite outline material particle or collapsed edge.");
+  if(invalid)throw std::runtime_error("Ice/InOut compatibility: inlet/outlet buffer overlaps ice (including the half-Dp surface skin); move the inlet away from ice.");
+}
 void UserGIceProtection::Capture(bool predictor,double time,unsigned np,unsigned nb,const unsigned* ids,
     const typecode* code,const double2* xy,const double* z,const float4* vel,const double2* oldxy,const double* oldz){
   auto& a=*Data;auto& d=a.D;const unsigned count=np-nb;
-  if(count>a.Capacity){double2* next=nullptr;Impl::Check(cudaMalloc((void**)&next,size_t(count)*sizeof(double2)));
-    cudaFree(d.OldFluid);d.OldFluid=next;a.Capacity=count;}
+  if(count>a.Capacity){
+    const unsigned capacity=std::max(count,a.Capacity+std::max(128u,a.Capacity/5));
+    double2* next=nullptr;Impl::Check(cudaMalloc((void**)&next,size_t(capacity)*sizeof(double2)));
+    cudaFree(d.OldFluid);d.OldFluid=next;a.Capacity=capacity;
+  }
   a.StageNp=np;a.StageNb=nb;
   if(count)UserGIceOldFluid<<<(count+127)/128,128>>>(np,nb,oldxy,oldz,d.OldFluid);
   if(predictor){
@@ -280,6 +345,7 @@ void UserGIceProtection::Capture(bool predictor,double time,unsigned np,unsigned
 void UserGIceProtection::Apply(unsigned np,unsigned nb,const unsigned* ids,typecode* code,
     double2* xy,double* z,float4* vel,unsigned* cells,const Domain& domain){
   auto& a=*Data;if(np!=a.StageNp || nb!=a.StageNb)throw std::runtime_error("GPU ice protection: stage particle count changed.");
+  ValidateBuffers(np,nb,ids,code,xy,z);
   a.Profiles(nb,ids,code,xy,z,vel,false);
   if(np>nb)UserGIceCorrect<<<(np-nb+127)/128,128>>>(np,nb,a.D,xy,z,vel,code,cells,domain);
   Impl::Check(cudaGetLastError());
@@ -288,7 +354,6 @@ void JSphGpuSingle::InitIceProtection(){
   delete IceProtection;IceProtection=nullptr;
   const auto& bottom=IceBottomNoPen::Get(User.get());
   if(!User->IceTopNoPenetrationEnabled && !bottom.Enabled)return;
-  if(InOut)Run_Exceptioon("GPU ice protection with inlet/outlet is not implemented; this module requires a closed particle set.");
   JPartsLoad4 initial(false);initial.LoadParticles(DirCase,CaseName,0,"");
   std::vector<unsigned> ids(Npb);std::vector<typecode> code(Npb);
   auto check=[](cudaError_t e){if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));};
@@ -301,11 +366,31 @@ void JSphGpuSingle::InitIceProtection(){
     const auto q=initial.GetPos()[i];ref.push_back({q.x,q.z,initial.GetIdp()[i]});
   }
   if(!elastic.empty())Run_Exceptioon("GPU ice protection: initial case lacks elastic IDs.");
+  if(InOut){
+    std::vector<double2> xy(Npb);std::vector<double> z(Npb);
+    check(cudaMemcpy(xy.data(),Posxy_g->cptr(),Npb*sizeof(double2),cudaMemcpyDeviceToHost));
+    check(cudaMemcpy(z.data(),Posz_g->cptr(),Npb*sizeof(double),cudaMemcpyDeviceToHost));
+    std::vector<IceTopCleanup::Point> source;
+    for(const auto& q:ref)source.push_back({q.x,q.z,q.id});
+    auto outline=IceTopCleanup::ReferenceOutline(source,Dp);
+    std::vector<unsigned> map(CaseNbound,UINT_MAX);
+    for(unsigned p=0;p<Npb;p++)if(ids[p]<CaseNbound)map[ids[p]]=p;
+    for(auto& q:outline){const unsigned p=map[q.id];
+      if(p>=Npb)Run_Exceptioon("Ice/InOut compatibility: missing outline material particle.");
+      q.x=xy[p].x;q.z=z[p];
+    }
+    IceTopCleanup::ValidateOutline(outline,Dp);
+  }
   double* support=bottom.Enabled?MdbcUser->EnableBottomSupport(CaseNbound):nullptr;
   IceProtection=new UserGIceProtection(ref,User->IceTopNoPenetrationEnabled,
-      IceRightNoPen::Get(User.get()).Enabled,bottom.Enabled,Dp,KernelH,bottom.WetTime,bottom.HCoef,CaseNbound,support);
+      IceRightNoPen::Get(User.get()).Enabled,bottom.Enabled,Dp,KernelH,bottom.WetTime,bottom.HCoef,CaseNbound,support,InOut!=nullptr);
+  ValidateIceInOut();
   Log->Printf("GPU ice protection: top=%u right=%u bottom=%u; material surface IDs retained; wetting history reset as on CPU.",
       unsigned(User->IceTopNoPenetrationEnabled),unsigned(IceRightNoPen::Get(User.get()).Enabled),unsigned(bottom.Enabled));
+}
+void JSphGpuSingle::ValidateIceInOut(){
+  if(InOut && IceProtection)IceProtection->ValidateBuffers(Np,Npb,Idp_g->cptr(),
+      Code_g->cptr(),Posxy_g->cptr(),Posz_g->cptr());
 }
 void JSphGpuSingle::CaptureIceProtection(bool predictor){
   if(IceProtection)IceProtection->Capture(predictor,TimeStep,Np,Npb,Idp_g->cptr(),Code_g->cptr(),

@@ -32,6 +32,8 @@
 #include "JAppInfo.h"
 #include "JTimeControl.h"
 #include "JDataArrays.h"
+#include "UserInOutData.h"
+#include "UserParameters.h"
 #include <climits>
 
 using namespace std;
@@ -84,7 +86,45 @@ void JSphGpuSingle::InOutInit(double timestepini){
   InOut->Nstep=Nstep; //-For debug.
   Timersg->TmStart(TMG_SuInOut,false);
   Log->Print("Initialising InOut...");
-  if(PartBegin)Run_Exceptioon("Simulation restart not allowed when Inlet/Outlet is used.");
+  if(PartBegin){
+    // Rebuild geometry from the original GenCase seed particles, at t=0.
+    InOut->Config(0,Stable,PeriActive,MapRealPosMin,MapRealPosMax,
+      MkInfo->GetCodeNewFluid(),PartsInit,GaugeSystem);
+
+    JPartDataBi4 main;
+    main.LoadFilePart(PartBeginDir,PartBegin);
+    if(main.Get_TimeStep()!=TimeStep || main.Get_PosSimple())
+      Run_Exceptioon("InOut restart requires original absolute time and double positions.");
+
+    JBinaryData head("PartHeadInOut"),frame("PartInOut");
+    const string dir=fun::GetDirWithSlash(PartBeginDir);
+    head.LoadFile(dir+"PartHeadInOut.ibi4","PartHeadInOut");
+    frame.LoadFile(dir+fun::FileNameSec("PartInOut.bi4",PartBegin),"PartInOut");
+
+    Idp_g->CuCopyToHost(Idp_c,Np);
+    Code_g->CuCopyToHost(Code_c,Np);
+    UserInOutData::Restore(*InOut,*MkInfo,head,frame,main,PartBegin,
+      Np,Idp_c->cptr(),Code_c->ptr());
+
+    Code_g->CuCopyFromHost(Code_c,Np);
+    Nstep=main.Get_Step();
+    TotalNp=main.Get_NpTotal();
+    IdMax=unsigned(TotalNp-1);
+
+    CellDivSingle->SetIncreaseNp(InOut->GetNpResizePlus1());
+    const unsigned npfnormal=Np-NpbPer-NpfPer-CaseNbound;
+    NpfMinimum=unsigned(MinFluidStop*npfnormal);
+
+    InOut->VisuConfig("\nRestored InOut configuration:"," ");
+    Log->Printf("InOut restart: PART=%u, time=%.17g, step=%u, total-created=%llu, active-inlet=%u.",
+      PartBegin,TimeStep,Nstep,TotalNp,InOut->GetCurrentNp());
+    Log->PrintWarning("InOut identities and table state restored. This does not checkpoint SPS, adaptive mDBC or all Flex history; full-trajectory bitwise equivalence is not guaranteed.");
+
+    Timersg->TmStop(TMG_SuInOut,true);
+    return; // No seed deletion, buffer creation, proximity cleanup or field update.
+  }
+  
+
 
   //-Configures InOut zones and prepares new inout particles to create.
   const unsigned newnp=InOut->Config(timestepini,Stable,PeriActive
@@ -344,3 +384,19 @@ void JSphGpuSingle::InOutExtrapolateData(unsigned inoutcount,const int* inoutpar
 }
 
 
+
+bool JSphGpuSingle::InOutSaveEnabled()const{return User->SaveInOutData;}
+void JSphGpuSingle::InOutCheckSaveData(){
+  if(User->SaveInOutData){
+    if(!InOut || PeriActive || !(SvData&SDAT_Binx) || !SvPosDouble || OutputParts)
+      Run_Exceptioon("SaveInOutData requires ordinary InOut, full binary output and SavePosDouble=1; OutputParts is not supported.");
+    UserInOutData::Check(*InOut);
+  }
+}
+void JSphGpuSingle::InOutSaveData(bool save,unsigned npsave){
+  if(User->SaveInOutData){
+    if(!save || npsave!=Np)Run_Exceptioon("SaveInOutData requires a complete main PART.");
+    UserInOutData::Save(*InOut,*MkInfo,DirDataOut,RunCode,Part,Nstep,TimeStep,
+        Np,Idp_c->cptr(),Code_c->cptr(),CaseNp,TotalNp,IdMax,User->InOutHeadWritten);
+  }
+}

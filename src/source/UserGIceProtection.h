@@ -9,11 +9,13 @@ public:
   struct Reference{double x,z;unsigned id;};
   struct Domain{tdouble3 Min,Size;float Cell,MoveLimit;unsigned CellCode;};
   UserGIceProtection(const std::vector<Reference>& ref,bool top,bool right,bool bottom,
-      double dp,double h,double wettime,double hcoef,unsigned nbound,double* support);
+      double dp,double h,double wettime,double hcoef,unsigned nbound,double* support,bool inout=false);
   ~UserGIceProtection();
   UserGIceProtection(const UserGIceProtection&)=delete;
   UserGIceProtection& operator=(const UserGIceProtection&)=delete;
   size_t GetAllocMemoryGpu()const;
+  void ValidateBuffers(unsigned np,unsigned nb,const unsigned* ids,const typecode* code,
+      const double2* xy,const double* z);
   void Capture(bool predictor,double time,unsigned np,unsigned nb,const unsigned* ids,
       const typecode* code,const double2* xy,const double* z,const float4* vel,
       const double2* oldxy,const double* oldz);

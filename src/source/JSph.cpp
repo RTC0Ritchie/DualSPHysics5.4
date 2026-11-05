@@ -1323,9 +1323,9 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   }
 
   if(InOut && (User->SaveInOutData || PartBegin)){
-    if(!Cpu || PeriActive || TStep!=STEP_Symplectic
+    if(PeriActive || TStep!=STEP_Symplectic
         || CaseNfloat || ShiftingAdv || DivCleaning)
-      Run_Exceptioon("InOut checkpoints require ordinary non-periodic CPU Symplectic; floating bodies, advanced shifting and divergence cleaning are unsupported.");
+      Run_Exceptioon("InOut checkpoints require ordinary non-periodic CPU/GPU Symplectic; floating bodies, advanced shifting and divergence cleaning are unsupported.");
     #ifdef _WITHMR
     if(cfg->VRes)
       Run_Exceptioon("InOut checkpoints do not support VRes.");
@@ -1333,8 +1333,8 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     if(PartBegin && !PartBeginFirst)
       Run_Exceptioon("InOut restart must preserve absolute time; -partbegin:N:0 is unsupported.");
   }
-  if(User->SaveInOutData && (!Cpu || !InOut))
-      Run_Exceptioon("SaveInOutData v1 requires ordinary CPU InOut.");
+  if(User->SaveInOutData && !InOut)
+      Run_Exceptioon("SaveInOutData requires ordinary InOut.");
   #ifdef _WITHMR
     if(User->SaveInOutData && cfg->VRes)
       Run_Exceptioon("SaveInOutData v1 does not support VRes.");

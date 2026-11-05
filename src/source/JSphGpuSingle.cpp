@@ -57,6 +57,7 @@
 #include "JDsPips.h"
 #include "JDsExtraData.h"
 #include "FunctionsCuda.h"
+#include "JDsPartsInit.h"
 #include "JDsOutputParts.h" //<vs_outpaarts>
 
 #include <climits>
@@ -204,7 +205,15 @@ void JSphGpuSingle::ConfigDomain(){
   LoadCodeParticles(Np,Idp_c->cptr(),Code_c->ptr());
 
   //-Creates PartsInit object with initial particle data for automatic configurations.
-  CreatePartsInit(Np,AuxPos_c->cptr(),Code_c->cptr());
+  if(PartBegin && InOut){
+    JPartsLoad4 original(false);
+    original.LoadParticles(DirCase,CaseName,0,"");
+    std::vector<typecode> originalcode(original.GetCount());
+    for(unsigned p=0;p<original.GetCount();p++)
+      originalcode[p]=MkInfo->GetCodeById(original.GetIdp()[p]);
+    CreatePartsInit(original.GetCount(),original.GetPos(),originalcode.data());
+  }
+  else CreatePartsInit(Np,AuxPos_c->cptr(),Code_c->cptr());
 
   //-Runs initialization operations from XML.
   RunInitialize(Np,Npb,AuxPos_c->cptr(),Idp_c->cptr(),Code_c->cptr()
@@ -212,7 +221,9 @@ void JSphGpuSingle::ConfigDomain(){
   if(UseNormals)ConfigBoundNormals(Np,Npb,AuxPos_c->cptr(),Idp_c->cptr(),boundnorc.ptr());
 
   //-Computes MK domain for boundary and fluid particles.
-  MkInfo->ComputeMkDomains(Np,AuxPos_c->cptr(),Code_c->cptr());
+  if(PartBegin && InOut)
+    MkInfo->ComputeMkDomains(PartsInit->GetNp(),PartsInit->GetPos(),PartsInit->GetCode());
+  else MkInfo->ComputeMkDomains(Np,AuxPos_c->cptr(),Code_c->cptr());
 
   //-Sets local domain of the simulation within Map_Cells and computes DomCellCode.
   //-Establece dominio de simulacion local dentro de Map_Cells y calcula DomCellCode.
@@ -1010,6 +1021,7 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   InitRunGpu();
   RunFirstGaugeSystem(TimeStep);
   if(InOut)InOutInit(TimeStepIni);
+  InOutCheckSaveData();
   if(FlexStruc){
     FlexStrucInit();
     BoundChanged=true;
@@ -1019,13 +1031,14 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu(),GetAllocMemoryGpu());
   UpdateMaxValues();
+  if(PartBegin && InOut)PartNstep=Nstep;
   SaveData(); 
   Arrays_Cpu->FreeUnusedArrays();
   Arrays_Gpu->FreeUnusedArrays();
   Timersg->ResetTimes();
   Timersg->TmStop(TMG_Init,true);
   if(Log->WarningCount())Log->PrintWarningList("\n[WARNINGS]","");
-  PartNstep=-1; Part++;
+  PartNstep=(PartBegin && InOut?Nstep:-1); Part++;
 
   //-Main Loop.
   //------------
@@ -1046,6 +1059,7 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
     if(InOut)InOutComputeStep(stepdt);
     else RunCellDivide(true);
     if(FlexStruc)UpdateFlexStrucGeometry();
+    ValidateIceInOut();
     TimeStep+=stepdt;
     LastDt=stepdt;
     Nstep++;
@@ -1110,7 +1124,7 @@ void JSphGpuSingle::SaveData(){
     }//<vs_outpaarts_end>
     //-Obtain output particles data.
     unsigned npfilterdel=0;
-    const unsigned npsel=ParticlesDataDown(Np,0,false,PeriActive!=0
+    const unsigned npsel=ParticlesDataDown(Np,0,InOutSaveEnabled(),PeriActive!=0
       ,filterg.ptr(),npfilterdel);
     if(npsel+npfilterdel!=npnormal)Run_Exceptioon("The number of particles is invalid.");
     npsave=npsel;
@@ -1147,6 +1161,7 @@ void JSphGpuSingle::SaveData(){
   JDataArrays arrays;
   AddBasicArrays(arrays,npsave,AuxPos_c->cptr(),Idp_c->cptr(),AuxVel_c->cptr(),AuxRho_c->cptr());
   JSph::SaveData(npsave,arrays,1,&vdom,infoplus);
+  InOutSaveData(save,npsave);
   if(save){SaveFlexData();SaveFlexPairDataOnce();}
   // Output must precede SaveExtraData, which reuses Idp_c/AuxVel_c scratch buffers.
   if(save)SaveUserOutput(npsave,Idp_c->cptr(),AuxPos_c->cptr()
