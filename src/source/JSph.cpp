@@ -1423,10 +1423,10 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     }
   }
   if(User->IceTopFluidCleanupEnabled &&
-      (!Cpu || !Simulate2D || PeriActive || !FlexStruc))
+      (!Simulate2D || PeriActive || !FlexStruc))
   {
     Run_Exceptioon(
-        "IceTopFluidCleanup requires CPU 2-D elastic simulation "
+        "IceTopFluidCleanup requires 2-D elastic simulation "
         "without periodic boundaries.");
   }
 

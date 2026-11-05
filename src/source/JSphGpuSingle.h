@@ -44,6 +44,7 @@ protected:
   UserGFlexDissipation* FlexDissipation=nullptr;
   UserGMdbc* MdbcUser=nullptr;
   UserGIceProtection* IceProtection=nullptr;
+  bool ClearIceTopFluidOnce();
   void InitIceProtection();
   void ValidateIceInOut();
   void CaptureIceProtection(bool predictor);

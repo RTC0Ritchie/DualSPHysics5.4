@@ -4,6 +4,7 @@
 #include "UserGMdbc.h"
 #include "UserGIceProtection.h"
 #include "UserGParameters.h"
+#include <cmath>
 //HEAD_DSPH
 /*
  <DUALSPHYSICS>  Copyright (c) 2025 by Dr Jose M. Dominguez et al. (see http://dual.sphysics.org/index.php/developers/). 
@@ -693,6 +694,10 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
     const float2 maxima=FlexPrecision->TimeStepMaxPair(Np,ViscDt_g->cptr()
       ,CaseNflexstruc,FlexStrucDtg);
     if(Np)ViscDtMax=maxima.x;
+    // Invalid elastic determinants use +infinity in the existing reduction.
+    // Check before any integration; no additional device/host transfer.
+    if(!std::isfinite(maxima.y))
+      Run_Exceptioon("Invalid relative or total elastic deformation determinant (non-finite or non-positive), including clamp particles.");
     FlexStrucDtMax=maxima.y;
   }
   else{
@@ -857,6 +862,7 @@ double JSphGpuSingle::ComputeStep_Sym(){
   if(Shifting)RunShifting(dt);            //-Shifting.
   CaptureIceProtection(false);
   ComputeSymplecticCorr(dt);              //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
+  ApplyIceProtection(false);
   if(CaseNfloat)RunFloating(dt,false);    //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   if(Damping)RunDamping(dt);              //-Aplies Damping.
@@ -1019,7 +1025,7 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Initialisation of execution variables.
   InitRunGpu();
-  RunFirstGaugeSystem(TimeStep);
+  if(!UserGIceProtection::CleanupEnabled(User.get()))RunFirstGaugeSystem(TimeStep);
   if(InOut)InOutInit(TimeStepIni);
   InOutCheckSaveData();
   if(FlexStruc){
@@ -1027,7 +1033,9 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
     BoundChanged=true;
     RunCellDivide(true); // Rebuild boundary cells after elastic codes are assigned.
   }
+  ClearIceTopFluidOnce();
   InitIceProtection();
+  if(UserGIceProtection::CleanupEnabled(User.get()))RunFirstGaugeSystem(TimeStep);
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu(),GetAllocMemoryGpu());
   UpdateMaxValues();

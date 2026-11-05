@@ -13,6 +13,12 @@
 #include <stdexcept>
 #include <cmath>
 #include <memory>
+#include <unordered_map>
+#include <fstream>
+#include <iomanip>
+#include "Functions.h"
+#include "JSphInOut.h"
+#include "UserIceInOutData.h"
 class UserGIceMath{
 public:
   struct Point{double x,z,vx,vz;};
@@ -325,7 +331,9 @@ void UserGIceProtection::ValidateBuffers(unsigned np,unsigned nb,const unsigned*
 }
 void UserGIceProtection::Capture(bool predictor,double time,unsigned np,unsigned nb,const unsigned* ids,
     const typecode* code,const double2* xy,const double* z,const float4* vel,const double2* oldxy,const double* oldz){
-  auto& a=*Data;auto& d=a.D;const unsigned count=np-nb;
+  auto& a=*Data;auto& d=a.D;
+  if(!d.Top && !d.Right && !d.Bottom)return; // Cleanup-only InOut guard.
+  const unsigned count=np-nb;
   if(count>a.Capacity){
     const unsigned capacity=std::max(count,a.Capacity+std::max(128u,a.Capacity/5));
     double2* next=nullptr;Impl::Check(cudaMalloc((void**)&next,size_t(capacity)*sizeof(double2)));
@@ -344,7 +352,12 @@ void UserGIceProtection::Capture(bool predictor,double time,unsigned np,unsigned
 }
 void UserGIceProtection::Apply(unsigned np,unsigned nb,const unsigned* ids,typecode* code,
     double2* xy,double* z,float4* vel,unsigned* cells,const Domain& domain){
-  auto& a=*Data;if(np!=a.StageNp || nb!=a.StageNb)throw std::runtime_error("GPU ice protection: stage particle count changed.");
+  auto& a=*Data;
+  if(!a.D.Top && !a.D.Right && !a.D.Bottom){
+    ValidateBuffers(np,nb,ids,code,xy,z);
+    return;
+  }
+  if(np!=a.StageNp || nb!=a.StageNb)throw std::runtime_error("GPU ice protection: stage particle count changed.");
   ValidateBuffers(np,nb,ids,code,xy,z);
   a.Profiles(nb,ids,code,xy,z,vel,false);
   if(np>nb)UserGIceCorrect<<<(np-nb+127)/128,128>>>(np,nb,a.D,xy,z,vel,code,cells,domain);
@@ -353,7 +366,8 @@ void UserGIceProtection::Apply(unsigned np,unsigned nb,const unsigned* ids,typec
 void JSphGpuSingle::InitIceProtection(){
   delete IceProtection;IceProtection=nullptr;
   const auto& bottom=IceBottomNoPen::Get(User.get());
-  if(!User->IceTopNoPenetrationEnabled && !bottom.Enabled)return;
+  if(!User->IceTopNoPenetrationEnabled && !bottom.Enabled
+      && !(User->IceTopFluidCleanupEnabled && InOut))return;
   JPartsLoad4 initial(false);initial.LoadParticles(DirCase,CaseName,0,"");
   std::vector<unsigned> ids(Npb);std::vector<typecode> code(Npb);
   auto check=[](cudaError_t e){if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));};
@@ -400,4 +414,219 @@ void JSphGpuSingle::CaptureIceProtection(bool predictor){
 void JSphGpuSingle::ApplyIceProtection(bool predictor){
   if(IceProtection)IceProtection->Apply(Np,Npb,Idp_g->cptr(),Code_g->ptr(),Posxy_g->ptr(),Posz_g->ptr(),
       Velrho_g->ptr(),Dcell_g->ptr(),{MapRealPosMin,MapRealSize,Scell,MovLimit,DomCellCode});
+}
+
+bool JSphGpuSingle::ClearIceTopFluidOnce(){
+  if(!User->IceTopFluidCleanupEnabled)return false;
+
+  if(!Simulate2D || PeriActive ||
+     !FlexStruc || FlexStrucCount!=1)
+  {
+    Run_Exceptioon(
+        "IceTopFluidCleanup requires 2-D, one elastic body, "
+        "no periodic boundaries.");
+  }
+
+  // Read original geometry only to identify material top-surface IDs.
+  JPartsLoad4 initial(false);
+  initial.LoadParticles(DirCase,CaseName,0,"");
+
+  // Initialization only: use the exact CPU geometry predicates and CSV audit.
+  // Runtime ice/InOut checks remain on device; no per-step array download.
+  std::vector<unsigned> hostIds(Np);
+  std::vector<typecode> hostCode(Np);
+  std::vector<double2> hostXY(Np);
+  std::vector<double> hostZ(Np);
+  std::vector<tdouble3> hostPos(Np);
+  std::vector<tfloat4> hostVel(Np);
+  const auto check=[](cudaError_t e){
+    if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));
+  };
+  check(cudaMemcpy(hostIds.data(),Idp_g->cptr(),Np*sizeof(unsigned),cudaMemcpyDeviceToHost));
+  check(cudaMemcpy(hostCode.data(),Code_g->cptr(),Np*sizeof(typecode),cudaMemcpyDeviceToHost));
+  check(cudaMemcpy(hostXY.data(),Posxy_g->cptr(),Np*sizeof(double2),cudaMemcpyDeviceToHost));
+  check(cudaMemcpy(hostZ.data(),Posz_g->cptr(),Np*sizeof(double),cudaMemcpyDeviceToHost));
+  check(cudaMemcpy(hostVel.data(),Velrho_g->cptr(),Np*sizeof(tfloat4),cudaMemcpyDeviceToHost));
+  for(unsigned p=0;p<Np;p++)hostPos[p]=TDouble3(hostXY[p].x,hostXY[p].y,hostZ[p]);
+  const auto* ids=hostIds.data();
+  const auto* codes=hostCode.data();
+  const auto* pos=hostPos.data();
+
+  std::unordered_map<unsigned,unsigned> current;
+
+  for(unsigned p=0;p<Npb;p++){
+    if(CODE_IsNormal(codes[p]) &&
+       CODE_IsFlexStrucFlex(codes[p]))
+    {
+      if(!current.emplace(ids[p],p).second)
+        Run_Exceptioon(
+            "IceTopFluidCleanup: duplicated elastic ID.");
+    }
+  }
+
+  std::vector<IceTopCleanup::Point> ref;
+  ref.reserve(current.size());
+
+  std::unordered_set<unsigned> found;
+
+  for(unsigned i=0;i<initial.GetCount();i++){
+    const unsigned id=initial.GetIdp()[i];
+
+    if(current.find(id)==current.end())continue;
+
+    if(!found.insert(id).second)
+      Run_Exceptioon(
+          "IceTopFluidCleanup: duplicated initial elastic ID.");
+
+    const tdouble3 q=initial.GetPos()[i];
+    ref.push_back({q.x,q.z,id});
+  }
+
+  if(found.size()!=current.size())
+    Run_Exceptioon(
+        "IceTopFluidCleanup: original case lacks current elastic IDs.");
+
+  std::vector<IceTopCleanup::Point> top;
+  std::vector<IceTopCleanup::Point> outline;
+
+  try{
+    top=IceTopCleanup::ReferenceTop(ref,Dp);
+
+    // Keep material identity but use current, possibly deformed positions.
+    for(auto& q:top){
+      const auto& p=pos[current.at(q.id)];
+      q.x=p.x;
+      q.z=p.z;
+    }
+
+    IceTopCleanup::ValidateCurrent(top,Dp);
+    outline=IceTopCleanup::ReferenceOutline(ref,Dp);
+    for(auto& q:outline){
+      const auto& p=pos[current.at(q.id)];
+      q.x=p.x;
+      q.z=p.z;
+    }
+    IceTopCleanup::ValidateOutline(outline,Dp);
+  }
+  catch(const std::exception& e){
+    Run_Exceptioon(
+        std::string("IceTopFluidCleanup: ")+e.what());
+  }
+
+  if(InOut){
+    UserIceInOutData::ConfigureOutline(User.get(),outline);
+    std::vector<unsigned> rid(CaseNbound-CaseNfixed,UINT_MAX);
+    for(unsigned p=0;p<Npb;p++)
+      if(ids[p]>=CaseNfixed && ids[p]<CaseNbound)
+        rid[ids[p]-CaseNfixed]=p;
+    UserIceInOutData::ValidateBuffers(User.get(),CaseNfixed,Npb,Np,
+        rid.data(),ids,codes,pos,Dp);
+    for(unsigned p=Npb;p<Np;p++)
+      if(CODE_IsNormal(codes[p]) && CODE_IsFluidInout(codes[p])
+          && (IceTopCleanup::Above(top,pos[p].x,pos[p].z,Dp)
+            || IceTopCleanup::InsideIce(outline,pos[p].x,pos[p].z,Dp)))
+        Run_Exceptioon("IceTopFluidCleanup: inlet buffer overlaps the cleanup target; move the inlet instead of deleting buffer particles.");
+  }
+
+  std::vector<unsigned> remove;
+  std::vector<unsigned> reasons;
+  unsigned nabove=0,ninside=0;
+  unsigned nfluid=0;
+  tdouble3 momentum=TDouble3(0);
+
+  const auto* vr=hostVel.data();
+
+  for(unsigned p=Npb;p<Np;p++){
+    if(CODE_IsNormal(codes[p]) && CODE_IsFluid(codes[p])
+        && !CODE_IsFluidInout(codes[p])){
+      nfluid++;
+
+      const bool above=IceTopCleanup::Above(top,pos[p].x,pos[p].z,Dp);
+      const bool inside=!above &&
+          IceTopCleanup::InsideIce(outline,pos[p].x,pos[p].z,Dp);
+      if(above || inside){
+        remove.push_back(p);
+        reasons.push_back(above?1:2);
+        if(above)nabove++;
+        else ninside++;
+
+        momentum.x+=double(MassFluid)*vr[p].x;
+        momentum.y+=double(MassFluid)*vr[p].y;
+        momentum.z+=double(MassFluid)*vr[p].z;
+      }
+    }
+  }
+
+  if(!remove.empty() && remove.size()==nfluid
+      && !(InOut && InOut->GetCurrentNp()))
+    Run_Exceptioon(
+        "IceTopFluidCleanup would remove all fluid; "
+        "check the case geometry.");
+
+  // Save an audit record before changing any particle.
+  const std::string file=
+      fun::GetDirWithSlash(DirOut)+"IceTopFluidCleanup.csv";
+
+  std::ofstream audit(file.c_str());
+
+  if(!audit)
+    Run_Exceptioon("Cannot open IceTopFluidCleanup.csv.");
+
+  audit<<std::setprecision(17)
+       <<"Idp;x;y;z;vx;vy;vz;Density_sph;Mass;Time;Reason\n";
+
+  for(size_t i=0;i<remove.size();i++){
+    const unsigned p=remove[i];
+    audit<<ids[p]
+         <<';'<<pos[p].x
+         <<';'<<pos[p].y
+         <<';'<<pos[p].z
+         <<';'<<vr[p].x
+         <<';'<<vr[p].y
+         <<';'<<vr[p].z
+         <<';'<<vr[p].w
+         <<';'<<MassFluid
+         <<';'<<TimeStep
+         <<';'<<(reasons[i]==1?"above_top":"inside_ice")
+         <<'\n';
+  }
+
+  audit.close();
+
+  if(!audit)
+    Run_Exceptioon("Cannot finish IceTopFluidCleanup.csv.");
+
+  // Use the existing particle removal and array-sorting mechanism.
+  // Do not renumber stable IDs.
+  for(unsigned p:remove)
+    hostCode[p]=CODE_SetOutIgnore(codes[p]);
+
+  if(!remove.empty()){
+    check(cudaMemcpy(Code_g->ptr(),hostCode.data(),Np*sizeof(typecode),cudaMemcpyHostToDevice));
+    RunCellDivide(true);
+  }
+
+  // Intentional initialization removal must not consume the allowance
+  // for subsequent accidental fluid loss.
+  if(!remove.empty()){
+    NpfMinimum=unsigned(
+        MinFluidStop*(Np-NpbPer-NpfPer-CaseNbound));
+  }
+
+  Log->Printf(
+      "IceTopFluidCleanup: time=%g; removed=%u/%u; mass=%g; "
+      "momentum=(%g,%g,%g); top x=[%g,%g]; NpfMinimum=%u; "
+      "above_top=%u; inside_ice=%u.",
+      TimeStep,
+      unsigned(remove.size()),
+      nfluid,
+      double(MassFluid)*remove.size(),
+      momentum.x,momentum.y,momentum.z,
+      top.front().x,top.back().x,
+      NpfMinimum,nabove,ninside);
+  return true;
+}
+
+bool UserGIceProtection::CleanupEnabled(const UserParameters* user){
+  return user && user->IceTopFluidCleanupEnabled;
 }

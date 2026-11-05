@@ -3,9 +3,11 @@
 #include "DualSphDef.h"
 #include <vector_types.h>
 #include <vector>
+class UserParameters;
 class UserGIceProtection{
   class Impl;Impl* Data;
 public:
+  static bool CleanupEnabled(const UserParameters* user);
   struct Reference{double x,z;unsigned id;};
   struct Domain{tdouble3 Min,Size;float Cell,MoveLimit;unsigned CellCode;};
   UserGIceProtection(const std::vector<Reference>& ref,bool top,bool right,bool bottom,

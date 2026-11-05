@@ -727,7 +727,8 @@ template<TpKernel tker,TpFtMode ftmode,TpVisco tvisco,TpDensity tdensity
 
       //===== Viscosity ===== 
       if(compute){
-        if(mdbc2>=MDBC2_Std && boundp2 && !ftp2){ //<vs_m2dbc_ini>
+        if(mdbc2>=MDBC2_Std && boundp2 && !ftp2
+            && boundmode[p2]!=BMODE_DBC){ //<vs_m2dbc_ini>
           const float3 tangentvelp2=tangenvel[p2];
           dvx=velrhop1.x-tangentvelp2.x;
           dvy=velrhop1.y-tangentvelp2.y;

@@ -95,6 +95,20 @@ static __device__ tmatrix3f CalcPK1Stress(const tmatrix3f& defgrad,const tmatrix
   return cumath::MulMatrix3x3(defgrad,pk2);
 }
 
+// Validate every elastic particle, including clamps, before its force work.
+// The existing timestep maximum carries the error to the host before integration.
+static __device__ bool ValidDeformation(const tmatrix3f& relative,
+    const UserGFlexRestartView& state,unsigned i,float& jrelative){
+  jrelative=cumath::Determinant3x3(relative);
+  if(!isfinite(jrelative) || jrelative<=0)return false;
+  if(state.Fstar){
+    const auto total=cumath::MulMatrix3x3(relative,state.Fstar[i]);
+    const float jtotal=cumath::Determinant3x3(total);
+    if(!isfinite(jtotal) || jtotal<=0)return false;
+  }
+  return true;
+}
+
 static __device__ tmatrix3f ReferenceStress(const tmatrix3f& relative,
     const tmatrix6f& cmat,const UserGFlexRestartView& state,unsigned i){
   if(!state.Fstar)return CalcPK1Stress(relative,cmat);
@@ -169,6 +183,11 @@ public:
 
     //-Get codep1.
     const typecode codep1=code[p1];
+    float jrelative;
+    if(!Math::ValidDeformation(defgrad[pfs1],restart,pfs1,jrelative)){
+      flexstrucdt[pfs1]=CUDART_INF_F;
+      return;
+    }
     if(CODE_IsFlexStrucFlex(codep1)){
       float3 acep1=make_float3(0,0,0);
 
@@ -192,7 +211,7 @@ public:
 
       //-Get current mass of flexible structure particle.
       const float mass0p1=restart.Mass?restart.Mass[pfs1]:vol0p1*rho0p1;
-      const float rhop1=rho0p1/cumath::Determinant3x3(defgradp1);
+      const float rhop1=rho0p1/jrelative;
 
       //-Calculate structural speed of sound.
       const float csp1=sqrt(youngmod*(1.0-poissratio)/(rhop1*(1.0+poissratio)*(1.0-2.0*poissratio)));
@@ -306,7 +325,7 @@ public:
         const float frx0=fac0*drx0,fry0=fac0*dry0,frz0=fac0*drz0; //-Gradients.
         //-Acceleration due to structure.
         const tmatrix3f defgradp2=defgrad[pfs2];
-        const tmatrix3f pk1p2=Math::ReferenceStress(defgradp2,(restart.Fstar || restart.BoundaryMode)?flexstrucdata[CODE_GetIbodyFlexStruc(code[flexstrucridp[pfs2]])].cmat:cmat,restart,pfs2);
+        const tmatrix3f pk1p2=Math::ReferenceStress(defgradp2,flexstrucdata[CODE_GetIbodyFlexStruc(code[flexstrucridp[pfs2]])].cmat,restart,pfs2);
         const tmatrix3f kercorrp2=kercorr[pfs2];
         const tmatrix3f pk1kercorrp2=UserGFlexBoundaryMath::Original(restart,pfs2,defgradp2,pk1p2,kercorrp2);
         tmatrix3f pk1kercorrp1p2;
@@ -577,6 +596,32 @@ public:
       for(int k=0;k<3;k++)c.v[3*i+j]+=a.v[3*i+k]*b.v[3*k+j];
     return c;
   }
+  static __device__ bool ValidDeformation(const Matrix& h,
+      const UserGFlexRestartView& state,unsigned i,Real& jrelative){
+    jrelative=DeterminantF(h);
+    if(!isfinite(jrelative) || jrelative<=0)return false;
+    if(state.Fstar){
+      // Compose the same authoritative total H used by ReferenceStress.
+      // Do not inspect the rounded F mirror in modes 1/2.
+      Matrix total;
+      if(sizeof(Real)==sizeof(double) && state.Hstar64){
+        Matrix hs;
+        for(int k=0;k<9;k++)hs.v[k]=Real((&state.Hstar64[i].a11)[k]);
+        const Matrix product=Multiply(h,hs);
+        for(int k=0;k<9;k++)total.v[k]=(hs.v[k]+h.v[k])+product.v[k];
+      }
+      else{
+        Matrix star;
+        for(int k=0;k<9;k++)star.v[k]=Real((&state.Fstar[i].a11)[k]);
+        total=Multiply(h,star);
+        for(int k=0;k<9;k++)total.v[k]+=star.v[k]-(k%4==0?Real(1):Real(0));
+      }
+      const Real jtotal=DeterminantF(total);
+      if(!isfinite(jtotal) || jtotal<=0)return false;
+    }
+    return true;
+  }
+
   static __device__ Matrix ReferenceStress(const Matrix& h,const tmatrix6f& material,
       const UserGFlexRestartView& state,unsigned i){
     if(!state.Fstar)return Stress(h,material);
@@ -790,6 +835,11 @@ public:
   template<TpKernel tker,TpVisco tvisco,TpMdbc2Mode mdbc2,bool sim2d>
   static __device__ void Forces(const StInterParmsFlexStrucg& t,State s,unsigned i){
     const unsigned p1=t.flexstrucridp[i];const typecode codep1=t.code[p1];
+    R jrelative;
+    if(!Math::ValidDeformation(s.H[i],t.restart,i,jrelative)){
+      t.flexstrucdt[i]=CUDART_INF_F;
+      return;
+    }
     if(!CODE_IsFlexStrucFlex(codep1))return;
     const auto mat=t.flexstrucdata[CODE_GetIbodyFlexStruc(codep1)];
     const R vol0p1=(sizeof(R)==sizeof(double) && t.restart.Volume64)?R(t.restart.Volume64[i]):R(t.restart.Volume?t.restart.Volume[i]:mat.vol0);
@@ -797,7 +847,7 @@ public:
     const float mass0p1=t.restart.Mass?t.restart.Mass[i]:mat.vol0*mat.rho0;
     float4 velrhop1=t.velrhop[p1];
     const float pressp1=cufsph::ComputePressCte(velrhop1.w);
-    const R rhop1=R(rho0p1)/Math::DeterminantF(s.H[i]);
+    const R rhop1=R(rho0p1)/jrelative;
     const float csp1=float(sqrt(R(mat.youngmod)*(R(1)-R(mat.poissratio))
       /(rhop1*(R(1)+R(mat.poissratio))*(R(1)-R(2)*R(mat.poissratio)))));
     R acc[3]={};
@@ -907,11 +957,8 @@ public:
       }
       const auto g=Access::template Gradient<tker>(t,s,i,k);
       const Matrix pi=s.PB[i];
-      Matrix pj=s.PB[j];
-      // Original law evaluates both stresses with particle i's constitutive tensor.
-      // Keep that convention for pairs joining different material/body codes.
-      if(!t.restart.Fstar && !t.restart.BoundaryMode && CODE_GetIbodyFlexStruc(t.code[t.flexstrucridp[j]])!=CODE_GetIbodyFlexStruc(codep1))
-        pj=Math::Multiply(Math::Stress(s.H[j],mat.cmat),s.Correction[j]);
+      // Each neighbour owns its constitutive material, as on CPU.
+      const Matrix pj=s.PB[j];
       for(int r=0;r<3;r++){
         R force=0;for(int c=0;c<3;c++)force+=(pi.v[3*r+c]+pj.v[3*r+c])*g.v[c];
         if(t.restart.Fstar)acc[r]+=force*(R(vol0p1)*(sizeof(R)==sizeof(double) && t.restart.Volume64?R(t.restart.Volume64[j]):R(t.restart.Volume[j]))/R(mass0p1));
