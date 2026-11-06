@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cfloat>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 #include <type_traits>
@@ -36,10 +37,13 @@ public:
 };
 class UserGDissCache:public UserGDissTypes{
 public:
-  bool TwoD,CR,KV;
+  bool TwoD,CR,KV,PairKV;
   unsigned N;
   double H;
   double MaxCp=0;
+  double PairSpeed=0;
+  std::vector<std::vector<double>> PairWeights;
+  void InitPairWeights();
 
   std::vector<std::vector<Edge>> Rows;
   std::vector<std::vector<CRWeight>> Weights;
@@ -66,7 +70,7 @@ public:
       const double* poisson,const unsigned* body,const unsigned* count,
       const unsigned* const* pairs,const tmatrix3f* correction,
       bool mode5,const std::function<float(float)>& fac,
-      double h,bool useCR,bool useKV,double factor);
+      double h,bool useCR,bool useKV,double factor,int simplifiedMode);
 
 };
 UserGDissCache::V UserGDissCache::Sub(const V& a,const V& b){
@@ -164,14 +168,17 @@ UserGDissCache::UserGDissCache(
     const double* poisson,const unsigned* body,const unsigned* count,
     const unsigned* const* pairs,const tmatrix3f* correction,
     bool mode5,const std::function<float(float)>& fac,
-    double h,bool useCR,bool useKV,double factor)
-  :TwoD(twoD),CR(useCR),KV(useKV),
-   N(n),H(h),Rows(n),Weights(useCR?n:0),ViscWeights(useKV?n:0),
-   Grad(useCR?n:0),Pv(useKV?n:0),
-   Rho(rho,rho+n),Cp(useCR?n:0),
-   Eta0(useKV?n:0),SumG(useKV?n:0),NormSumG(useKV?n:0),
-   Q(useKV?n:0),ReuseF(n,0)
+    double h,bool useCR,bool useKV,double factor,int simplifiedMode)
+  :TwoD(twoD),CR(useCR),KV(useKV && simplifiedMode==1),
+   PairKV(useKV && simplifiedMode==2),PairWeights(PairKV?n:0),
+   N(n),H(h),Rows(n),Weights(CR?n:0),ViscWeights(KV?n:0),
+   Grad(CR?n:0),Pv(KV?n:0),Rho(rho,rho+n),Cp(CR || PairKV?n:0),
+   Eta0(useKV?n:0),SumG(KV?n:0),NormSumG(KV?n:0),
+   Q(KV?n:0),ReuseF(n,0)
 {
+  if(simplifiedMode!=1 && simplifiedMode!=2)
+    throw std::runtime_error("KV simplifiedMode must be 1 or 2.");
+
   const tdouble3* X=x0;
 
   if(!(H>0) || !std::isfinite(H)
@@ -188,22 +195,22 @@ UserGDissCache::UserGDissCache(
         || !std::isfinite(young[i]))
       throw std::runtime_error("Dissipation: invalid material.");
 
-    if(CR){
+    if(CR || PairKV){
       Cp[i]=std::sqrt(young[i]*(1-poisson[i])
           /((1+poisson[i])*(1-2*poisson[i])*Rho[i]));
 
-      cs[i]=std::sqrt(
+      if(CR)cs[i]=std::sqrt(
           young[i]/(2*(1+poisson[i])*Rho[i]));
 
       if(!std::isfinite(Rho[i]*Cp[i])
-          || !std::isfinite(Rho[i]*cs[i]))
+          || (CR && !std::isfinite(Rho[i]*cs[i])))
         throw std::runtime_error(
             "Dissipation: invalid wave speed.");
 
       MaxCp=std::max(MaxCp,Cp[i]);
     }
 
-    if(KV){
+    if(KV || PairKV){
       const double K=young[i]/(3*(1-2*poisson[i]));
 
       Eta0[i]=factor*Rho[i]*std::sqrt(K/Rho[i])*H;
@@ -253,6 +260,15 @@ UserGDissCache::UserGDissCache(
       const V g=Scale(G,volume[j]);
 
       Rows[i].push_back({j,g});
+      if(PairKV){
+        const double w=(TwoD?4.:5.)*(.5*Eta0[i]+.5*Eta0[j])
+            *volume[j]/Rho[i]*(-double(f));
+
+        if(w<0 || !std::isfinite(w))
+          throw std::runtime_error("KV: invalid pair weight.");
+
+        PairWeights[i].push_back(w);
+      }
       Outer(moment,Sub(Position(X[j]),Position(X[i])),g);
 
       if(CR){
@@ -276,6 +292,7 @@ UserGDissCache::UserGDissCache(
       }
     }
 
+    if(!CR && !KV)continue;
     bool nonzero=false;
     for(double q:moment)nonzero=nonzero || q!=0;
     if(!nonzero)continue;
@@ -322,6 +339,7 @@ UserGDissCache::UserGDissCache(
     }
   }
 
+  if(PairKV)InitPairWeights();
   // Pay the reverse lookup once, not at every force evaluation.
   if(KV)for(unsigned i=0;i<N;i++){
     ViscWeights[i].reserve(Rows[i].size());
@@ -346,7 +364,50 @@ UserGDissCache::UserGDissCache(
   }
 }
 
-// Precision is selected once per launch, never inside a neighbour loop.
+void UserGDissCache::InitPairWeights(){
+  std::vector<double> scale(N,1.);
+
+  for(unsigned i=0;i<N;i++){
+    double degree=0;
+    for(double w:PairWeights[i])degree+=w;
+
+    const double speed=H*degree;
+
+    if(!std::isfinite(speed))
+      throw std::runtime_error("KV: invalid pair degree.");
+
+    if(speed>0)
+      scale[i]=std::min(1.,.99998*Cp[i]/speed);
+  }
+
+  for(unsigned i=0;i<N;i++){
+    double degree=0;
+
+    for(unsigned k=0;k<Rows[i].size();k++){
+      const unsigned j=Rows[i][k].j;
+      const auto& row=Rows[j];
+
+      const auto it=std::lower_bound(
+          row.begin(),row.end(),i,
+          [](const Edge& a,unsigned b){return a.j<b;});
+
+      if(it==row.end() || it->j!=i)
+        throw std::runtime_error(
+            "KV: reciprocal pairs are required.");
+
+      double& w=PairWeights[i][k];
+      w*=std::min(scale[i],scale[j]);
+      degree+=w;
+    }
+
+    PairSpeed=std::max(PairSpeed,H*degree);
+  }
+
+  if(!std::isfinite(PairSpeed)
+      || PairSpeed>std::numeric_limits<float>::max())
+    throw std::runtime_error("KV: pair speed overflow.");
+}
+
 // Reference construction remains identical to CPU; only the selected GPU cache
 // is allocated. Global positions are always subtracted before conversion.
 template<unsigned mode> class UserGDissPolicy{
@@ -424,6 +485,7 @@ public:
   __device__ static R Max(R x,R y){return mode==0?R(fmaxf(float(x),float(y))):R(fmax(double(x),double(y)));}
   __device__ static R Min(R x,R y){return mode==0?R(fminf(float(x),float(y))):R(fmin(double(x),double(y)));}
   unsigned N;B H,MaxCp;
+  R PairSpeed;Span<B>* PairWeights;
   Span<Edge>* Rows;Span<CRWeight>* Weights;Span<KVWeight>* ViscWeights;
   UserGDissField<M> Grad;UserGDissField<BM> Pv;
   B *Rho,*Eta0,*SumG,*NormSumG,*Q;
@@ -554,7 +616,7 @@ __device__ bool PrepareT(
   return BuildKV(i,F,L);
 }
 
-template<bool twoD,bool cr,bool kv>
+template<bool twoD,bool cr,bool kv,bool pair=false>
 __device__ bool AddParticleT(
     unsigned i,Positions x,const float4* velocity,
     const unsigned* rid,V& acceleration,B& rate)const
@@ -563,7 +625,7 @@ __device__ bool AddParticleT(
   double3 xi=make_double3(0,0,0);V vi={{0}};
   M Li={{0}};BM Pi={{0}};
 
-  if(cr){
+  if(cr || pair){
     const unsigned p=rid[i];
 
     xi=x[p];
@@ -574,7 +636,7 @@ __device__ bool AddParticleT(
       velocity[p].z
     }};
 
-    Li=Grad[i];
+    if(cr)Li=Grad[i];
   }
 
   if(kv){
@@ -592,9 +654,7 @@ __device__ bool AddParticleT(
     const auto& e=row[k];
     const unsigned j=e.j;
 
-    if(cr){
-      const auto& w=Weights[i][k];
-      const auto& Lj=Grad[j];
+    if(cr || pair){
       const unsigned p=rid[j];
 
       const V dv={{
@@ -603,6 +663,38 @@ __device__ bool AddParticleT(
         velocity[p].z-vi[2]
       }};
 
+      const V r={{
+        R(x[p].x-xi.x),
+        twoD?R(0):R(x[p].y-xi.y),
+        R(x[p].z-xi.z)
+      }};
+
+      if(pair){
+        if(mode==1){
+          // Protect position subtraction and cancellation in the projection.
+          // Ordinary coefficient products and positive normalization use float.
+          const B scale=fmaxf(fabsf(B(r[0])),fmaxf(fabsf(B(r[1])),fabsf(B(r[2]))));
+          if(!(scale>0) || !isfinite(scale))return false;
+          const B invscale=B(1)/scale;
+          const B sx=B(r[0])*invscale,sy=B(r[1])*invscale,sz=B(r[2])*invscale;
+          const B rr=sx*sx+sy*sy+sz*sz;
+          const R projection=Dot(dv,r)*R(invscale);
+          if(!(rr>0) || !isfinite(rr) || !isfinite(projection))return false;
+          const B damp=PairWeights[i][k]*(B(projection)/rr);
+          for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
+            a[t]+=R(damp*(B(r[t])*invscale));
+        }else{
+          const R rr=Dot(r,r);
+          if(!(rr>0) || !isfinite(rr))return false;
+          const V normal=Scale(r,R(1)/Sqrt(rr));
+          const R damp=R(PairWeights[i][k])*Dot(dv,normal);
+          for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
+            a[t]+=damp*normal[t];
+        }
+      }
+      if(cr){
+      const auto& w=Weights[i][k];
+      const auto& Lj=Grad[j];
       V jump=dv;
 
       for(unsigned a=0;a<3;a++)if(!twoD || a!=1){
@@ -615,12 +707,6 @@ __device__ bool AddParticleT(
 
         jump[a]-=R(.5)*(gi+gj);
       }
-
-      const V r={{
-        R(x[p].x-xi.x),
-        twoD?R(0):R(x[p].y-xi.y),
-        R(x[p].z-xi.z)
-      }};
 
       if(mode==1){
         // n=r/|r|: (jump.n)*n == (jump.r)*r/(r.r).
@@ -655,6 +741,7 @@ __device__ bool AddParticleT(
       if(un<0)
         for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
           a[t]+=R(w.s*B(jump[t])+(w.p-w.s)*B(un)*B(normal[t]));
+      }
       }
     }
 
@@ -694,14 +781,14 @@ __device__ bool AddParticleT(
 
 // Called from a compile-time-specialized force pass, not via per-particle
 // runtime dispatch. Each particle writes only its own acceleration.
-template<bool twoD,bool cr,bool kv>
+template<bool twoD,bool cr,bool kv,bool pair=false>
 __device__ bool Accumulate(
     unsigned i,Positions x,const float4* velocity,
     const unsigned* rid,float3* ace,R& speed)const
 {
   V da={{0}};
   B rate=kv?Q[i]*NormSumG[i]:0;
-  if(!AddParticleT<twoD,cr,kv>(i,x,velocity,rid,da,rate))return false;
+  if(!AddParticleT<twoD,cr,kv,pair>(i,x,velocity,rid,da,rate))return false;
 
   const R limit=FLT_MAX;
   if(!isfinite(da[0]) || Abs(da[0])>limit
@@ -738,19 +825,20 @@ __global__ void UserGDissPrepare(UserGDissDevice<mode> d,UserGDissPositions x,
   }
   if(!d.template PrepareT<twoD,cr,kv>(i,x,v,rid,F))asm("trap;");
 }
-template<bool twoD,bool cr,bool kv,unsigned mode>
+template<bool twoD,bool cr,bool kv,unsigned mode,bool pair=false>
 __global__ void UserGDissForces(UserGDissDevice<mode> d,UserGDissPositions x,
     const float4* v,const typecode* code,const unsigned* rid,float3* ace,float* dt){
   unsigned i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=d.N)return;
   typename UserGDissDevice<mode>::R speed=cr?d.MaxCp:0;
+  if(pair)speed=UserGDissDevice<mode>::Max(speed,d.PairSpeed);
   if(CODE_IsFlexStrucFlex(code[rid[i]])){
-    if(!d.template Accumulate<twoD,cr,kv>(i,x,v,rid,ace,speed))asm("trap;");
+    if(!d.template Accumulate<twoD,cr,kv,pair>(i,x,v,rid,ace,speed))asm("trap;");
   }
   dt[i]=fmaxf(dt[i],float(speed));
 }
 class UserGFlexDissipation::Impl{
 public:
-  bool TwoD,CR,KV;unsigned N,Mode;
+  bool TwoD,CR,KV,PairKV;unsigned N,Mode;
   UserGDissDevice<0> D0={};UserGDissDevice<1> D1={};UserGDissDevice<2> D2={};
   std::vector<void*> Memory;
   size_t Bytes=0;
@@ -808,13 +896,33 @@ public:
     for(unsigned i=0;i<visc.size();i++)for(const auto& e:c.ViscWeights[i]){
       typename P::KVWeight a={};a.norm=R(e.norm);for(unsigned k=0;k<3;k++)a.q[k]=e.q[k];visc[i].push_back(a);
     }
-    std::vector<B> signedg(size_t(c.N)*3,0);
+    std::vector<B> signedg(c.KV?size_t(c.N)*3:0,0);
     if(c.KV)for(unsigned i=0;i<c.N;i++)for(unsigned b=0;b<3;b++){
       double sum=0;
       for(const auto& e:rows[i])sum+=double(B(e.g[b]));
       signedg[size_t(b)*c.N+i]=B(sum);
     }
     d.SignedSumG=Copy(signedg);
+    if(c.PairKV){
+      std::vector<std::vector<B>> pairweights(c.N);
+      double speed=0;
+      for(unsigned i=0;i<c.N;i++){
+        double degree=0;
+        for(double raw:c.PairWeights[i]){
+          const B w=B(raw);
+          if(!std::isfinite(double(w)) || w<0)
+            throw std::runtime_error("KV: GPU pair weight overflow.");
+          pairweights[i].push_back(w);degree+=double(w);
+        }
+        speed=std::max(speed,c.H*degree);
+      }
+      if(!std::isfinite(speed) || speed>FLT_MAX)
+        throw std::runtime_error("KV: GPU pair speed overflow.");
+      d.PairSpeed=R(speed);
+      // Round the bound upward when it is represented as float.
+      if(double(d.PairSpeed)<speed)d.PairSpeed=std::nextafter(d.PairSpeed,std::numeric_limits<R>::infinity());
+      d.PairWeights=Flatten(pairweights);
+    }
     d.Rows=Flatten(rows);d.Weights=Flatten(weights);d.ViscWeights=Flatten(visc);
     d.Grad={Copy(std::vector<R>(c.Grad.size()*9)),c.N};
     d.Pv={Copy(std::vector<B>(c.Pv.size()*9)),c.N};
@@ -824,26 +932,26 @@ public:
     d.NormSumG=Copy(std::vector<B>(c.NormSumG.begin(),c.NormSumG.end()));
     d.Q=Copy(std::vector<B>(c.Q.begin(),c.Q.end()));d.ReuseF=Copy(c.ReuseF);
   }
-  explicit Impl(const UserGDissCache& c,unsigned mode):TwoD(c.TwoD),CR(c.CR),KV(c.KV),N(c.N),Mode(mode){
+  explicit Impl(const UserGDissCache& c,unsigned mode):TwoD(c.TwoD),CR(c.CR),KV(c.KV),PairKV(c.PairKV),N(c.N),Mode(mode){
     if(mode>2 || c.MaxCp>FLT_MAX)throw std::runtime_error("Invalid dissipation precision or wave speed.");
     try{
       if(mode==0)Init(D0,c);else if(mode==1)Init(D1,c);else Init(D2,c);
     }catch(...){for(void* p:Memory)cudaFree(p);throw;}
   }
-  template<bool twoD,bool cr,bool kv,unsigned mode> void Launch(UserGDissDevice<mode> d,
+  template<bool twoD,bool cr,bool kv,bool pair=false,unsigned mode> void Launch(UserGDissDevice<mode> d,
       UserGDissPositions x,const float4* v,const typecode* code,const unsigned* rid,
       const tmatrix3f* f,const void* h,float3* ace,float* speed){
     const unsigned blocks=(N+127)/128;
-    UserGDissPrepare<twoD,cr,kv,mode><<<blocks,128>>>(d,x,v,rid,f,h);
-    UserGDissForces<twoD,cr,kv,mode><<<blocks,128>>>(d,x,v,code,rid,ace,speed);
+    if(cr || kv)UserGDissPrepare<twoD,cr,kv,mode><<<blocks,128>>>(d,x,v,rid,f,h);
+    UserGDissForces<twoD,cr,kv,mode,pair><<<blocks,128>>>(d,x,v,code,rid,ace,speed);
   }
-  template<bool twoD,bool cr,bool kv> void Run(UserGDissPositions x,
+  template<bool twoD,bool cr,bool kv,bool pair=false> void Run(UserGDissPositions x,
       const float4* v,const typecode* code,const unsigned* rid,const tmatrix3f* f,
       unsigned mode,UserGFlexPrecision* precision,float3* ace,float* speed){
     if(!N)return;
-    if(mode==0)Launch<twoD,cr,kv>(D0,x,v,code,rid,f,nullptr,ace,speed);
-    else if(mode==1)Launch<twoD,cr,kv>(D1,x,v,code,rid,f,static_cast<const UserGFlexState<float>*>(precision->State(1,N))->H,ace,speed);
-    else Launch<twoD,cr,kv>(D2,x,v,code,rid,f,static_cast<const UserGFlexState<double>*>(precision->State(2,N))->H,ace,speed);
+    if(mode==0)Launch<twoD,cr,kv,pair>(D0,x,v,code,rid,f,nullptr,ace,speed);
+    else if(mode==1)Launch<twoD,cr,kv,pair>(D1,x,v,code,rid,f,kv?static_cast<const UserGFlexState<float>*>(precision->State(1,N))->H:nullptr,ace,speed);
+    else Launch<twoD,cr,kv,pair>(D2,x,v,code,rid,f,kv?static_cast<const UserGFlexState<double>*>(precision->State(2,N))->H:nullptr,ace,speed);
     Check(cudaGetLastError());
   }
 };
@@ -852,10 +960,10 @@ UserGFlexDissipation::UserGFlexDissipation(bool twoD,unsigned n,const tdouble3* 
       const double* poisson,const unsigned* body,const unsigned* count,
       const unsigned* const* pairs,const tmatrix3f* correction,
       bool mode5,const std::function<float(float)>& fac,
-      double h,bool useCR,bool useKV,double factor,unsigned mode)
+      double h,bool useCR,bool useKV,double factor,unsigned mode,int simplifiedMode)
  :Data(nullptr){
   UserGDissCache cache(twoD,n,x0,volume,rho,young,poisson,body,count,pairs,
-      correction,mode5,fac,h,useCR,useKV,factor);
+      correction,mode5,fac,h,useCR,useKV,factor,simplifiedMode);
   Data=new Impl(cache,mode);
 }
 UserGFlexDissipation::~UserGFlexDissipation(){delete Data;}
@@ -865,6 +973,16 @@ void UserGFlexDissipation::Apply(unsigned n,const double2* xy,const double* z,
     unsigned mode,UserGFlexPrecision* precision,float3* ace,float* speed){
   if(!Data || n!=Data->N || mode!=Data->Mode)throw std::runtime_error("Invalid GPU dissipation state.");
   const UserGDissPositions x={xy,z};
+  if(Data->PairKV){
+    if(Data->TwoD){
+      if(Data->CR)Data->Run<true,true,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+      else Data->Run<true,false,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+    }else{
+      if(Data->CR)Data->Run<false,true,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+      else Data->Run<false,false,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+    }
+    return;
+  }
   if(Data->TwoD){
     if(Data->CR && Data->KV)Data->Run<true,true,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
     else if(Data->CR)Data->Run<true,true,false>(x,velocity,code,rid,f,mode,precision,ace,speed);
@@ -923,5 +1041,5 @@ void JSphGpuSingle::InitFlexDissipation(bool beforeCorrection){
 
   FlexDissipation=new UserGFlexDissipation(Simulate2D,np,x0.data(),volume.data(),rho.data(),
     young.data(),poisson.data(),body.data(),counts.data(),pairs.data(),
-    inherit?nullptr:correction.data(),false,fac,KernelH,useCR,useKV,User->ElasticViscousFactor,User->GPUFlexPrecisionMode);
+    inherit?nullptr:correction.data(),false,fac,KernelH,useCR,useKV,User->ElasticViscousFactor,User->GPUFlexPrecisionMode,User->ElasticViscousSimplifiedMode);
 }
