@@ -25,7 +25,10 @@ class JFlexDissipation{
     double norm;
   };
 
-  bool TwoD,CR,KV;
+  bool TwoD,CR,KV,PairKV;
+  double PairSpeed=0;
+  std::vector<std::vector<double>> PairWeights;
+  void InitPairWeights();
   unsigned N;
   double H;
   double MaxCp=0;
@@ -51,19 +54,19 @@ class JFlexDissipation{
 
   bool BuildKV(unsigned i,const M& F,const M& L);
 
-  template<bool twoD,bool cr,bool kv>
+  template<bool twoD,bool cr,bool kv,bool pair=false>
   bool PrepareT(unsigned i,const tdouble3* x,const tfloat4* velocity,
       const unsigned* rid,const tmatrix3f& F);
 
-  template<bool twoD,bool cr,bool kv>
+  template<bool twoD,bool cr,bool kv,bool pair=false>
   bool AddParticleT(unsigned i,const tdouble3* x,const tfloat4* velocity,
       const unsigned* rid,tdouble3& acceleration,double& rate)const;
 
-  template<bool twoD,bool cr,bool kv>
+  template<bool twoD,bool cr,bool kv,bool pair=false>
   bool Accumulate(unsigned i,const tdouble3* x,const tfloat4* velocity,
       const unsigned* rid,tfloat3* ace,double& speed)const;
 
-  template<bool twoD,bool cr,bool kv>
+  template<bool twoD,bool cr,bool kv,bool pair=false>
   double ApplyT(const tdouble3* x,const tfloat4* velocity,
       const typecode* code,const unsigned* rid,
       const tmatrix3f* defgrad,tfloat3* ace);
@@ -74,7 +77,7 @@ public:
       const double* poisson,const unsigned* body,const unsigned* count,
       const unsigned* const* pairs,const tmatrix3f* correction,
       bool mode5,const std::function<float(float)>& fac,
-      double h,bool useCR,bool useKV,double factor);
+      double h,bool useCR,bool useKV,double factor,int simplifiedMode=1);
 
   // Reference caches are constructed once. Apply updates only stage values.
   // defgrad uses flexible-local indices; rid maps to current global indices.

@@ -63,6 +63,7 @@ public:
   // Kelvin-Voigt artificial dissipation.
   bool ElasticViscousDissipation=false;
   double ElasticViscousFactor=0.5;
+  int ElasticViscousSimplifiedMode=1;
 
    // Selective no-penetration for a fixed, non-elastic boundary.
   bool NoPenetrationMkEnabled;

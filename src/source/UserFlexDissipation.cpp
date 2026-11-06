@@ -100,14 +100,17 @@ JFlexDissipation::JFlexDissipation(
     const double* poisson,const unsigned* body,const unsigned* count,
     const unsigned* const* pairs,const tmatrix3f* correction,
     bool mode5,const std::function<float(float)>& fac,
-    double h,bool useCR,bool useKV,double factor)
-  :TwoD(twoD),CR(useCR),KV(useKV),
-   N(n),H(h),Rows(n),Weights(useCR?n:0),ViscWeights(useKV?n:0),
-   Grad(useCR?n:0),Pv(useKV?n:0),
-   Rho(rho,rho+n),Cp(useCR?n:0),
-   Eta0(useKV?n:0),SumG(useKV?n:0),NormSumG(useKV?n:0),
-   Q(useKV?n:0),ReuseF(n,0)
+    double h,bool useCR,bool useKV,double factor,int simplifiedMode)
+  :TwoD(twoD),CR(useCR),KV(useKV && simplifiedMode==1),
+   PairKV(useKV && simplifiedMode==2),PairWeights(PairKV?n:0),
+   N(n),H(h),Rows(n),Weights(CR?n:0),ViscWeights(KV?n:0),
+   Grad(CR?n:0),Pv(KV?n:0),Rho(rho,rho+n),Cp(CR || PairKV?n:0),
+   Eta0(useKV?n:0),SumG(KV?n:0),NormSumG(KV?n:0),
+   Q(KV?n:0),ReuseF(n,0)
 {
+  if(simplifiedMode!=1 && simplifiedMode!=2)
+    throw std::runtime_error("KV simplifiedMode must be 1 or 2.");
+
   const tdouble3* X=x0;
 
   if(!(H>0) || !std::isfinite(H)
@@ -124,22 +127,22 @@ JFlexDissipation::JFlexDissipation(
         || !std::isfinite(young[i]))
       throw std::runtime_error("Dissipation: invalid material.");
 
-    if(CR){
+    if(CR || PairKV){
       Cp[i]=std::sqrt(young[i]*(1-poisson[i])
           /((1+poisson[i])*(1-2*poisson[i])*Rho[i]));
 
-      cs[i]=std::sqrt(
+      if(CR)cs[i]=std::sqrt(
           young[i]/(2*(1+poisson[i])*Rho[i]));
 
       if(!std::isfinite(Rho[i]*Cp[i])
-          || !std::isfinite(Rho[i]*cs[i]))
+          || (CR && !std::isfinite(Rho[i]*cs[i])))
         throw std::runtime_error(
             "Dissipation: invalid wave speed.");
 
       MaxCp=std::max(MaxCp,Cp[i]);
     }
 
-    if(KV){
+    if(KV || PairKV){
       const double K=young[i]/(3*(1-2*poisson[i]));
 
       Eta0[i]=factor*Rho[i]*std::sqrt(K/Rho[i])*H;
@@ -189,6 +192,15 @@ JFlexDissipation::JFlexDissipation(
       const V g=Scale(G,volume[j]);
 
       Rows[i].push_back({j,g});
+      if(PairKV){
+        const double w=(TwoD?4.:5.)*(.5*Eta0[i]+.5*Eta0[j])
+            *volume[j]/Rho[i]*(-double(f));
+
+        if(w<0 || !std::isfinite(w))
+          throw std::runtime_error("KV: invalid pair weight.");
+
+        PairWeights[i].push_back(w);
+      }
       Outer(moment,Sub(Position(X[j]),Position(X[i])),g);
 
       if(CR){
@@ -212,6 +224,7 @@ JFlexDissipation::JFlexDissipation(
       }
     }
 
+    if(!CR && !KV)continue;
     bool nonzero=false;
     for(double q:moment)nonzero=nonzero || q!=0;
     if(!nonzero)continue;
@@ -258,6 +271,7 @@ JFlexDissipation::JFlexDissipation(
     }
   }
 
+  if(PairKV)InitPairWeights();
   // Pay the reverse lookup once, not at every force evaluation.
   if(KV)for(unsigned i=0;i<N;i++){
     ViscWeights[i].reserve(Rows[i].size());
@@ -280,6 +294,50 @@ JFlexDissipation::JFlexDissipation(
       });
     }
   }
+}
+
+void JFlexDissipation::InitPairWeights(){
+  std::vector<double> scale(N,1.);
+
+  for(unsigned i=0;i<N;i++){
+    double degree=0;
+    for(double w:PairWeights[i])degree+=w;
+
+    const double speed=H*degree;
+
+    if(!std::isfinite(speed))
+      throw std::runtime_error("KV: invalid pair degree.");
+
+    if(speed>0)
+      scale[i]=std::min(1.,.99998*Cp[i]/speed);
+  }
+
+  for(unsigned i=0;i<N;i++){
+    double degree=0;
+
+    for(unsigned k=0;k<Rows[i].size();k++){
+      const unsigned j=Rows[i][k].j;
+      const auto& row=Rows[j];
+
+      const auto it=std::lower_bound(
+          row.begin(),row.end(),i,
+          [](const Edge& a,unsigned b){return a.j<b;});
+
+      if(it==row.end() || it->j!=i)
+        throw std::runtime_error(
+            "KV: reciprocal pairs are required.");
+
+      double& w=PairWeights[i][k];
+      w*=std::min(scale[i],scale[j]);
+      degree+=w;
+    }
+
+    PairSpeed=std::max(PairSpeed,H*degree);
+  }
+
+  if(!std::isfinite(PairSpeed)
+      || PairSpeed>std::numeric_limits<float>::max())
+    throw std::runtime_error("KV: pair speed overflow.");
 }
 
 bool JFlexDissipation::BuildKV(unsigned i,const M& F,const M& L){
@@ -309,7 +367,7 @@ bool JFlexDissipation::BuildKV(unsigned i,const M& F,const M& L){
   return true;
 }
 
-template<bool twoD,bool cr,bool kv>
+template<bool twoD,bool cr,bool kv,bool pair>
 bool JFlexDissipation::PrepareT(
     unsigned i,const tdouble3* x,const tfloat4* velocity,
     const unsigned* rid,const tmatrix3f& existingF)
@@ -386,7 +444,7 @@ bool JFlexDissipation::PrepareT(
   return BuildKV(i,F,L);
 }
 
-template<bool twoD,bool cr,bool kv>
+template<bool twoD,bool cr,bool kv,bool pair>
 bool JFlexDissipation::AddParticleT(
     unsigned i,const tdouble3* x,const tfloat4* velocity,
     const unsigned* rid,tdouble3& acceleration,double& rate)const
@@ -395,18 +453,17 @@ bool JFlexDissipation::AddParticleT(
   V xi={{0}},vi={{0}};
   M Li={{0}},Pi={{0}};
 
-  if(cr){
+  if(cr || pair){
     const unsigned p=rid[i];
 
     xi={{x[p].x,twoD?0.:x[p].y,x[p].z}};
-
     vi={{
       velocity[p].x,
       twoD?0.:double(velocity[p].y),
       velocity[p].z
     }};
 
-    Li=Grad[i];
+    if(cr)Li=Grad[i];
   }
 
   if(kv)Pi=Pv[i];
@@ -417,9 +474,7 @@ bool JFlexDissipation::AddParticleT(
     const auto& e=row[k];
     const unsigned j=e.j;
 
-    if(cr){
-      const auto& w=Weights[i][k];
-      const auto& Lj=Grad[j];
+    if(cr || pair){
       const unsigned p=rid[j];
 
       const V dv={{
@@ -427,19 +482,6 @@ bool JFlexDissipation::AddParticleT(
         twoD?0.:velocity[p].y-vi[1],
         velocity[p].z-vi[2]
       }};
-
-      V jump=dv;
-
-      for(unsigned a=0;a<3;a++)if(!twoD || a!=1){
-        double gi=0,gj=0;
-
-        for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
-          gi+=Li[3*a+b]*w.R[b];
-          gj+=Lj[3*a+b]*w.R[b];
-        }
-
-        jump[a]-=.5*(gi+gj);
-      }
 
       const V r={{
         x[p].x-xi[0],
@@ -452,13 +494,38 @@ bool JFlexDissipation::AddParticleT(
       if(!(rr>0) || !std::isfinite(rr))return false;
 
       const V normal=Scale(r,1/std::sqrt(rr));
-      const double un=Dot(jump,normal);
 
-      if(!std::isfinite(un))return false;
+      if(pair){
+        const double damp=PairWeights[i][k]*Dot(dv,normal);
 
-      if(un<0)
         for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
-          a[t]+=w.s*jump[t]+(w.p-w.s)*un*normal[t];
+          a[t]+=damp*normal[t];
+      }
+
+      if(cr){
+        const auto& w=Weights[i][k];
+        const auto& Lj=Grad[j];
+        V jump=dv;
+
+        for(unsigned a=0;a<3;a++)if(!twoD || a!=1){
+          double gi=0,gj=0;
+
+          for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
+            gi+=Li[3*a+b]*w.R[b];
+            gj+=Lj[3*a+b]*w.R[b];
+          }
+
+          jump[a]-=.5*(gi+gj);
+        }
+
+        const double un=Dot(jump,normal);
+
+        if(!std::isfinite(un))return false;
+
+        if(un<0)
+          for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
+            a[t]+=w.s*jump[t]+(w.p-w.s)*un*normal[t];
+      }
     }
 
     if(kv){
@@ -498,14 +565,14 @@ bool JFlexDissipation::AddParticleT(
 
 // Called from a compile-time-specialized force pass, not via per-particle
 // runtime dispatch. Each particle writes only its own acceleration.
-template<bool twoD,bool cr,bool kv>
+template<bool twoD,bool cr,bool kv,bool pair>
 bool JFlexDissipation::Accumulate(
     unsigned i,const tdouble3* x,const tfloat4* velocity,
     const unsigned* rid,tfloat3* ace,double& speed)const
 {
   tdouble3 da=TDouble3(0);
   double rate=kv?Q[i]*NormSumG[i]:0;
-  if(!AddParticleT<twoD,cr,kv>(i,x,velocity,rid,da,rate))return false;
+  if(!AddParticleT<twoD,cr,kv,pair>(i,x,velocity,rid,da,rate))return false;
 
   const double limit=std::numeric_limits<float>::max();
   if(!std::isfinite(da.x) || std::abs(da.x)>limit
@@ -525,7 +592,7 @@ bool JFlexDissipation::Accumulate(
   return true;
 }
 
-template<bool twoD,bool cr,bool kv>
+template<bool twoD,bool cr,bool kv,bool pair>
 double JFlexDissipation::ApplyT(
     const tdouble3* x,const tfloat4* velocity,
     const typecode* code,const unsigned* rid,
@@ -534,46 +601,61 @@ double JFlexDissipation::ApplyT(
   int invalid=0;
   const tmatrix3f zero={};
 
-  // Same two independent, statically scheduled passes as the pre-KV cR.
-  // Shared Fdot/LX is computed once, including clamp particles.
-  #ifdef OMP_USE
-  #pragma omp parallel for schedule(static) reduction(+:invalid)
-  #endif
-  for(int ii=0;ii<int(N);ii++){
-    const unsigned i=unsigned(ii);
-    const tmatrix3f& F=kv && defgrad?defgrad[i]:zero;
-    if(!PrepareT<twoD,cr,kv>(i,x,velocity,rid,F))invalid++;
+  if(cr || kv){
+    #ifdef OMP_USE
+    #pragma omp parallel for schedule(static) reduction(+:invalid)
+    #endif
+    for(int ii=0;ii<int(N);ii++){
+      const unsigned i=unsigned(ii);
+      const tmatrix3f& F=kv && defgrad?defgrad[i]:zero;
+
+      if(!PrepareT<twoD,cr,kv,pair>(
+          i,x,velocity,rid,F))invalid++;
+    }
+
+    if(invalid)
+      throw std::runtime_error(
+          "Elastic dissipation: invalid stage gradient or stress.");
   }
-  if(invalid)
-    throw std::runtime_error("Elastic dissipation: invalid stage gradient or stress.");
 
   double speed=0;
+
   if(kv){
     #ifdef OMP_USE
     #pragma omp parallel for schedule(static) reduction(+:invalid) reduction(max:speed)
     #endif
     for(int ii=0;ii<int(N);ii++){
       const unsigned i=unsigned(ii);
+
       if(!CODE_IsFlexStrucFlex(code[rid[i]]))continue;
-      if(!Accumulate<twoD,cr,kv>(i,x,velocity,rid,ace,speed))invalid++;
+
+      if(!Accumulate<twoD,cr,kv,pair>(
+          i,x,velocity,rid,ace,speed))invalid++;
     }
   }
   else{
-    // cR uses its cached constant maximum wave speed. No per-particle
-    // time-step interface or maximum-speed reduction in this path.
     #ifdef OMP_USE
     #pragma omp parallel for schedule(static) reduction(+:invalid)
     #endif
     for(int ii=0;ii<int(N);ii++){
       const unsigned i=unsigned(ii);
+
       if(!CODE_IsFlexStrucFlex(code[rid[i]]))continue;
+
       double unused=0;
-      if(!Accumulate<twoD,cr,kv>(i,x,velocity,rid,ace,unused))invalid++;
+
+      if(!Accumulate<twoD,cr,kv,pair>(
+          i,x,velocity,rid,ace,unused))invalid++;
     }
   }
+
   if(invalid)
-    throw std::runtime_error("Elastic dissipation: invalid stage acceleration.");
-  return std::max(cr?MaxCp:0.,speed);
+    throw std::runtime_error(
+        "Elastic dissipation: invalid stage acceleration.");
+
+  return std::max(
+      std::max(cr?MaxCp:0.,speed),
+      pair?PairSpeed:0.);
 }
 
 double JFlexDissipation::Apply(
@@ -583,10 +665,27 @@ double JFlexDissipation::Apply(
 {
   if(n!=N)
     throw std::runtime_error("Elastic dissipation: rebuild SPH reference cache.");
-  if(!CR && !KV)return 0;
+  if(!CR && !KV && !PairKV)return 0;
   if(MaxCp>std::numeric_limits<float>::max())
     throw std::runtime_error("Elastic dissipation: reference wave speed overflow.");
 
+  if(PairKV){
+    if(TwoD){
+      if(CR)
+        return ApplyT<true,true,false,true>(
+            x,velocity,code,rid,defgrad,ace);
+
+      return ApplyT<true,false,false,true>(
+          x,velocity,code,rid,defgrad,ace);
+    }
+
+    if(CR)
+      return ApplyT<false,true,false,true>(
+          x,velocity,code,rid,defgrad,ace);
+
+    return ApplyT<false,false,false,true>(
+        x,velocity,code,rid,defgrad,ace);
+  }
   // Select the active operators and dimension once per force evaluation.
   if(TwoD){
     if(CR && KV)return ApplyT<true,true,true>(x,velocity,code,rid,defgrad,ace);

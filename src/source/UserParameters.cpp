@@ -38,6 +38,7 @@ void UserParameters::Reset(){
   ElasticHighFrequencyDissipation=false;
   ElasticViscousDissipation=false;
   ElasticViscousFactor=0.5;
+  ElasticViscousSimplifiedMode=1;
 
   NoPenetrationMkEnabled=false;
   NoPenetrationMkBound=-1;
@@ -148,12 +149,17 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     }
 
     if(const TiXmlElement* p=child("viscous")){
-      xml->CheckAttributeNames(p,"enabled factor comment");
+      xml->CheckAttributeNames(p,"enabled factor simplifiedMode comment");
 
       ElasticViscousDissipation=
           xml->GetAttributeBool(p,"enabled",true,false);
       ElasticViscousFactor=
           xml->GetAttributeDouble(p,"factor",true,0.5);
+      ElasticViscousSimplifiedMode=
+          xml->GetAttributeInt(p,"simplifiedMode",true,1);
+
+      if(ElasticViscousSimplifiedMode!=1 && ElasticViscousSimplifiedMode!=2)
+        Run_Exceptioon("KV simplifiedMode must be 1 or 2.");
 
       if(!std::isfinite(ElasticViscousFactor)
           || ElasticViscousFactor<0)
@@ -1629,7 +1635,8 @@ void UserParameters::ConfigFlexRestartCorrections(
           ? "enabled" : "disabled");
 
     if(hasflex && ElasticViscousDissipation)
-      log->Printf("  KV factor: %g",ElasticViscousFactor);
+      log->Printf("  KV factor: %g; simplifiedMode: %d",
+          ElasticViscousFactor,ElasticViscousSimplifiedMode);
   }
   
   UseFlexRestartRestorePairs=
