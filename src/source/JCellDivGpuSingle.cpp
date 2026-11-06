@@ -225,8 +225,9 @@ void JCellDivGpuSingle::Divide(unsigned npb1,unsigned npf1,unsigned npb2,unsigne
   //-Sorts CellPart and SortPart as a function of the cell.
   //-Ordena CellPart y SortPart en funcion de la celda.
   timersg->TmStart(TMG_NlRadixSort,false);
-  if(DivideFull)cudiv::Sort(CellPart,SortPart,Nptot,Stable);
-  else cudiv::Sort(CellPart+Npb1,SortPart+Npb1,Nptot-Npb1,Stable);
+  if(DivideFull)cudiv::SortCached(CellPart,SortPart,Nptot,Stable,SortCache);
+  else cudiv::SortCached(CellPart+Npb1,SortPart+Npb1,Nptot-Npb1,Stable,SortCache);
+  SortCacheBytes=cudiv::SortCacheMemory(SortCache);
   timersg->TmStop(TMG_NlRadixSort,false);
 
   //-Computes the initial and the last paeticle of each cell (BeginEndCell).

@@ -124,6 +124,9 @@ protected:
   unsigned* SortPart2;    ///<Copy of SortPart so can use in sort_by_key. //<vs_flexstruc>
   unsigned* SortIdx;      ///<Indices to particles which are sorted.      //<vs_flexstruc>
 
+  void* SortCache=nullptr;
+  size_t SortCacheBytes=0;
+
   void Reset();
 
   //-Management of allocated dynamic memory.
@@ -141,7 +144,7 @@ protected:
   }
 
   llong GetAllocMemoryCpu()const{ return(0); }
-  llong GetAllocMemoryGpuNp()const{ return(MemAllocGpuNp); };
+  llong GetAllocMemoryGpuNp()const{ return(MemAllocGpuNp+SortCacheBytes); };
   llong GetAllocMemoryGpuNct()const{ return(MemAllocGpuNct); };
   llong GetAllocMemoryGpu()const{ return(GetAllocMemoryGpuNp()+GetAllocMemoryGpuNct()); };
 

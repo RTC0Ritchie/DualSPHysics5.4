@@ -32,6 +32,9 @@
 #pragma warning(disable : 4244) //Cancels "warning C4244: conversion from 'unsigned __int64' to 'unsigned int', possible loss of data"
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
+#include <thrust/system/cuda/execution_policy.h>
+#include <vector>
+#include <stdexcept>
 
 namespace cudiv{
 #include "FunctionsBasic_iker.h"
@@ -125,6 +128,57 @@ void Sort(unsigned* keys,unsigned* values,unsigned size,bool stable){
     else thrust::sort_by_key(dev_keysg,dev_keysg+size,dev_valuesg);
   }
 }
+
+// Owned by one cell divider. Blocks remain resident until its reset/growth.
+// Thrust execution policy and sorting algorithm are otherwise unchanged.
+class SortStorage{
+  struct Block{char* p;size_t bytes;bool used;};
+  std::vector<Block> Blocks;
+public:
+  ~SortStorage(){for(const auto& b:Blocks)cudaFree(b.p);}
+  char* Allocate(size_t bytes){
+    for(auto& b:Blocks)if(!b.used && b.bytes>=bytes){b.used=true;return b.p;}
+    // Replace an idle undersized block instead of retaining every old size.
+    Block* idle=nullptr;
+    for(auto& b:Blocks)if(!b.used){idle=&b;break;}
+    if(idle)bytes=std::max(bytes,idle->bytes+idle->bytes/5);
+    char* p=nullptr;
+    const auto e=cudaMalloc(reinterpret_cast<void**>(&p),bytes);
+    if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));
+    if(idle){cudaFree(idle->p);*idle={p,bytes,true};}
+    else{try{Blocks.push_back({p,bytes,true});}catch(...){cudaFree(p);throw;}}
+    return p;
+  }
+  void Release(char* p){
+    for(auto& b:Blocks)if(b.p==p){b.used=false;return;}
+    throw std::runtime_error("Unknown cell-sort allocation.");
+  }
+  size_t Bytes()const{size_t n=0;for(const auto& b:Blocks)n+=b.bytes;return n;}
+};
+class SortAllocator{
+  SortStorage* Storage;
+public:
+  using value_type=char;
+  explicit SortAllocator(SortStorage* storage):Storage(storage){}
+  char* allocate(std::ptrdiff_t bytes){return Storage->Allocate(size_t(bytes));}
+  void deallocate(char* p,size_t){Storage->Release(p);}
+};
+void SortCached(unsigned* keys,unsigned* values,unsigned size,bool stable,void*& cache){
+  if(!size)return;
+  if(!cache)cache=new SortStorage;
+  SortAllocator allocator(static_cast<SortStorage*>(cache));
+  thrust::device_ptr<unsigned> k(keys),v(values);
+  if(stable)thrust::stable_sort_by_key(thrust::cuda::par(allocator),k,k+size,v);
+  else thrust::sort_by_key(thrust::cuda::par(allocator),k,k+size,v);
+}
+void SortIndicesCached(unsigned* permutation,unsigned* inverse,unsigned size,bool stable,void*& cache){
+  if(!size)return;
+  thrust::device_ptr<unsigned> indices(inverse);
+  thrust::sequence(indices,indices+size);
+  SortCached(permutation,inverse,size,stable,cache);
+}
+void FreeSortCache(void*& cache){delete static_cast<SortStorage*>(cache);cache=nullptr;}
+size_t SortCacheMemory(const void* cache){return cache?static_cast<const SortStorage*>(cache)->Bytes():0;}
 
 //------------------------------------------------------------------------------
 /// Reduction of values in shared memory for a warp of KerPosLimitsRedu.
@@ -1008,6 +1062,10 @@ unsigned ReduUintSum(unsigned nblocks,unsigned* aux){
 /// Sorts the indices of the flexible structure particles.
 /// Ordena los índices de las partículas de estructura flexible.
 //==============================================================================
+void InvertIndices(const unsigned* permutation,unsigned* inverse,unsigned size){
+  if(size)KerReSortData<<<GetSimpleGridSize(size,DIVBSIZE),DIVBSIZE>>>(size,permutation,inverse);
+}
+
 void SortIndices(unsigned* sortpart,unsigned* sortidx,unsigned np,bool stable){
   thrust::device_ptr<unsigned> dev_sortidx(sortidx);
   thrust::sequence(dev_sortidx,dev_sortidx+np);

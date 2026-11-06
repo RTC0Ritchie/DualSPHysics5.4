@@ -38,6 +38,11 @@ namespace cudiv{
 inline tfloat3 ToTFloat3(const float3& v){ return(TFloat3(v.x,v.y,v.z)); }
 
 void Sort(unsigned* keys,unsigned* values,unsigned size,bool stable);
+void SortCached(unsigned* keys,unsigned* values,unsigned size,bool stable,void*& cache);
+void SortIndicesCached(unsigned* permutation,unsigned* inverse,unsigned size,bool stable,void*& cache);
+void FreeSortCache(void*& cache);
+size_t SortCacheMemory(const void* cache);
+void InvertIndices(const unsigned* permutation,unsigned* inverse,unsigned size);
 
 void ReduPosLimits(unsigned nblocks,float* aux,tfloat3& pmin,tfloat3& pmax);
 

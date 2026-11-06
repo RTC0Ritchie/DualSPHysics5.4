@@ -1598,6 +1598,59 @@ float2 UserGFlexPrecision::TimeStepMaxPair(unsigned na,const float* a,unsigned n
   return result;
 }
 
+// Same max tree per channel as the original pair/ReduMaxFloat reductions.
+__global__ void KerUserTimeStepMaxTriple(unsigned na,const float* a,unsigned nb,const float* b,
+    unsigned nc,const float* c,float* oa,float* ob,float* oc){
+  __shared__ float va[256],vb[256],vc[256];
+  const unsigned t=threadIdx.x,i=blockIdx.x*256+t;
+  va[t]=i<na?a[i]:-FLT_MAX;vb[t]=i<nb?b[i]:-FLT_MAX;vc[t]=i<nc?c[i]:-FLT_MAX;
+  __syncthreads();
+  for(unsigned stride=128;stride;stride>>=1){
+    if(t<stride){va[t]=max(va[t],va[t+stride]);vb[t]=max(vb[t],vb[t+stride]);vc[t]=max(vc[t],vc[t+stride]);}
+    __syncthreads();
+  }
+  if(!t){
+    if(blockIdx.x<(na+255)/256)oa[blockIdx.x]=na==1?a[0]:va[0];
+    if(blockIdx.x<(nb+255)/256)ob[blockIdx.x]=nb==1?b[0]:vb[0];
+    if(blockIdx.x<(nc+255)/256)oc[blockIdx.x]=nc==1?c[0]:vc[0];
+  }
+}
+float3 UserGFlexPrecision::TimeStepMaxTriple(unsigned na,const float* a,unsigned nb,const float* b,
+    unsigned nc,const float* c){
+  const unsigned nmax=std::max(na,std::max(nb,nc)),cap=(nmax+255)/256;
+  if(!nmax)return make_float3(0,0,0);
+  float* scratch=static_cast<float*>(WorkScratch((size_t(cap)*6+3)*sizeof(float)));
+  unsigned n[3]={na,nb,nc};const float* p[3]={a,b,c};bool flip=false;
+  while(n[0]>1 || n[1]>1 || n[2]>1){
+    unsigned blocks[3];float* q[3];
+    for(unsigned k=0;k<3;k++){
+      blocks[k]=(n[k]+255)/256;
+      q[k]=n[k]<=256?scratch+k:scratch+3+size_t(2*k+unsigned(flip))*cap;
+    }
+    KerUserTimeStepMaxTriple<<<std::max(blocks[0],std::max(blocks[1],blocks[2])),256>>>(
+        n[0],p[0],n[1],p[1],n[2],p[2],q[0],q[1],q[2]);
+    for(unsigned k=0;k<3;k++){n[k]=blocks[k];p[k]=q[k];}flip=!flip;
+  }
+  const unsigned lengths[3]={na,nb,nc};const float* inputs[3]={a,b,c};
+  for(unsigned k=0;k<3;k++)if(lengths[k]<=1){
+    if(lengths[k])Impl::Check(cudaMemcpy(scratch+k,inputs[k],sizeof(float),cudaMemcpyDeviceToDevice));
+    else Impl::Check(cudaMemset(scratch+k,0,sizeof(float)));
+  }
+  float3 result;Impl::Check(cudaMemcpy(&result,scratch,sizeof(result),cudaMemcpyDeviceToHost));return result;
+}
+__global__ void KerUserFlexInvalid(unsigned n,const typecode* code,unsigned* invalid){
+  const unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+  const bool bad=i<n && CODE_IsFlexStrucAny(code[i]) && !CODE_IsNotOut(code[i]);
+  if(__syncthreads_or(bad) && threadIdx.x==0)atomicOr(invalid,1u);
+}
+bool UserGFlexPrecision::StepIsValid(unsigned n,const typecode* code,unsigned* invalid){
+  if(!n)return true;
+  Impl::Check(cudaMemsetAsync(invalid,0,sizeof(unsigned)));
+  KerUserFlexInvalid<<<(n+255)/256,256>>>(n,code,invalid);
+  unsigned result;Impl::Check(cudaMemcpy(&result,invalid,sizeof(result),cudaMemcpyDeviceToHost));
+  return result==0;
+}
+
 // Host launch selection only. No precision switch is evaluated on the GPU.
 template<class Math,bool corrected> class UserGFlexPrecisionBackend{
   using State=typename Math::State;

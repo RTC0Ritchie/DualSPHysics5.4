@@ -61,6 +61,9 @@ public:
   void* WorkScratch(size_t bytes);
   // Independent maxima, one synchronous host transfer. Inputs remain unchanged.
   float2 TimeStepMaxPair(unsigned na,const float* a,unsigned nb,const float* b);
+  float3 TimeStepMaxTriple(unsigned na,const float* a,unsigned nb,const float* b,
+      unsigned nc,const float* c);
+  static bool StepIsValid(unsigned n,const typecode* code,unsigned* scratch);
 };
 
 // Shared device-state layout used by the elastic solver and user output.

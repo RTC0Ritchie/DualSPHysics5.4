@@ -296,3 +296,8 @@ UserGIceProtection.o: UserGIceProtection.cu UserGIceProtection.h UserIceTopProte
 # INOUT checkpoint helpers; no JSphGpu_ker dependency is introduced.
 JSphCpuSingle.o JSphCpuSingle_InOut.o JSphGpuSingle_InOut.o: UserInOutData.h
 JSphGpuSingle_InOut.o: UserParameters.h
+
+# Cached cell-sort workspace and elastic reductions.
+JCellDivGpu.o JCellDivGpuSingle.o JSphGpu.o JSphGpuSingle.o JDebugSphGpu.o JSphGpuSingle_VRes.o JSphGpuSingle_InOut.o: JCellDivGpu.h
+JCellDivGpu.o JCellDivGpuSingle.o JCellDivGpu_ker.o: JCellDivGpu_ker.h
+JSphGpu.o JSphGpuSingle.o UserGInteractionForcesFlexStruc.o: UserGFlexPrecision.h

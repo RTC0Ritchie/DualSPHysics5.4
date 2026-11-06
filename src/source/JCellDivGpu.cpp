@@ -102,6 +102,7 @@ void JCellDivGpu::FreeMemoryNct(){
 //==============================================================================
 void JCellDivGpu::FreeMemoryAll(){
   FreeMemoryNct();
+  cudiv::FreeSortCache(SortCache);SortCacheBytes=0;
   cudaFree(CellPart);   CellPart=NULL;
   cudaFree(SortPart);   SortPart=NULL;
   cudaFree(AuxMem);     AuxMem=NULL;
@@ -473,8 +474,18 @@ tdouble3 JCellDivGpu::GetDomainLimits(bool limitmin,unsigned slicecellmin)const{
 //==============================================================================
 void JCellDivGpu::UpdateIndices(unsigned n,unsigned* idx){
   if(DivideFull){
-    cudaMemcpy(SortPart2,SortPart,sizeof(unsigned)*NpbFinal,cudaMemcpyDeviceToDevice);
-    cudiv::SortIndices(SortPart2,SortIdx,NpbFinal,Stable);
+    // Fast path only for the complete, non-periodic boundary permutation.
+    // BoxBoundIgnore precedes BoxFluid: ignored-in-domain bounds are still
+    // in the complete permutation. Only removed/periodic bounds need fallback.
+    if(!PeriActive && !Npb2 && !NpbOut && !NpbOutIgnore
+        && NpbFinal==Npb1){
+      cudiv::InvertIndices(SortPart,SortIdx,NpbFinal);
+    }
+    else{
+      cudaMemcpy(SortPart2,SortPart,sizeof(unsigned)*NpbFinal,cudaMemcpyDeviceToDevice);
+      cudiv::SortIndicesCached(SortPart2,SortIdx,NpbFinal,Stable,SortCache);
+      SortCacheBytes=cudiv::SortCacheMemory(SortCache);
+    }
     cudiv::UpdateIndices(n,SortIdx,idx);
   }
 }

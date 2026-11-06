@@ -691,8 +691,15 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
   // force kernels. Avoid a redundant device-wide wait before that download.
   // Read viscosity before ComputeAceMax reuses ViscDt_g as scratch.
   if(CaseNflexstruc){
-    const float2 maxima=FlexPrecision->TimeStepMaxPair(Np,ViscDt_g->cptr()
-      ,CaseNflexstruc,FlexStrucDtg);
+    // Preserve viscosity until the joint reduction; acceleration needs its own
+    // pooled scratch because ComputeAceMax normally overwrites ViscDt_g.
+    agfloat aceaux("-",Arrays_Gpu,true);
+    const bool check=(PeriActive!=0 || InOut!=NULL);
+    if(check)cusph::ComputeAceMod(Np,Code_g->cptr(),Ace_g->cptr(),aceaux.ptr());
+    else cusph::ComputeAceMod(Np,Ace_g->cptr(),aceaux.ptr());
+    const float3 maxima=FlexPrecision->TimeStepMaxTriple(Np,ViscDt_g->cptr()
+      ,CaseNflexstruc,FlexStrucDtg,Np,aceaux.cptr());
+    AceMax=sqrt(double(maxima.z));
     if(Np)ViscDtMax=maxima.x;
     // Invalid elastic determinants use +infinity in the existing reduction.
     // Check before any integration; no additional device/host transfer.
@@ -707,7 +714,7 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
   }
   Check_CudaErroor("Failed while executing kernels of interaction.");
   //-Calculates maximum value of Ace (periodic particles are ignored). ViscDtg is used like auxiliary memory.
-  AceMax=ComputeAceMax(ViscDt_g->ptr());
+  if(!CaseNflexstruc)AceMax=ComputeAceMax(ViscDt_g->ptr());
 
   #ifdef AVAILABLE_DIVCLEAN
   if(DivCleaning){
