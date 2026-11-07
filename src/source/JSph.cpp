@@ -70,6 +70,7 @@
 #include "JSpVtkData.h"
 #include "JSpVtkShape.h"
 #include "UserIceBottomProtection.h"
+#include "UserFlexKinematics.h"
 #include <algorithm>
 
 using namespace std;
@@ -1546,6 +1547,31 @@ void JSph::ConfigBoundNormals(unsigned np,unsigned npb,const tdouble3* pos
       UseNormalsFt=edat.LoadNormals(np,npb,idp,boundnor);
     }
     else Run_Exceptioon(fun::PrintStr("No extra data available to restart at PART_%04d with mDBC.",PartBegin).c_str());
+  }
+
+  // Check current solid geometry after loading restart normals and BEFORE
+  // capturing the elastic reference normals. CPU/GPU share this host path.
+  // Group each elastic body with its clamps; never use fluid/wetting history.
+  if(FlexStruc){
+    for(unsigned body=0;body<FlexStruc->GetCount();body++){
+      const auto* b=FlexStruc->GetBody(body);
+      std::vector<const JSphMkBlock*> blocks;
+      blocks.push_back(MkInfo->Mkblock(MkInfo->GetMkBlockByMkBound(b->MkBound)));
+      for(word mk:b->MkClamp)blocks.push_back(MkInfo->Mkblock(MkInfo->GetMkBlockByMkBound(mk)));
+      std::vector<unsigned> index;
+      std::vector<tdouble3> xyz;
+      std::vector<tfloat3> normals;
+      for(unsigned p=0;p<np;p++){
+        bool selected=false;
+        for(const auto* block:blocks)if(idp[p]>=block->Begin && idp[p]-block->Begin<block->Count){selected=true;break;}
+        if(selected){index.push_back(p);xyz.push_back(pos[p]);normals.push_back(boundnor[p]);}
+      }
+      const auto report=UserFlexKinematics::RepairNormalOrientation(Simulate2D,Dp,
+        unsigned(index.size()),xyz.data(),normals.data());
+      for(unsigned i=0;i<index.size();i++)boundnor[index[i]]=normals[i];
+      Log->Printf("Elastic normal orientation: body=%u checked=%u repaired=%u ambiguous=%u (%s geometry).",
+        body,report.Checked,report.Corrected,report.Unresolved,PartBegin?"continuation":"initial");
+    }
   }
 
   //-Saves normals from boundary particles to boundary limit.

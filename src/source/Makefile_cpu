@@ -113,3 +113,6 @@ ifeq ($(COMPILE_MOORDYNPLUS), YES)
 	$(MAKE) -C Source_DSphMoorDynPlus -f Makefile_MoorDynPlus clean $(MAKEFLAGS)
 endif
 	rm -rf *.o $(EXECS_DIRECTORY)/$(EXECNAME) $(EXECS_DIRECTORY)/$(EXECNAME)_debug
+
+# Shared initialization-only elastic normal orientation check.
+JSph.o UserFlexKinematics.o: UserFlexKinematics.h
