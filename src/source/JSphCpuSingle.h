@@ -35,6 +35,7 @@ class JCellDivCpuSingle;
 
 class JSphCpuSingle : public JSphCpu
 {
+  friend class UserInOutBoundMode;
 protected:
   JCellDivCpuSingle* CellDivSingle;
 

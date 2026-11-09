@@ -58,6 +58,7 @@
 #include "UserInOutData.h"
 #include "UserIceInOutData.h"
 #include "JDsPartsInit.h"
+#include "UserInOutBoundMode.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -1055,6 +1056,7 @@ double JSphCpuSingle::ComputeStep_Sym(){
   CaptureIceTopNoPenetration(true);
   ComputeSymplecticPre(dt);               //-Apply Symplectic-Predictor to particles (periodic particles become invalid).
   ApplyIceTopNoPenetration(true);
+  UserInOutBoundMode::ApplyNoBackflowCpu(*this);
   if(CaseNfloat)RunFloating(dt*.5,true);  //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   //-Corrector
@@ -1072,6 +1074,7 @@ double JSphCpuSingle::ComputeStep_Sym(){
   CaptureIceTopNoPenetration(false);
   ComputeSymplecticCorr(dt);              //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
   ApplyIceTopNoPenetration(false);
+  UserInOutBoundMode::ApplyNoBackflowCpu(*this);
   if(CaseNfloat)RunFloating(dt,false);    //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   if(Damping)RunDamping(dt);              //-Applies Damping.
@@ -1303,6 +1306,14 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Load parameters and input data.
   LoadConfig(cfg);
+
+  if(UserInOutBoundMode::Read(User.get()).NoBackflow
+      && (!InOut || cfg->VRes))
+    Run_Exceptioon("InOutNoBackflow requires ordinary non-VRes InOut.");
+
+  if(UserInOutBoundMode::Read(User.get()).Enabled && !InOut)
+    Run_Exceptioon("InOutBoundMode requires an InOut region.");
+
   LoadCaseParticles();
   User->ConfigFlexRestartMode(
     PartBegin!=0,
@@ -1317,10 +1328,13 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   InitRunCpu();
   LoadBoundaryMotionRestart();
 
-  if(!User->IceTopFluidCleanupEnabled)
+  if(!User->IceTopFluidCleanupEnabled
+      && !UserInOutBoundMode::Read(User.get()).Enabled
+      && !UserInOutBoundMode::Read(User.get()).NoBackflow)
     RunFirstGaugeSystem(TimeStep);
 
   if(InOut)InOutInit(TimeStepIni);
+  UserInOutBoundMode::InitNoBackflowCpu(*this);
   if(User->SaveInOutData){
     if(!InOut || PeriActive || !(SvData&SDAT_Binx) || !SvPosDouble || OutputParts)
       Run_Exceptioon("SaveInOutData requires ordinary CPU InOut, full binary output and SavePosDouble=1; OutputParts is not supported.");
@@ -1339,8 +1353,13 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   // before initial gauges and particle output.
   ClearIceTopFluidOnce();
   InitIceTopNoPenetration();
+  UserInOutBoundMode::ApplyNoBackflowCpu(*this);
+  if(UserInOutBoundMode::Read(User.get()).NoBackflow)
+    RunCellDivide(true);
 
-  if(User->IceTopFluidCleanupEnabled)
+  if(User->IceTopFluidCleanupEnabled
+      || UserInOutBoundMode::Read(User.get()).Enabled
+      || UserInOutBoundMode::Read(User.get()).NoBackflow)
     RunFirstGaugeSystem(TimeStep);
 
   FreePartsInit();

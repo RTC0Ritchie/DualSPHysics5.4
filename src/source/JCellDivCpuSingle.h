@@ -23,6 +23,9 @@
 
 #include "JCellDivCpu.h"
 
+#include <vector>
+#include <algorithm>
+
 class JDsTimersCpu;
 
 //##############################################################################
@@ -49,6 +52,7 @@ protected:
   void PreSort(const unsigned* dcellc,const typecode* codec);
 
   bool FlexDomainEnabled=false;
+  std::vector<typecode> ValveCodes;
 
 public:
   JCellDivCpuSingle(bool stable,bool floating,byte periactive
@@ -59,6 +63,14 @@ public:
   void Divide(unsigned npb1,unsigned npf1,unsigned npb2,unsigned npf2,bool boundchanged
     ,const unsigned* dcellc,const typecode* codec,const unsigned* idpc,const tdouble3* posc
     ,JDsTimersCpu* timersc);
+
+  void SetValveCodes(const std::vector<typecode>& codes){
+    ValveCodes=codes;
+    std::sort(ValveCodes.begin(),ValveCodes.end());
+
+    BoundLimitOk=false;
+    BoundDivideOk=false;
+  }
 
   llong GetAllocMemory()const{ return(JCellDivCpu::GetAllocMemory()); }
   llong GetAllocMemoryNp()const{ return(JCellDivCpu::GetAllocMemoryNp()); };

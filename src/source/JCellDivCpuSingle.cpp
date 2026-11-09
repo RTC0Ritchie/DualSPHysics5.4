@@ -217,6 +217,11 @@ void JCellDivCpuSingle::PreSortFull(unsigned np,const unsigned* dcellc
     else{//-Fluid and floating particles | Particulas fluid y floating.
       box=(codeout<=CODE_OUTIGNORE?   (codeout<CODE_OUTIGNORE? BoxFluid+cellsort: BoxFluidOutIgnore):   (codetype==CODE_TYPE_FLOATING? BoxBoundOut: BoxFluidOut));
     }
+    if(codeout<CODE_OUTIGNORE
+        && std::binary_search(
+            ValveCodes.begin(),ValveCodes.end(),
+            CODE_GetTypeAndValue(rcode)))
+      box=BoxBoundIgnore;
     cellpart[p]=box;
     partsincell[box]++;
   }

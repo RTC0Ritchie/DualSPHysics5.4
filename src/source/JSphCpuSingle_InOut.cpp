@@ -32,6 +32,10 @@
 #include "UserInOutData.h"
 #include <climits>
 
+#define USER_INOUT_BOUND_MODE_CPU_IMPLEMENTATION
+#include "UserInOutBoundMode.h"
+#undef USER_INOUT_BOUND_MODE_CPU_IMPLEMENTATION
+
 using namespace std;
 
 //==============================================================================
@@ -62,8 +66,22 @@ void JSphCpuSingle::InOutIgnoreFluidDef(const std::vector<unsigned>& mkfluidlist
 //==============================================================================
 void JSphCpuSingle::InOutCheckProximity(unsigned newnp){
   if(Np && newnp){
-    InOut->InitCheckProximity(Np,newnp,Scell,Pos_c->cptr(),Idp_c->cptr()
-      ,Code_c->ptr());
+    if(UserInOutBoundMode::Read(User.get()).NoBackflow){
+      std::vector<typecode> checked(Code_c->cptr(),Code_c->cptr()+Np);
+      UserInOutBoundMode::CheckNoBackflowProximityCpu(*this,newnp,checked);
+      for(unsigned p=0;p<Np;p++){
+        if(CODE_IsNormal(Code_c->cptr()[p])
+            && CODE_IsFluidNotInout(Code_c->cptr()[p]))
+          UserInOutBoundMode::Require(checked[p]==Code_c->cptr()[p],
+              "InOutNoBackflow: initial buffers overlap ordinary fluid; "
+              "adjust the inlet geometry.");
+      }
+      for(unsigned p=0;p<Np;p++)Code_c->ptr()[p]=checked[p];
+    }
+    else{
+      InOut->InitCheckProximity(Np,newnp,Scell,Pos_c->cptr(),Idp_c->cptr(),
+          Code_c->ptr());
+    }
   }
 }
 
@@ -72,6 +90,10 @@ void JSphCpuSingle::InOutCheckProximity(unsigned newnp){
 /// Inicia condiciones inlet/outlet.
 //==============================================================================
 void JSphCpuSingle::InOutInit(double timestepini){
+  if(UserInOutBoundMode::Read(User.get()).Enabled){
+    UserInOutBoundMode::InitCpu(*this);
+    return;
+  }
   InOut->Nstep=Nstep; //-For debug.
   Timersc->TmStart(TMC_SuInOut);
   Log->Print("Initialising InOut...");
@@ -199,6 +221,16 @@ void JSphCpuSingle::InOutInit(double timestepini){
 void JSphCpuSingle::InOutComputeStep(double stepdt){
   const double newtimestep=TimeStep+stepdt;
   InOut->Nstep=Nstep; //-For debug.
+  const auto& valve=UserInOutBoundMode::Runtime(InOut);
+
+  if(valve.Enabled && !valve.Open){
+    // Maintain table/checkpoint time without inlet operations.
+    InOut->UpdateVelData(newtimestep);
+    InOut->UpdateZsurfData(newtimestep,false);
+
+    RunCellDivide(true);
+    return;
+  }
   //Log->Printf("%u>--------> [InOutComputeStep_000]",Nstep);
   //DgSaveVtkParticlesCpu("_ComputeStep_XX.vtk",0,0,Np,Posc,Codec,Idpc,Velrhopc);
   Timersc->TmStart(TMC_SuInOut);
@@ -224,6 +256,8 @@ void JSphCpuSingle::InOutComputeStep(double stepdt){
     acbyte zsurfok("-",Arrays_Cpu,InOut->Use_ZsurfNonUniform());
     acint inoutpart("-",Arrays_Cpu,true);
     acbyte newizone("-",Arrays_Cpu,true);
+
+    UserInOutBoundMode::ApplyNoBackflowCpu(*this);
 
     //-Creates list with current inout particles and normal fluid (no periodic) in inout zones.
     const unsigned inoutcountpre=InOut->CreateListCpu(Np-Npb,Npb
@@ -290,6 +324,9 @@ void JSphCpuSingle::InOutComputeStep(double stepdt){
 /// Updates inout particle data according inlet configuration.
 //==============================================================================
 void JSphCpuSingle::InOutUpdatePartsData(double timestepnew){
+  const auto& valve=UserInOutBoundMode::Runtime(InOut);
+
+  if(valve.Enabled && !valve.Open)return;
   //-Create list of current inout particles (normal and periodic).
   acint inoutpart("-",Arrays_Cpu,true);
   const unsigned inoutcount=InOut->CreateListSimpleCpu(Np-Npb,Npb

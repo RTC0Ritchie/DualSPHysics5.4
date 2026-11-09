@@ -61,6 +61,8 @@
 #include "JDsPartsInit.h"
 #include "JDsOutputParts.h" //<vs_outpaarts>
 
+#include "UserInOutBoundMode.h"
+
 #include <climits>
 
 using namespace std;
@@ -1023,6 +1025,11 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Load parameters and input data.
   LoadConfig(cfg);
+  if(UserInOutBoundMode::Read(User.get()).NoBackflow)
+    Run_Exceptioon("InOutNoBackflow is implemented for CPU only.");
+
+  if(UserInOutBoundMode::Read(User.get()).Enabled)
+    Run_Exceptioon("InOutBoundMode is implemented for CPU only.");
   LoadCaseParticles();
   ConfigFlexRestartMode();
   VisuConfig();

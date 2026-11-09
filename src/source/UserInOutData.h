@@ -11,8 +11,10 @@
 #include "JPartDataBi4.h"
 #include "Functions.h"
 #include "JLog2.h"
-#include <cmath>
 
+#include "UserInOutBoundMode.h"
+
+#include <cmath>
 #include <fstream>
 #include <algorithm>
 #include <limits>
@@ -306,22 +308,27 @@ public:
     JBinaryData head("PartHeadInOut");
 
     if(!written){
-      head.SetvUint("Version",3);
+      head.SetvUint(
+          "Version",UserInOutBoundMode::FileVersion(&s));
       head.SetvText("RunCode",run);
       head.SetvUllong("ConfigHash",signature);
+      UserInOutBoundMode::Runtime(&s).Header(head);
       head.SaveFile(hf);
       written=true;
     }
     else{
       head.LoadFile(hf,"PartHeadInOut");
-      Require(head.GetvUint("Version")==3
+      UserInOutBoundMode::Runtime(&s).CheckHeader(head);
+      Require(head.GetvUint("Version")
+          ==UserInOutBoundMode::FileVersion(&s)
           && head.GetvText("RunCode")==run
           && head.GetvUllong("ConfigHash")==signature,
           "header/configuration changed.");
     }
 
     JBinaryData frame("PartInOut");
-    frame.SetvUint("Version",3);
+    frame.SetvUint(
+        "Version",UserInOutBoundMode::FileVersion(&s));
     frame.SetvText("RunCode",run);
     frame.SetvUint("Part",part);
     frame.SetvDouble("Time",time);
@@ -342,6 +349,7 @@ public:
     frame.CreateArray("Intervals",JBinaryDataDef::DatUint,
         iv.size(),iv.data(),false);
 
+    UserInOutBoundMode::Runtime(&s).Frame(frame);
     frame.SaveFile(root+fun::FileNameSec("PartInOut.bi4",part));
   }
 
@@ -359,8 +367,10 @@ public:
       for(unsigned order=1;order<=3 && !compatible;order++)
         compatible=(savedSignature==ConfigHash(s,mk,order));
 
-    Require(head.GetvUint("Version")==3
-        && frame.GetvUint("Version")==3
+    Require(head.GetvUint("Version")
+            ==UserInOutBoundMode::FileVersion(&s)
+        && frame.GetvUint("Version")
+            ==UserInOutBoundMode::FileVersion(&s)
         && head.GetvText("RunCode")==frame.GetvText("RunCode")
         && (main.Get_RunCode()=="00000000"
             || frame.GetvText("RunCode")==main.Get_RunCode())
@@ -372,6 +382,7 @@ public:
     if(savedSignature!=signature)
       s.Log->PrintWarning("InOut checkpoint: equivalent 2-D corner rounding order verified by full configuration hash (CPU/GPU host fast-math compatibility).");
 
+    UserInOutBoundMode::Runtime(&s).Restore(head,frame);
     Require(np==main.Get_Npok(),"main PART particle count mismatch.");
 
     const ullong initial=main.Get_CaseNp();

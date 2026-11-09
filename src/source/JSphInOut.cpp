@@ -36,6 +36,8 @@
 #include "JTimeControl.h"
 #include "JDsGaugeSystem.h"
 
+#include "UserInOutBoundMode.h"
+
 #ifdef _WITHGPU
   #include "JDsTimersGpu.h"
   #include "FunctionsCuda.h"
@@ -88,6 +90,7 @@ JSphInOut::~JSphInOut(){
 /// Initialisation of variables.
 //==============================================================================
 void JSphInOut::Reset(){
+  UserInOutBoundMode::ResetRuntime(this);
   Nstep=0;
   RefillingRate=0;
   Stable=false;
