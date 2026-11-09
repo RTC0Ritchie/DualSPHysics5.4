@@ -6,6 +6,7 @@
 #include "UserFlexBoundaryCorrection.h"
 #include "UserIceBottomProtection.h"
 #include "UserIceTopProtection.h"
+#include "UserInOutBoundMode.h"
 #include "UserGParameters.h"
 
 #include <algorithm>
@@ -14,6 +15,29 @@
 #include <string>
 #include <cmath>
 #include <limits>
+
+std::map<const UserParameters*,UserInOutBoundMode::StConfig>&
+UserInOutBoundMode::Configs(){
+  static std::map<const UserParameters*,StConfig> configs;
+  return configs;
+}
+
+UserInOutBoundMode::StConfig
+UserInOutBoundMode::Read(const UserParameters* user){
+  const auto& configs=Configs();
+  const auto it=configs.find(user);
+  return (it==configs.end()? StConfig{}: it->second);
+}
+
+void UserInOutBoundMode::Reset(const UserParameters* user){
+  Configs().erase(user);
+}
+
+void UserInOutBoundMode::Store(
+    const UserParameters* user,const StConfig& config)
+{
+  Configs()[user]=config;
+}
 
 UserParameters::UserParameters(){
   ClassName="UserParameters";
@@ -60,6 +84,8 @@ void UserParameters::Reset(){
   SaveFlexPairData=false;
   SaveInOutData=false;
   InOutHeadWritten=false;
+
+  UserInOutBoundMode::Reset(this);
 
   FlexRestartRequested=false;
   FlexRestartSourceRequested=0;
@@ -354,6 +380,53 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
           "User.IceTopFluidCleanup value must be 0 or 1.");
 
     IceTopFluidCleanupEnabled=(enabled==1);
+  }
+
+  // InOut valve request. Physical switching is not connected yet.
+  const auto valveit=nodes.find("InOutBoundMode");
+  if(valveit!=nodes.end()){
+    const TiXmlElement* ele=valveit->second;
+
+    xml->CheckAttributeNames(
+        ele,"key value active comment units_comment");
+    xml->CheckElementNames(ele,true,"ValveStatue");
+
+    UserInOutBoundMode::StConfig config;
+    config.Enabled=xml->GetAttributeBool(ele,"value");
+
+    const TiXmlElement* state=
+        ele->FirstChildElement("ValveStatue");
+
+    if(state){
+      if(state->NextSiblingElement("ValveStatue"))
+        Run_Exceptioon(
+            "User.InOutBoundMode has repeated ValveStatue nodes.");
+
+      xml->CheckAttributeNames(
+          state,"value comment units_comment");
+
+      if(state->FirstChildElement())
+        Run_Exceptioon(
+            "User.InOutBoundMode.ValveStatue "
+            "does not accept child elements.");
+
+      // Read as double before validation to reject fractional values,
+      // including values obtained from XML expressions.
+      const double value=xml->GetAttributeDouble(state,"value");
+
+      if(value!=0.0 && value!=1.0)
+        Run_Exceptioon(
+            "User.InOutBoundMode.ValveStatue must be 0 or 1.");
+
+      config.ValveStatue=int(value);
+    }
+
+    if(config.Enabled && config.ValveStatue<0)
+      Run_Exceptioon(
+          "User.InOutBoundMode requires ValveStatue "
+          "when value is true.");
+
+    UserInOutBoundMode::Store(this,config);
   }
   // ------------------------------------------------------------
   // Contact algorithm.
@@ -1509,6 +1582,27 @@ void UserParameters::VisuConfig(JLog2* log)const{
       FlexRestartSourceRequested==1 ? "prescribed" :
       FlexRestartSourceRequested==2 ? "model_transfer" :
       "unspecified";
+
+  const auto valve=UserInOutBoundMode::Read(this);
+
+  log->Printf("  InOutBoundMode: %s (requested)",
+      valve.Enabled? "true": "false");
+
+  if(valve.ValveStatue>=0){
+    log->Printf(
+        "    ValveStatue: %d (%s%s)",
+        valve.ValveStatue,
+        valve.ValveStatue==1? "open inlet": "closed boundary",
+        valve.Enabled? "; requested": "; inactive");
+  }
+
+  if(valve.Enabled && !UserInOutBoundMode::IsImplemented()){
+    log->PrintWarning(
+        "InOutBoundMode is an XML interface only in this version. "
+        "No valve boundary selection, particle switching or "
+        "valve restart state has been implemented. "
+        "The solver continues with its existing boundary behavior.");
+  }
 
   log->Printf(
       "  FlexRestart.SourceRequested: %d (%s; %s)",
