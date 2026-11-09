@@ -4,6 +4,7 @@
 #include "UserGMdbc.h"
 #include "UserGIceProtection.h"
 #include "UserGParameters.h"
+#include "UserParameters.h"
 #include <cmath>
 //HEAD_DSPH
 /*
@@ -1025,6 +1026,9 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Load parameters and input data.
   LoadConfig(cfg);
+  if(User->NoPenetrationMkEnabled
+      && UserNoPenetrationMk::Get(User.get()).Ranges.size()>1)
+    Run_Exceptioon("Multiple NoPenetrationMk selections currently require CPU.");
   if(UserInOutBoundMode::Read(User.get()).NoBackflow)
     Run_Exceptioon("InOutNoBackflow is implemented for CPU only.");
 

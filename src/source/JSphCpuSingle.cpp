@@ -739,9 +739,9 @@ void JSphCpuSingle::Interaction_Forces(TpInterStep interstep){
     const unsigned* ids=Idp_c->cptr();
     const typecode* codes=Code_c->cptr();
 
+    const auto& ranges=UserNoPenetrationMk::Get(User.get()).Ranges;
     for(unsigned p=0;p<Npb;p++){
-      if(ids[p]>=User->NoPenetrationMkIdBegin
-          && ids[p]<User->NoPenetrationMkIdEnd
+      if(UserNoPenetrationMk::Contains(ranges,ids[p])
           && CODE_IsFixed(codes[p])
           && !CODE_IsFlexStrucAny(codes[p])){
         const tfloat3 normal=nopenNormals[p];
@@ -1075,6 +1075,7 @@ double JSphCpuSingle::ComputeStep_Sym(){
   ComputeSymplecticCorr(dt);              //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
   ApplyIceTopNoPenetration(false);
   UserInOutBoundMode::ApplyNoBackflowCpu(*this);
+  PosPre_c->Free();                     //-Release stage origins after all position constraints.
   if(CaseNfloat)RunFloating(dt,false);    //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   if(Damping)RunDamping(dt);              //-Applies Damping.
@@ -1353,9 +1354,6 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   // before initial gauges and particle output.
   ClearIceTopFluidOnce();
   InitIceTopNoPenetration();
-  UserInOutBoundMode::ApplyNoBackflowCpu(*this);
-  if(UserInOutBoundMode::Read(User.get()).NoBackflow)
-    RunCellDivide(true);
 
   if(User->IceTopFluidCleanupEnabled
       || UserInOutBoundMode::Read(User.get()).Enabled

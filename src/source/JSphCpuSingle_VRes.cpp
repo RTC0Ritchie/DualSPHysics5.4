@@ -443,6 +443,7 @@ double JSphCpuSingle_VRes::ComputeStepVRes(){
   const double dt_c=DtVariable(true);     //-Calculate dt of corrector step.
   if(Shifting)RunShifting(dt);            //-Shifting.
   ComputeSymplecticCorr(dt);              //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
+  PosPre_c->Free();                     //-Release stage origins (no inlet constraint in VRes).
   if(CaseNfloat)RunFloating(dt,false);    //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   if(Damping)RunDamping(dt);              //-Applies Damping.

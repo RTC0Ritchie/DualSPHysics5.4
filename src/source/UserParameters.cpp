@@ -42,6 +42,7 @@ void UserParameters::Reset(){
 
   NoPenetrationMkEnabled=false;
   NoPenetrationMkBound=-1;
+  UserNoPenetrationMk::Reset(this);
 
   IceTopNoPenetrationEnabled=false;
   IceRightNoPen::Reset(this);
@@ -244,11 +245,9 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     NoPenetrationMkEnabled=(enabled==1);
 
     if(NoPenetrationMkEnabled){
-      NoPenetrationMkBound=xml->GetAttributeInt(ele,"mkbound");
-
-      if(NoPenetrationMkBound<0 || NoPenetrationMkBound>65535)
-        Run_Exceptioon(
-            "User.NoPenetrationMk mkbound must be in [0,65535].");
+      UserNoPenetrationMk::Parse(this,
+          xml->GetAttributeStr(ele,"mkbound"));
+      NoPenetrationMkBound=int(UserNoPenetrationMk::Get(this).Mks.front());
     }
   }
 

@@ -19,6 +19,7 @@
 /// \file JSph.cpp \brief Implements the class \ref JSph.
 
 #include "UserParameters.h"
+#include "UserInOutBoundMode.h"
 
 #include "JSph.h"
 #include "JAppInfo.h"
@@ -1087,33 +1088,27 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
   MkInfo=new JSphMk();
   MkInfo->Config(&parts);
 
-  //-Resolve the selected boundary to a stable particle-ID interval.
+  // Resolve every selected MK to its own stable ID interval.
   if(User->NoPenetrationMkEnabled){
-    const unsigned block=MkInfo->GetMkBlockByMkBound(
-        word(User->NoPenetrationMkBound));
-
-    if(block>=MkInfo->Size())
-      Run_Exceptioon(
-          "User.NoPenetrationMk: selected mkbound does not exist.");
-
-    const JSphMkBlock* bed=MkInfo->Mkblock(block);
-
-    if(!bed->Bound || !bed->Count
-        || (!CODE_IsFixed(bed->Code)
-            && !User->IceTopNoPenetrationEnabled
-            && !IceBottomNoPen::Get(User.get()).Enabled))
-      Run_Exceptioon(
-          "User.NoPenetrationMk requires a non-empty fixed boundary.");
-
-    User->NoPenetrationMkIdBegin=bed->Begin;
-    User->NoPenetrationMkIdEnd=bed->Begin+bed->Count;
-
-    Log->Printf(
-        "Selective NoPenetration: mkbound=%d, IDs=[%u,%u); "
-        "elastic particles excluded.",
-        User->NoPenetrationMkBound,
-        User->NoPenetrationMkIdBegin,
-        User->NoPenetrationMkIdEnd);
+    auto& selection=UserNoPenetrationMk::Get(User.get());
+    selection.Ranges.clear();
+    for(unsigned mk:selection.Mks){
+      const unsigned block=MkInfo->GetMkBlockByMkBound(word(mk));
+      if(block>=MkInfo->Size())
+        Run_Exceptioon("NoPenetrationMk: selected mkbound does not exist.");
+      const auto* bound=MkInfo->Mkblock(block);
+      if(!bound->Bound || !bound->Count
+          || (!CODE_IsFixed(bound->Code)
+              && !User->IceTopNoPenetrationEnabled
+              && !IceBottomNoPen::Get(User.get()).Enabled))
+        Run_Exceptioon("NoPenetrationMk requires non-empty fixed boundaries.");
+      selection.Ranges.push_back({mk,bound->Begin,bound->Begin+bound->Count});
+      Log->Printf("Selective NoPenetration: mkbound=%u, IDs=[%u,%u).",
+          mk,bound->Begin,bound->Begin+bound->Count);
+    }
+    if(selection.Ranges.empty())Run_Exceptioon("NoPenetrationMk list is empty.");
+    User->NoPenetrationMkIdBegin=selection.Ranges.front().Begin;
+    User->NoPenetrationMkIdEnd=selection.Ranges.front().End;
   }
 
   //-Configuration of GaugeSystem.
@@ -1399,30 +1394,33 @@ void JSph::LoadCaseConfig(const JSphCfgRun* cfg){
     }
 
     if(User->NoPenetrationMkEnabled){
-      const unsigned block=MkInfo->GetMkBlockByMkBound(
-          word(User->NoPenetrationMkBound));
-
-      const auto* selected=MkInfo->Mkblock(block);
-
-      if(selected->Code==FlexStruc->GetBody(0)->GetBoundCode()){
-        User->NoPenetrationMkEnabled=false;
-        User->NoPenetrationMkIdBegin=0;
-        User->NoPenetrationMkIdEnd=0;
-
+      auto& ranges=UserNoPenetrationMk::Get(User.get()).Ranges;
+      std::vector<UserNoPenetrationMk::Range> keep;
+      for(const auto& range:ranges){
+        const auto* selected=MkInfo->Mkblock(
+            MkInfo->GetMkBlockByMkBound(word(range.Mk)));
+        if(selected->Code==FlexStruc->GetBody(0)->GetBoundCode()){
+          Log->Printf("NoPenetrationMk: mkbound=%u uses the enabled "
+              "ice-surface protection instead.",range.Mk);
+        }
+        else{
+          if(!CODE_IsFixed(selected->Code))
+            Run_Exceptioon("NoPenetrationMk must select fixed boundaries "
+                "or the elastic body handled by ice-surface protection.");
+          keep.push_back(range);
+        }
+      }
+      ranges.swap(keep);
+      User->NoPenetrationMkEnabled=!ranges.empty();
+      User->NoPenetrationMkIdBegin=ranges.empty()?0:ranges.front().Begin;
+      User->NoPenetrationMkIdEnd=ranges.empty()?0:ranges.front().End;
+      if(ranges.empty()){
         NoPenetration=false;
         TMdbc2=MDBC2_Std;
-
-        Log->Print(
-            "Ice top/bottom protection: selected elastic NoPenetrationMk "
-            "is overridden; only the enabled local surfaces are protected.");
-      }
-      else if(!CODE_IsFixed(selected->Code)){
-        Run_Exceptioon(
-            "NoPenetrationMk must select a fixed boundary or "
-            "the single elastic body overridden by IceTopNoPenetration.");
       }
     }
   }
+
   if(User->IceTopFluidCleanupEnabled &&
       (!Simulate2D || PeriActive || !FlexStruc))
   {

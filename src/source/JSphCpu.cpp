@@ -2024,7 +2024,7 @@ void JSphCpu::ComputeSymplecticCorr(double dt){
   //<vs_flexstruc_end>
 
   //-Free memory assigned to PRE variables in ComputeSymplecticPre().
-  PosPre_c->Free();
+  // PosPre_c is released by the caller after position constraints.
   VelrhoPre_c->Free();
   #ifdef AVAILABLE_DIVCLEAN
     if(DivCleaning)PsiCleanPre_c->Free();

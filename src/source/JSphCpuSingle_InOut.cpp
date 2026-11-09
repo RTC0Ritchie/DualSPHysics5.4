@@ -257,8 +257,6 @@ void JSphCpuSingle::InOutComputeStep(double stepdt){
     acint inoutpart("-",Arrays_Cpu,true);
     acbyte newizone("-",Arrays_Cpu,true);
 
-    UserInOutBoundMode::ApplyNoBackflowCpu(*this);
-
     //-Creates list with current inout particles and normal fluid (no periodic) in inout zones.
     const unsigned inoutcountpre=InOut->CreateListCpu(Np-Npb,Npb
       ,Pos_c->cptr(),Idp_c->cptr(),Code_c->ptr(),inoutpart.ptr());

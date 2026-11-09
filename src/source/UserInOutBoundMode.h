@@ -17,6 +17,59 @@ class UserParameters;
 class JSphInOut;
 class JSphCpuSingle;
 
+// Selection storage lives outside UserParameters to preserve its layout.
+class UserNoPenetrationMk final {
+public:
+  struct Range {
+    unsigned Mk,Begin,End;
+  };
+  struct Data {
+    std::vector<unsigned> Mks;
+    std::vector<Range> Ranges;
+  };
+  static Data& Get(const UserParameters* user){return All()[user];}
+  static void Reset(const UserParameters* user){All().erase(user);}
+  static void Parse(const UserParameters* user,const std::string& text){
+    auto& data=Get(user);
+    data.Mks.clear();
+    data.Ranges.clear();
+    size_t begin=0;
+    while(true){
+      const size_t end=text.find(',',begin);
+      const std::string token=text.substr(begin,
+          end==std::string::npos?end:end-begin);
+      const size_t first=token.find_first_not_of(" \t\r\n");
+      const size_t last=token.find_last_not_of(" \t\r\n");
+      if(first==std::string::npos)
+        throw std::runtime_error("NoPenetrationMk: empty MK in list.");
+      unsigned value=0;
+      for(size_t i=first;i<=last;i++){
+        if(token[i]<'0' || token[i]>'9')
+          throw std::runtime_error(
+              "NoPenetrationMk: use comma-separated integer MKs.");
+        value=value*10+unsigned(token[i]-'0');
+        if(value>65535)
+          throw std::runtime_error("NoPenetrationMk: MK exceeds 65535.");
+      }
+      data.Mks.push_back(value);
+      if(end==std::string::npos)break;
+      begin=end+1;
+    }
+    std::sort(data.Mks.begin(),data.Mks.end());
+    data.Mks.erase(std::unique(data.Mks.begin(),data.Mks.end()),data.Mks.end());
+  }
+  static bool Contains(const std::vector<Range>& ranges,unsigned id){
+    for(const auto& range:ranges)
+      if(id>=range.Begin && id<range.End)return true;
+    return false;
+  }
+private:
+  static std::map<const UserParameters*,Data>& All(){
+    static std::map<const UserParameters*,Data> data;
+    return data;
+  }
+};
+
 class UserInOutBoundMode final {
 public:
   // XML request, not the applied solver state.
@@ -44,7 +97,6 @@ public:
     bool Enabled=false;
     bool Open=false;
     bool HistoryOpen=false;
-    bool BackflowReported=false;
 
     ullong GeometryHash=0;
     std::vector<typecode> Codes;
@@ -358,46 +410,48 @@ void UserInOutBoundMode::ApplyNoBackflowCpu(JSphCpuSingle& s){
   if(!Read(s.User.get()).NoBackflow)return;
   auto& state=Runtime(s.InOut);
   if(state.Enabled && !state.Open)return;
+  Require(s.PosPre_c->Active(),
+      "InOutNoBackflow: stage origin positions are unavailable.");
+  const auto* oldpos=s.PosPre_c->cptr();
+  const auto* codes=s.Code_c->cptr();
+  auto* pos=s.Pos_c->ptr();
+  auto* velrho=s.Velrho_c->ptr();
+  auto* dcell=s.Dcell_c->ptr();
+  auto* mutablecode=s.Code_c->ptr();
 
-  const auto* z=s.InOut->GetZone(0);
-  const auto lo=z->GetBoxLimitMin();
-  const auto hi=z->GetBoxLimitMax();
-  const auto plane=z->GetPlane();
+  const auto* zone=s.InOut->GetZone(0);
+  const auto lo=zone->GetBoxLimitMin();
+  const auto hi=zone->GetBoxLimitMax();
+  const auto plane=zone->GetPlane();
   const double face=-double(plane.d)/double(plane.c);
-  // InOut classifies float positions. Stay safely on its fluid side.
   const double eps=std::max(s.Dp*1e-4,
       8.0*std::numeric_limits<float>::epsilon()
       *std::max(1.0,std::abs(face)));
   Require(eps<s.Dp*0.05,
       "InOutNoBackflow: coordinates are too large relative to Dp.");
-  const double safe=face+eps;
-  unsigned count=0;
 
   for(unsigned p=s.Npb;p<s.Np;p++){
-    const auto code=s.Code_c->cptr()[p];
+    const auto code=codes[p];
     if(!CODE_IsNormal(code) || !CODE_IsFluidNotInout(code))continue;
-    const auto pos=s.Pos_c->cptr()[p];
-    // Use the same float footprint as the InOut classifier.
-    const float x=float(pos.x);
-    if(x<lo.x || x>hi.x || pos.z>safe)continue;
 
-    Require(pos.z>=face-0.5*s.Dp,
-        "InOutNoBackflow: penetration exceeds 0.5*Dp; "
-        "check the timestep, initial state and inlet layout.");
-    if(pos.z<safe){
-      s.UpdatePos(pos,0,0,safe-pos.z,false,p,
-          s.Pos_c->ptr(),s.Dcell_c->ptr(),s.Code_c->ptr());
-    }
-    auto& vr=s.Velrho_c->ptr()[p];
+    const auto now=pos[p];
+    const double d1=now.z-face;
+    if(d1>=0)continue;
+    // Read the stage origin only for particles below the inlet face.
+    const auto old=oldpos[p];
+    const double d0=old.z-face;
+    if(d0<0)continue;
+    const double alpha=d0/(d0-d1);
+    const double crossx=old.x+alpha*(now.x-old.x);
+    if(crossx<double(lo.x) || crossx>double(hi.x))continue;
+
+    s.UpdatePos(now,0,0,face+eps-now.z,false,p,
+        pos,dcell,mutablecode);
+    auto& vr=velrho[p];
     if(vr.z<0)vr.z=0;
-    count++;
-  }
-  if(count && !state.BackflowReported){
-    s.Log->Printf("InOutNoBackflow: first correction affected %u "
-        "ordinary particles; no particle IDs or masses were removed.",count);
-    state.BackflowReported=true;
   }
 }
+
 
 void UserInOutBoundMode::CheckNoBackflowProximityCpu(
     JSphCpuSingle& s,unsigned newnp,std::vector<typecode>& checked)
