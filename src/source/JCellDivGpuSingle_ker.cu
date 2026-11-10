@@ -40,7 +40,7 @@ namespace cudiv{
 //------------------------------------------------------------------------------
 __global__ void KerPreSortFull(unsigned np,unsigned cellcode
   ,const unsigned* dcell,const typecode* code,uint3 cellzero,uint3 ncells
-  ,unsigned* cellpart,unsigned* sortpart)
+  ,unsigned* cellpart,unsigned* sortpart,bool valveopen,typecode valvecode)
 {
   unsigned p=blockIdx.x*blockDim.x + threadIdx.x; //-Particle number.
   if(p<np){
@@ -63,6 +63,7 @@ __global__ void KerPreSortFull(unsigned np,unsigned cellcode
     const typecode codetype=CODE_GetType(rcode);
     const typecode codeout=CODE_GetSpecialValue(rcode);
     //-Assigns box.
+    if(valveopen && codeout<CODE_OUTIGNORE && CODE_GetTypeAndValue(rcode)==valvecode){cellpart[p]=cellboundignore;return;}
     if(codetype<CODE_TYPE_FLOATING){//-Bound particles (except floating) | Particulas bound (excepto floating).
       cellpart[p]=(codeout<CODE_OUTIGNORE?   ((cx<ncells.x && cy<ncells.y && cz<ncells.z)? cellsort: cellboundignore):   (codeout==CODE_OUTIGNORE? cellboundoutignore: cellboundout));
     }
@@ -86,13 +87,13 @@ __global__ void KerPreSortFull(unsigned np,unsigned cellcode
 //==============================================================================
 void PreSortFull(unsigned np,unsigned cellcode,const unsigned* dcell
   ,const typecode* code,tuint3 cellmin,tuint3 ncells,unsigned* cellpart
-  ,unsigned* sortpart)
+  ,unsigned* sortpart,bool valveopen,typecode valvecode)
 {
   if(np){
     const uint3 cellzero=make_uint3(cellmin.x,cellmin.y,cellmin.z);
     const uint3 xncells=make_uint3(ncells.x,ncells.y,ncells.z);
     dim3 sgrid=GetSimpleGridSize(np,DIVBSIZE);
-    KerPreSortFull <<<sgrid,DIVBSIZE>>> (np,cellcode,dcell,code,cellzero,xncells,cellpart,sortpart);
+    KerPreSortFull <<<sgrid,DIVBSIZE>>> (np,cellcode,dcell,code,cellzero,xncells,cellpart,sortpart,valveopen,valvecode);
   }
 }
 

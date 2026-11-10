@@ -62,7 +62,9 @@
 #include "JDsPartsInit.h"
 #include "JDsOutputParts.h" //<vs_outpaarts>
 
+#include "UserParameters.h"
 #include "UserInOutBoundMode.h"
+#include "UserGInOutBoundMode.h"
 
 #include <climits>
 
@@ -826,6 +828,8 @@ double JSphGpuSingle::ComputeStep_Ver(){
   if(Shifting)RunShifting(dt);           //-Shifting.
   ComputeVerlet(dt);                     //-Update particles using Verlet (periodic particles become invalid).
   ApplyIceProtection(false);
+  UserGInOutBoundMode::ApplyNoBackflowGpu(*this);
+  PosxyPre_g->Free();PoszPre_g->Free();
   if(CaseNfloat)RunFloating(dt,false);   //-Control of floating bodies.
   PosInteraction_Forces();               //-Free memory used for interaction.
   if(Damping)RunDamping(dt);             //-Aplies Damping.
@@ -856,6 +860,7 @@ double JSphGpuSingle::ComputeStep_Sym(){
   CaptureIceProtection(true);
   ComputeSymplecticPre(dt);               //-Apply Symplectic-Predictor to particles (periodic particles become invalid).
   ApplyIceProtection(true);
+  UserGInOutBoundMode::ApplyNoBackflowGpu(*this);
   if(CaseNfloat)RunFloating(dt*.5,true);  //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   //-Corrector
@@ -873,6 +878,8 @@ double JSphGpuSingle::ComputeStep_Sym(){
   CaptureIceProtection(false);
   ComputeSymplecticCorr(dt);              //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
   ApplyIceProtection(false);
+  UserGInOutBoundMode::ApplyNoBackflowGpu(*this);
+  PosxyPre_g->Free();PoszPre_g->Free();
   if(CaseNfloat)RunFloating(dt,false);    //-Control of floating bodies.
   PosInteraction_Forces();                //-Free memory used for interaction.
   if(Damping)RunDamping(dt);              //-Aplies Damping.
@@ -1026,14 +1033,6 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Load parameters and input data.
   LoadConfig(cfg);
-  if(User->NoPenetrationMkEnabled
-      && UserNoPenetrationMk::Get(User.get()).Ranges.size()>1)
-    Run_Exceptioon("Multiple NoPenetrationMk selections currently require CPU.");
-  if(UserInOutBoundMode::Read(User.get()).NoBackflow)
-    Run_Exceptioon("InOutNoBackflow is implemented for CPU only.");
-
-  if(UserInOutBoundMode::Read(User.get()).Enabled)
-    Run_Exceptioon("InOutBoundMode is implemented for CPU only.");
   LoadCaseParticles();
   ConfigFlexRestartMode();
   VisuConfig();
@@ -1043,8 +1042,9 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Initialisation of execution variables.
   InitRunGpu();
-  if(!UserGIceProtection::CleanupEnabled(User.get()))RunFirstGaugeSystem(TimeStep);
+  if(!UserGIceProtection::CleanupEnabled(User.get()) && !UserInOutBoundMode::Read(User.get()).Enabled && !UserInOutBoundMode::Read(User.get()).NoBackflow)RunFirstGaugeSystem(TimeStep);
   if(InOut)InOutInit(TimeStepIni);
+  UserGInOutBoundMode::InitNoBackflowGpu(*this);
   InOutCheckSaveData();
   if(FlexStruc){
     FlexStrucInit();
@@ -1053,7 +1053,7 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   }
   ClearIceTopFluidOnce();
   InitIceProtection();
-  if(UserGIceProtection::CleanupEnabled(User.get()))RunFirstGaugeSystem(TimeStep);
+  if(UserGIceProtection::CleanupEnabled(User.get()) || UserInOutBoundMode::Read(User.get()).Enabled || UserInOutBoundMode::Read(User.get()).NoBackflow)RunFirstGaugeSystem(TimeStep);
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu(),GetAllocMemoryGpu());
   UpdateMaxValues();

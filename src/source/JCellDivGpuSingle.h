@@ -35,6 +35,8 @@ class JCellDivGpuSingle : public JCellDivGpu
 {
 protected:
   bool FlexDomainEnabled=false;
+  bool ValveOpen=false;
+  typecode ValveCode=0;
   void CalcCellDomain(const unsigned* dcellg,const typecode* codeg);
   void MergeMapCellBoundFluid(const tuint3& celbmin,const tuint3& celbmax
     ,const tuint3& celfmin,const tuint3& celfmax,tuint3& celmin,tuint3& celmax)const;
@@ -48,6 +50,8 @@ public:
     ,bool celldomfixed,TpCellMode cellmode,float scell
     ,tdouble3 mapposmin,tdouble3 mapposmax,tuint3 mapcells
     ,unsigned casenbound,unsigned casenfixed,unsigned casenpb,std::string dirout);
+
+  void SetValveCode(bool open,typecode code){ValveOpen=open;ValveCode=code;BoundLimitOk=false;BoundDivideOk=false;}
 
   void SetFlexDomainEnabled(bool enabled){
     if(FlexDomainEnabled!=enabled){

@@ -1,17 +1,20 @@
 // CPU counterparts: JSphCpuSingle::MdbcBoundCorrection and selective NoPenetration.
 #include "UserGMdbc.h"
 #include "UserParameters.h"
+#include "UserInOutBoundMode.h"
 #include <cuda_runtime.h>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
 #include <cassert>
 
-__global__ void UserGMdbcNormals(unsigned np,unsigned nb,unsigned begin,unsigned end,
+__global__ void UserGMdbcNormals(unsigned np,unsigned nb,const uint2* ranges,unsigned nranges,
     float disabled,const unsigned* id,const typecode* code,const float3* src,float3* dst){
   const unsigned p=blockIdx.x*blockDim.x+threadIdx.x;if(p>=np)return;
   float3 v=make_float3(0,0,disabled);
-  if(p<nb && id[p]>=begin && id[p]<end && CODE_IsFixed(code[p]) && !CODE_IsFlexStrucAny(code[p])){
+  bool selected=false;
+  if(p<nb)for(unsigned i=0;i<nranges;i++)if(id[p]>=ranges[i].x && id[p]<ranges[i].y){selected=true;break;}
+  if(selected && CODE_IsFixed(code[p]) && !CODE_IsFlexStrucAny(code[p])){
     const float3 b=src[p];if(b.x!=0 || b.y!=0 || b.z!=0)v=b;
   }
   dst[p]=v;
@@ -54,9 +57,10 @@ __global__ void UserGMdbcApply(unsigned np,unsigned nb,int step,const unsigned* 
 }
 class UserGMdbc::Impl{
 public:
+  uint2* Ranges=nullptr;unsigned RangeCount=0;
   View V={};float3 *Normals=nullptr,*Ace=nullptr;unsigned NormalCapacity=0,AceCapacity=0;
   static void Check(cudaError_t e){if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));}
-  ~Impl(){cudaFree(V.BottomSupport);cudaFree(V.State);cudaFree(V.Step);cudaFree(Normals);cudaFree(Ace);}
+  ~Impl(){cudaFree(Ranges);cudaFree(V.BottomSupport);cudaFree(V.State);cudaFree(V.Step);cudaFree(Normals);cudaFree(Ace);}
   static void Reserve(float3*& p,unsigned& capacity,unsigned n){
     if(n<=capacity)return;
     float3* next=nullptr;Check(cudaMalloc((void**)&next,n*sizeof(float3)));
@@ -68,15 +72,22 @@ UserGMdbc::~UserGMdbc(){
   if(Data->V.State || Data->V.BottomSupport){try{Upload({});}catch(...){} }
   delete Data;
 }
-size_t UserGMdbc::GetAllocMemoryGpu()const{return Data->V.BottomCount*sizeof(double)+Data->V.Count*sizeof(History)
+size_t UserGMdbc::GetAllocMemoryGpu()const{return Data->RangeCount*sizeof(uint2)+Data->V.BottomCount*sizeof(double)+Data->V.Count*sizeof(History)
   +(Data->V.Step?sizeof(int):0)+(Data->NormalCapacity+Data->AceCapacity)*sizeof(float3);}
 const float3* UserGMdbc::NoPenNormals(const UserParameters* user,unsigned np,unsigned nb,double dp,
     const unsigned* id,const typecode* code,const float3* normals){
   if(!user->NoPenetrationMkEnabled)return normals;
   if(!normals)throw std::runtime_error("Selective NoPenetration: missing normals.");
   Impl::Reserve(Data->Normals,Data->NormalCapacity,np);
-  if(np)UserGMdbcNormals<<<(np+255)/256,256>>>(np,nb,user->NoPenetrationMkIdBegin,
-    user->NoPenetrationMkIdEnd,float(4*dp),id,code,normals,Data->Normals);
+  if(!Data->Ranges){
+    std::vector<uint2> ranges;
+    for(const auto& r:UserNoPenetrationMk::Get(user).Ranges)ranges.push_back(make_uint2(r.Begin,r.End));
+    if(ranges.empty())throw std::runtime_error("NoPenetrationMk: empty GPU selection.");
+    Data->RangeCount=unsigned(ranges.size());
+    Impl::Check(cudaMalloc((void**)&Data->Ranges,ranges.size()*sizeof(uint2)));
+    Impl::Check(cudaMemcpy(Data->Ranges,ranges.data(),ranges.size()*sizeof(uint2),cudaMemcpyHostToDevice));
+  }
+  if(np)UserGMdbcNormals<<<(np+255)/256,256>>>(np,nb,Data->Ranges,Data->RangeCount,float(4*dp),id,code,normals,Data->Normals);
   Impl::Check(cudaGetLastError());return Data->Normals;
 }
 const float3* UserGMdbc::Acceleration(const UserParameters* user,unsigned np,unsigned nb,unsigned count,

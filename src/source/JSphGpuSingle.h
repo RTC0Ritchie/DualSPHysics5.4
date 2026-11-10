@@ -30,6 +30,7 @@ class UserGFlexPrecision;
 class UserGFlexDissipation;
 class UserGMdbc;
 class UserGIceProtection;
+class UserGInOutBoundMode;
 
 //##############################################################################
 //# JSphGpuSingle
@@ -38,6 +39,7 @@ class UserGIceProtection;
 
 class JSphGpuSingle : public JSphGpu
 {
+  friend class UserGInOutBoundMode;
 protected:
   JCellDivGpuSingle* CellDivSingle;
   UserGFlexPrecision* FlexPrecision;

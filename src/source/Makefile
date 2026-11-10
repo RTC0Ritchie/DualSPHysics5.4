@@ -160,6 +160,7 @@ OBFLEXSTRUC=JSphFlexStruc.o UserInteractionForcesFlexStruc.o UserFlexContinuatio
 
 OBCUDA:=$(OBCUDA) UserGIceProtection.o UserGMdbc.o UserGFlexDissipation.o UserGParameterOutput.o UserGFlexContinuation.o UserGFlexRestartInitialization.o UserGFlexBoundaryCorrection.o
 
+OBCUDA:=$(OBCUDA) UserGInOutBoundMode.o
 OBJECTS=$(OBJXML) $(OBJSPHMOTION) $(OBCOMMON) $(OBCOMMONDSPH) $(OBSPH) $(OBSPHSINGLE)
 OBJECTS:=$(OBJECTS) $(OBCOMMONGPU) $(OBSPHGPU) $(OBSPHSINGLEGPU) $(OBCUDA)
 OBJECTS:=$(OBJECTS) $(OBWAVERZ) $(OBWAVERZCUDA) $(OBCHRONO) $(OBMOORDYNPLUS)
@@ -304,3 +305,11 @@ JSphGpu.o JSphGpuSingle.o UserGInteractionForcesFlexStruc.o: UserGFlexPrecision.
 
 # Shared initialization-only elastic normal orientation check.
 JSph.o UserFlexKinematics.o: UserFlexKinematics.h
+
+UserGInOutBoundMode.o: UserGInOutBoundMode.cu UserGInOutBoundMode.h UserGIceProtection.h UserInOutBoundMode.h
+	$(NCC) $(NCCFLAGS) $(filter -D% -I%,$(CCFLAGS)) --fmad=false UserGInOutBoundMode.cu
+JSphGpuSingle.o JSphGpuSingle_InOut.o: UserGInOutBoundMode.h UserInOutBoundMode.h UserParameters.h JSphGpuSingle.h
+JSphInOut.o UserParameters.o JSph.o JSphCpuSingle.o JSphCpuSingle_InOut.o: UserInOutBoundMode.h
+JCellDivGpuSingle.o JSphGpuSingle.o JSphGpuSingle_InOut.o JSphGpuSingle_VRes.o: JCellDivGpuSingle.h
+JCellDivGpuSingle_ker.o JCellDivGpuSingle.o: JCellDivGpuSingle_ker.h
+UserGMdbc.o: UserInOutBoundMode.h

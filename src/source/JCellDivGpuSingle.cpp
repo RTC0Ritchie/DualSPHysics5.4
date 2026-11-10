@@ -154,7 +154,7 @@ void JCellDivGpuSingle::PrepareNct(){
 /// Asigna valores consecutivos a SortPart[].
 //==============================================================================
 void JCellDivGpuSingle::PreSort(const unsigned* dcellg,const typecode* codeg){
-  if(DivideFull)cudiv::PreSortFull(Nptot,DomCellCode,dcellg,codeg,CellDomainMin,TUint3(Ncx,Ncy,Ncz),CellPart,SortPart);
+  if(DivideFull)cudiv::PreSortFull(Nptot,DomCellCode,dcellg,codeg,CellDomainMin,TUint3(Ncx,Ncy,Ncz),CellPart,SortPart,ValveOpen,ValveCode);
   else cudiv::PreSortFluid(Npf1,Npb1,DomCellCode,dcellg,codeg,CellDomainMin,TUint3(Ncx,Ncy,Ncz),CellPart,SortPart);
 }
 

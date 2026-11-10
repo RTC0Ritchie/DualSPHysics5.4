@@ -26,7 +26,7 @@
 namespace cudiv{
 
 void PreSortFull(unsigned np,unsigned cellcode,const unsigned* dcell,const typecode* code
-  ,tuint3 cellmin,tuint3 ncells,unsigned* cellpart,unsigned* sortpart);
+  ,tuint3 cellmin,tuint3 ncells,unsigned* cellpart,unsigned* sortpart,bool valveopen=false,typecode valvecode=0);
 void PreSortFluid(unsigned npf,unsigned pini,unsigned cellcode,const unsigned* dcell
   ,const typecode* code,tuint3 cellmin,tuint3 ncells,unsigned* cellpart,unsigned* sortpart);
 

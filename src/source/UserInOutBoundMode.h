@@ -213,8 +213,8 @@ public:
 
     if(valve.Enabled){
       log->Print(
-          "    CPU valve requested; geometry and restart checks "
-          "will run during InOut initialization. GPU is unsupported.");
+          "    CPU/GPU valve requested; geometry and restart checks "
+          "will run during InOut initialization.");
     }
   }
 

@@ -34,6 +34,9 @@
 #include "JDataArrays.h"
 #include "UserInOutData.h"
 #include "UserParameters.h"
+#define USER_G_INOUT_BOUND_MODE_IMPLEMENTATION
+#include "UserGInOutBoundMode.h"
+#undef USER_G_INOUT_BOUND_MODE_IMPLEMENTATION
 #include <climits>
 
 using namespace std;
@@ -71,8 +74,11 @@ void JSphGpuSingle::InOutCheckProximity(unsigned newnp){
     if(Np!=ParticlesDataDown(Np,0,true,false,NULL,nfilter))
       Run_Exceptioon("The number of particles is invalid.");
     //-Check proximity on CPU.
-    InOut->InitCheckProximity(Np,newnp,Scell,AuxPos_c->cptr(),Idp_c->cptr()
-      ,Code_c->ptr());
+    if(UserInOutBoundMode::Read(User.get()).NoBackflow){
+      std::vector<typecode> checked(Code_c->cptr(),Code_c->cptr()+Np);
+      UserGInOutBoundMode::CheckNoBackflowProximityGpu(*this,newnp,checked);
+      std::copy(checked.begin(),checked.end(),Code_c->ptr());
+    }else InOut->InitCheckProximity(Np,newnp,Scell,AuxPos_c->cptr(),Idp_c->cptr(),Code_c->ptr());
     //-Uploads updated code of particles to the GPU.
     Code_g->CuCopyFromHost(Code_c,Np);
   }
@@ -83,6 +89,7 @@ void JSphGpuSingle::InOutCheckProximity(unsigned newnp){
 /// Inicia condiciones inlet/outlet.
 //==============================================================================
 void JSphGpuSingle::InOutInit(double timestepini){
+  if(UserInOutBoundMode::Read(User.get()).Enabled){UserGInOutBoundMode::InitGpu(*this);return;}
   InOut->Nstep=Nstep; //-For debug.
   Timersg->TmStart(TMG_SuInOut,false);
   Log->Print("Initialising InOut...");
@@ -223,6 +230,11 @@ void JSphGpuSingle::InOutInit(double timestepini){
 //==============================================================================
 void JSphGpuSingle::InOutComputeStep(double stepdt){
   const double newtimestep=TimeStep+stepdt;
+  const auto& valve=UserInOutBoundMode::Runtime(InOut);
+  if(valve.Enabled && !valve.Open){
+    InOut->Nstep=Nstep;InOut->UpdateVelData(newtimestep);InOut->UpdateZsurfData(newtimestep,false);
+    RunCellDivide(true);return;
+  }
   InOut->Nstep=Nstep; //-For debug.
   //Log->Printf("%u>--------> [InOutComputeStep_000]",Nstep);
   //DgSaveVtkParticlesGpu("BB_ComputeStepA.vtk",DgNum,0,Np,Posxyg,Poszg,Codeg,Idpg,Velrhopg);
@@ -320,6 +332,8 @@ void JSphGpuSingle::InOutComputeStep(double stepdt){
 /// Updates inout particle data according inlet configuration.
 //==============================================================================
 void JSphGpuSingle::InOutUpdatePartsData(double timestepnew){
+  const auto& valve=UserInOutBoundMode::Runtime(InOut);
+  if(valve.Enabled && !valve.Open)return;
   //-Create list of current inout particles (normal and periodic).
   agint inoutpartg("-",Arrays_Gpu,true);
   const unsigned inoutcount=InOut->CreateListSimpleGpu(Np-Npb,Npb

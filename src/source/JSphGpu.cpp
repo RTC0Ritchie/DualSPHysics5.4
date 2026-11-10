@@ -1093,8 +1093,7 @@ void JSphGpu::ComputeSymplecticCorr(double dt){
   //<vs_flexstruc_end>
 
   //-Free memory assigned to PRE variables in ComputeSymplecticPre().
-  PosxyPre_g->Free();
-  PoszPre_g->Free();
+  // Stage positions are released by the caller after position constraints.
   VelrhoPre_g->Free();
   if(DivCleaning)PsiCleanPre_g->Free();  //<vs_divclean>
   Timersg->TmStop(TMG_SuComputeStep,true);

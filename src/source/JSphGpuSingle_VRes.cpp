@@ -499,7 +499,8 @@ double JSphGpuSingle_VRes::ComputeStepVRes(){
   Interaction_Forces(InterStep);                //-Interaction.
   const double dt_c=DtVariable(true);           //-Calculate dt of corrector step.
   if(Shifting)RunShifting(dt);                  //-Shifting.
-  ComputeSymplecticCorr(dt);                    //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
+  ComputeSymplecticCorr(dt);
+  PosxyPre_g->Free();PoszPre_g->Free();                    //-Apply Symplectic-Corrector to particles (periodic particles become invalid).
   if(CaseNfloat)RunFloating(dt,false);          //-Control of floating bodies.
   PosInteraction_Forces();                      //-Free memory used for interaction.
   if(Damping)RunDamping(dt);                    //-Aplies Damping.
