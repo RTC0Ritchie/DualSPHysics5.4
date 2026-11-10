@@ -313,3 +313,6 @@ JSphInOut.o UserParameters.o JSph.o JSphCpuSingle.o JSphCpuSingle_InOut.o: UserI
 JCellDivGpuSingle.o JSphGpuSingle.o JSphGpuSingle_InOut.o JSphGpuSingle_VRes.o: JCellDivGpuSingle.h
 JCellDivGpuSingle_ker.o JCellDivGpuSingle.o: JCellDivGpuSingle_ker.h
 UserGMdbc.o: UserInOutBoundMode.h
+
+# Rebuild the CUDA translation unit when its included InOut kernels change.
+JSphGpu_ker.o: JSphGpu_InOut_iker.cu

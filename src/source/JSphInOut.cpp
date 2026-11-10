@@ -697,7 +697,7 @@ void JSphInOut::LoadInitPartsData(unsigned idpfirst,unsigned nparttot
       const unsigned p=npart+cp;
       idp   [p]=idpfirst+p;
       code  [p]=typecode(CODE_TYPE_FLUID_INOUT)+ci;
-      velrho[p]=TFloat4(0,0,0,1000);
+      velrho[p]=TFloat4(0,0,0,CSP.rhopzero);
     }
     npart+=np;
   }
@@ -1247,7 +1247,7 @@ if(izone>=ListSize)Run_Exceptioon(fun::PrintStr("%d>> Value izone %d is invalid 
     code[p2]=CODE_ToFluidInout(CodeNewPart,izone);
     sphcpu->UpdatePos(rpos,0,0,0,false,p2,pos,dcell,code);
     idp[p2]=idnext+cp;
-    velrhop[p2]=TFloat4(0,0,0,1000);
+    velrhop[p2]=TFloat4(0,0,0,CSP.rhopzero);
   }
   //-Returns number of new inlet particles.
   return(unsigned(newnp));
@@ -1363,7 +1363,7 @@ unsigned JSphInOut::ComputeStepFillingCpu(unsigned inoutcount,int* inoutpart
       rpos.z-=dis*DirData[izone].z;
       sphcpu->UpdatePos(rpos,0,0,0,false,p,pos,dcell,code);
       idp[p]=idnext+newnp;
-      velrhop[p]=TFloat4(0,0,0,1000);
+      velrhop[p]=TFloat4(0,0,0,CSP.rhopzero);
     }
     newnp++;
   }

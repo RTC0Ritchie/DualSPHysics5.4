@@ -26,3 +26,22 @@ void UserGInOutBoundMode::Launch(unsigned np,unsigned nb,double face,double eps,
   const auto error=cudaGetLastError();
   if(error!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(error));
 }
+
+__global__ void UserGValveConstraint(unsigned np,unsigned nb,double face,double width,double xmin,double xmax,
+    double dt,float u,float gz,bool force,const double2* xy,const double* z,const typecode* code,
+    float4* vel,const float4* pre,float3* ace){
+  const unsigned p=nb+blockIdx.x*blockDim.x+threadIdx.x;
+  if(p>=np || !CODE_IsNormal(code[p]) || !CODE_IsFluidNotInout(code[p]))return;
+  const double d=z[p]-face;
+  if(d<0 || d>=width || xy[p].x<xmin || xy[p].x>xmax)return;
+  const float lower=u*float(1.-d/width);
+  if(!force){vel[p].z=fmaxf(vel[p].z,lower);return;}
+  const float amin=float((double(lower)-pre[p].z)/dt)-gz;
+  ace[p].z=fmaxf(ace[p].z,amin);
+}
+void UserGInOutBoundMode::ConstraintLaunch(unsigned np,unsigned nb,double face,double width,double xmin,double xmax,
+    double dt,float u,float gz,bool force,const double2* xy,const double* z,const typecode* code,
+    float4* vel,const float4* pre,float3* ace){
+  if(np>nb)UserGValveConstraint<<<(np-nb+255)/256,256>>>(np,nb,face,width,xmin,xmax,dt,u,gz,force,xy,z,code,vel,pre,ace);
+  const auto error=cudaGetLastError();if(error!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(error));
+}

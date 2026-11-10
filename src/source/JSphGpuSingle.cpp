@@ -694,6 +694,7 @@ void JSphGpuSingle::Interaction_Forces(TpInterStep interstep){
 
   // Synchronous scalar download below completes the preceding default-stream
   // force kernels. Avoid a redundant device-wide wait before that download.
+  UserGInOutBoundMode::PrepareConstraint(*this,true);
   // Read viscosity before ComputeAceMax reuses ViscDt_g as scratch.
   if(CaseNflexstruc){
     // Preserve viscosity until the joint reduction; acceleration needs its own
@@ -819,6 +820,7 @@ void JSphGpuSingle::RunInitialDDTRamp(){
 //==============================================================================
 double JSphGpuSingle::ComputeStep_Ver(){
   InterStep=INTERSTEP_Verlet;
+  UserGInOutBoundMode::PrepareConstraint(*this,false);
   MdbcBoundCorrection(InterStep);        //-mDBC correction
   PreInteraction_Forces(InterStep);      //-Allocating temporary arrays.
   Interaction_Forces(InterStep);         //-Interaction.
@@ -851,6 +853,7 @@ double JSphGpuSingle::ComputeStep_Sym(){
   //-----------
   InterStep=INTERSTEP_SymPredictor;
   DemDtForce=dt*0.5f;                     //-For DEM interaction.
+  UserGInOutBoundMode::PrepareConstraint(*this,false);
   MdbcBoundCorrection(InterStep);         //-mDBC correction
   PreInteraction_Forces(InterStep);       //-Allocating temporary arrays.
   PreLoopProcedure(InterStep);            //-Pre-calculation for advanced shifting and other formulations. //<vs_advshift>
@@ -869,6 +872,7 @@ double JSphGpuSingle::ComputeStep_Sym(){
   DemDtForce=dt;                          //-For DEM interaction.
   RunCellDivide(true);                    //-Rearrange particles in cells.
   if(FlexStruc)UpdateFlexStrucGeometry(); //-Update the geometric information for each flexible structure particle.
+  UserGInOutBoundMode::PrepareConstraint(*this,false);
   MdbcBoundCorrection(InterStep);         //-mDBC correction.
   PreInteraction_Forces(InterStep);       //-Allocating temporary arrays.
   PreLoopProcedure(InterStep);            //-Pre-calculation for advanced shifting and other formulations. //<vs_advshift>

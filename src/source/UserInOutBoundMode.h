@@ -15,6 +15,7 @@
 
 class UserParameters;
 class JSphInOut;
+class JSphInOutZone;
 class JSphCpuSingle;
 
 // Selection storage lives outside UserParameters to preserve its layout.
@@ -76,7 +77,7 @@ public:
   class StConfig {
   public:
     bool Enabled=false;
-    bool NoBackflow=false;
+    unsigned NoBackflow=0; // 0=off, 1=legacy plane projection, 2=integration constraint
 
     // -1: unspecified; 0: wall; 1: inlet.
     int ValveStatue=-1;
@@ -190,7 +191,7 @@ public:
     if(!log)return;
 
     const auto valve=Read(user);
-    log->Printf("  InOutNoBackflow: %s",valve.NoBackflow?"true":"false");
+    log->Printf("  InOutNoBackflow: %u (0=off, 1=plane, 2=integration)",valve.NoBackflow);
 
     log->Printf(
         "  InOutBoundMode: %s (requested)",
@@ -236,6 +237,8 @@ public:
 
   static void InitCpu(JSphCpuSingle& s);
   static void InitNoBackflowCpu(JSphCpuSingle& s);
+  static void PrepareConstraintCpu(JSphCpuSingle& s,bool force);
+  static float ConstraintSpeed(const JSphInOutZone* zone,double time);
   static void ApplyNoBackflowCpu(JSphCpuSingle& s);
   static void CheckNoBackflowProximityCpu(JSphCpuSingle& s,
       unsigned newnp,std::vector<typecode>& checked);
@@ -347,10 +350,10 @@ private:
     Require(!ele->FirstChildElement(),
         "InOutNoBackflow does not accept child elements.");
     const double value=xml->GetAttributeDouble(ele,"value");
-    Require(value==0.0 || value==1.0,
-        "InOutNoBackflow must be 0 or 1.");
+    Require(value==0.0 || value==1.0 || value==2.0,
+        "InOutNoBackflow must be 0, 1 or 2.");
     auto config=Read(user);
-    config.NoBackflow=(value==1.0);
+    config.NoBackflow=unsigned(value);
     Store(user,config);
   }
 
@@ -378,6 +381,44 @@ private:
 
 #include <set>
 
+// Uses the same coefficient/time interpolation as prescribed uniform inlet velocity.
+float UserInOutBoundMode::ConstraintSpeed(const JSphInOutZone* zone,double time){
+  const auto* velocity=zone->GetInOutVel();
+  const auto a=velocity->GetCurrentCoefs0(),b=velocity->GetCurrentCoefs1();
+  if(zone->GetVelMode()==InVelM_Fixed)return a.x;
+  const float t=float(time);
+  if(t<=a.w || a.w==b.w)return a.x;
+  if(t>=b.w)return b.x;
+  return (t-a.w)/(b.w-a.w)*(b.x-a.x)+a.x;
+}
+
+void UserInOutBoundMode::PrepareConstraintCpu(JSphCpuSingle& s,bool force){
+  if(Read(s.User.get()).NoBackflow!=2)return;
+  const auto& state=Runtime(s.InOut);if(state.Enabled && !state.Open)return;
+  const auto* zone=s.InOut->GetZone(0);const auto plane=zone->GetPlane();
+  const double face=-double(plane.d)/plane.c,width=2*s.Dp;
+  const double xmin=zone->GetBoxLimitMin().x,xmax=zone->GetBoxLimitMax().x;
+  const bool predictor=s.InterStep==INTERSTEP_SymPredictor;
+  const double dt=s.SymplecticDtPre*(predictor?.5:1.);
+  const float u=ConstraintSpeed(zone,s.TimeStep);
+  const auto* pos=s.Pos_c->cptr();const auto* code=s.Code_c->cptr();
+  auto* vel=s.Velrho_c->ptr();
+  const auto* pre=(!predictor && force?s.VelrhoPre_c->cptr():s.Velrho_c->cptr());
+  auto* ace=(force?s.Ace_c->ptr():nullptr);
+  const int begin=int(s.Npb),end=int(s.Np);
+  #ifdef OMP_USE
+    #pragma omp parallel for schedule(static) if(end-begin>OMP_LIMIT_COMPUTELIGHT)
+  #endif
+  for(int p=begin;p<end;p++){
+    if(!CODE_IsNormal(code[p]) || !CODE_IsFluidNotInout(code[p]))continue;
+    const double d=pos[p].z-face;
+    if(d<0 || d>=width || pos[p].x<xmin || pos[p].x>xmax)continue;
+    const float lower=u*float(1.-d/width);
+    if(!force)vel[p].z=std::max(vel[p].z,lower);
+    else ace[p].z=std::max(ace[p].z,float((double(lower)-pre[p].z)/dt)-s.Gravity.z);
+  }
+}
+
 void UserInOutBoundMode::InitNoBackflowCpu(JSphCpuSingle& s){
   if(!Read(s.User.get()).NoBackflow)return;
   Require(s.InOut && s.Simulate2D && !s.PeriActive
@@ -402,12 +443,22 @@ void UserInOutBoundMode::InitNoBackflowCpu(JSphCpuSingle& s){
       && std::isfinite(z->GetInOutVel()->GetVelMin())
       && z->GetInOutVel()->GetVelMin()>=0,
       "InOutNoBackflow requires prescribed nonnegative inlet velocity.");
+  if(Read(s.User.get()).NoBackflow==2){
+    Require(z->GetInOutVel()->GetVelProfile()==InVelP_Uniform && z->GetRhopMode()==InRhop_Extrapolated,
+        "InOutNoBackflow=2 requires uniform prescribed velocity and imposerhop mode=2.");
+    Require(s.InOut->GetDetermLimit()>=1000.f,
+        "InOutNoBackflow=2 currently requires zeroth-order density extrapolation (determlimit>=1000).");
+    Require(!s.Shifting && !s.ShiftingAdv,
+        "InOutNoBackflow=2 currently requires Shifting=0.");
+    s.Log->Print("InOutNoBackflow=2: two-Dp inflow transition; velocity enters continuity and force evaluation; no post-step position clipping.");
+    return;
+  }
   s.Log->Print("InOutNoBackflow: ordinary fluid is constrained at the "
       "inlet plane; inlet buffers retain their prescribed state.");
 }
 
 void UserInOutBoundMode::ApplyNoBackflowCpu(JSphCpuSingle& s){
-  if(!Read(s.User.get()).NoBackflow)return;
+  if(Read(s.User.get()).NoBackflow!=1)return;
   auto& state=Runtime(s.InOut);
   if(state.Enabled && !state.Open)return;
   Require(s.PosPre_c->Active(),

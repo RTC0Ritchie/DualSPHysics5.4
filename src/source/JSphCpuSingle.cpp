@@ -810,6 +810,7 @@ void JSphCpuSingle::Interaction_Forces(TpInterStep interstep){
   CsPsiCleanMax=res.cspsiclean;
   #endif
   //-Calculates maximum value of Ace (periodic particles are ignored).
+  UserInOutBoundMode::PrepareConstraintCpu(*this,true);
   AceMax=ComputeAceMax();
 
   InterNum++;
@@ -1018,6 +1019,7 @@ void JSphCpuSingle::RunInitialDDTRamp(){
 //==============================================================================
 double JSphCpuSingle::ComputeStep_Ver(){
   InterStep=INTERSTEP_Verlet;
+  UserInOutBoundMode::PrepareConstraintCpu(*this,false);
   MdbcBoundCorrection(InterStep);        //-mDBC correction
   PreInteraction_Forces(InterStep);      //-Allocating temporary arrays.
   Interaction_Forces(InterStep);         //-Interaction.
@@ -1047,6 +1049,7 @@ double JSphCpuSingle::ComputeStep_Sym(){
   //-----------
   InterStep=INTERSTEP_SymPredictor;
   DemDtForce=dt*0.5f;
+  UserInOutBoundMode::PrepareConstraintCpu(*this,false);
   MdbcBoundCorrection(InterStep);         //-mDBC correction
   PreInteraction_Forces(InterStep);       //-Allocating temporary arrays.
   PreLoopProcedure(InterStep);            //-Pre-calculation for advanced shifting and other formulations. //<vs_advshift>
@@ -1065,6 +1068,7 @@ double JSphCpuSingle::ComputeStep_Sym(){
   DemDtForce=dt;                          //-For DEM interaction.
   RunCellDivide(true);                    //-Rearrange particles in cells.
   if(FlexStruc)UpdateFlexStrucGeometry(); //-Update the geometric information for each flexible structure particle.
+  UserInOutBoundMode::PrepareConstraintCpu(*this,false);
   MdbcBoundCorrection(InterStep);         //-mDBC correction.
   PreInteraction_Forces(InterStep);       //-Allocating temporary arrays.
   PreLoopProcedure(InterStep);            //-Pre-calculation for advanced shifting and other formulations. //<vs_advshift>

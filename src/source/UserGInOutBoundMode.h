@@ -12,6 +12,10 @@ class UserGInOutBoundMode final {
   static UserInOutBoundMode::StRuntime& Runtime(const JSphInOut* io){return UserInOutBoundMode::Runtime(io);}
 public:
   static void InitGpu(JSphGpuSingle& s);
+  static void PrepareConstraint(JSphGpuSingle& s,bool force);
+  static void ConstraintLaunch(unsigned np,unsigned nb,double face,double width,double xmin,double xmax,
+      double dt,float u,float gz,bool force,const double2* xy,const double* z,const typecode* code,
+      float4* vel,const float4* pre,float3* ace);
   static void InitNoBackflowGpu(JSphGpuSingle& s);
   static void ApplyNoBackflowGpu(JSphGpuSingle& s);
   static void CheckNoBackflowProximityGpu(JSphGpuSingle& s,unsigned newnp,std::vector<typecode>& checked);
@@ -63,6 +67,16 @@ void UserGInOutBoundMode::InitNoBackflowGpu(JSphGpuSingle& s){
       && std::isfinite(z->GetInOutVel()->GetVelMin())
       && z->GetInOutVel()->GetVelMin()>=0,
       "InOutNoBackflow requires prescribed nonnegative inlet velocity.");
+  if(Read(s.User.get()).NoBackflow==2){
+    Require(z->GetInOutVel()->GetVelProfile()==InVelP_Uniform && z->GetRhopMode()==InRhop_Extrapolated,
+        "InOutNoBackflow=2 requires uniform prescribed velocity and imposerhop mode=2.");
+    Require(s.InOut->GetDetermLimit()>=1000.f,
+        "InOutNoBackflow=2 currently requires zeroth-order density extrapolation (determlimit>=1000).");
+    Require(!s.Shifting && !s.ShiftingAdv,
+        "InOutNoBackflow=2 currently requires Shifting=0.");
+    s.Log->Print("InOutNoBackflow=2: two-Dp inflow transition; velocity enters continuity and force evaluation; no post-step position clipping.");
+    return;
+  }
   s.Log->Print("InOutNoBackflow: ordinary fluid is constrained at the "
       "inlet plane; inlet buffers retain their prescribed state.");
 }
@@ -358,7 +372,7 @@ void UserGInOutBoundMode::CheckClosedGpu(JSphGpuSingle& s){
 }
 
 void UserGInOutBoundMode::ApplyNoBackflowGpu(JSphGpuSingle& s){
-  if(!Read(s.User.get()).NoBackflow)return;
+  if(Read(s.User.get()).NoBackflow!=1)return;
   const auto& state=Runtime(s.InOut);
   if(state.Enabled && !state.Open)return;
   Require(s.PosxyPre_g->Active() && s.PoszPre_g->Active(),"GPU stage origin positions unavailable.");
@@ -430,5 +444,21 @@ void UserGInOutBoundMode::InitGpu(JSphGpuSingle& s){
   if(!s.PartBegin || create){io->UpdateVelData(s.TimeStepIni);io->UpdateZsurfData(s.TimeStepIni,true);if(v.Open)s.InOutUpdatePartsData(s.TimeStepIni);}
   s.NpfMinimum=unsigned(s.MinFluidStop*(s.Np-s.NpbPer-s.NpfPer-s.CaseNbound));
   io->VisuConfig("\nGPU InOut valve configuration:"," ");
+}
+#endif
+
+#ifdef USER_G_INOUT_BOUND_MODE_IMPLEMENTATION
+void UserGInOutBoundMode::PrepareConstraint(JSphGpuSingle& s,bool force){
+  if(Read(s.User.get()).NoBackflow!=2)return;
+  const auto& state=Runtime(s.InOut);if(state.Enabled && !state.Open)return;
+  const auto* zone=s.InOut->GetZone(0);const auto plane=zone->GetPlane();
+  const bool predictor=s.InterStep==INTERSTEP_SymPredictor;
+  const double dt=s.SymplecticDtPre*(predictor?.5:1.);
+  const float u=UserInOutBoundMode::ConstraintSpeed(zone,s.TimeStep);
+  ConstraintLaunch(s.Np,s.Npb,-double(plane.d)/plane.c,2*s.Dp,
+      zone->GetBoxLimitMin().x,zone->GetBoxLimitMax().x,dt,u,s.Gravity.z,force,
+      s.Posxy_g->cptr(),s.Posz_g->cptr(),s.Code_g->cptr(),s.Velrho_g->ptr(),
+      (!predictor && force ? s.VelrhoPre_g->cptr():s.Velrho_g->cptr()),
+      (force?s.Ace_g->ptr():nullptr));
 }
 #endif
