@@ -59,6 +59,7 @@ public:
 
    // Numerical high-frequency dissipation.
   bool ElasticHighFrequencyDissipation=false;
+  int ElasticHighFrequencyMode=1;
 
   // Kelvin-Voigt artificial dissipation.
   bool ElasticViscousDissipation=false;

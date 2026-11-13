@@ -36,6 +36,7 @@ void UserParameters::Reset(){
   unContact=0.0;
 
   ElasticHighFrequencyDissipation=false;
+  ElasticHighFrequencyMode=1;
   ElasticViscousDissipation=false;
   ElasticViscousFactor=0.5;
   ElasticViscousSimplifiedMode=1;
@@ -146,9 +147,16 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
     };
 
     if(const TiXmlElement* p=child("highfrequency")){
-      xml->CheckAttributeNames(p,"enabled comment");
+      xml->CheckAttributeNames(p,"enabled mode comment");
+
       ElasticHighFrequencyDissipation=
           xml->GetAttributeBool(p,"enabled",true,false);
+
+      ElasticHighFrequencyMode=
+          xml->GetAttributeInt(p,"mode",true,1);
+
+      if(ElasticHighFrequencyMode!=1 && ElasticHighFrequencyMode!=2)
+        Run_Exceptioon("High-frequency mode must be 1 or 2.");
     }
 
     if(const TiXmlElement* p=child("viscous")){
@@ -1647,6 +1655,9 @@ void UserParameters::ConfigFlexRestartCorrections(
         ElasticViscousDissipation && hasflex
           ? "enabled" : "disabled");
 
+    if(hasflex && ElasticHighFrequencyDissipation)
+      log->Printf("  High-frequency mode: %d",
+          ElasticHighFrequencyMode);
     if(hasflex && ElasticViscousDissipation)
       log->Printf("  KV factor: %g; simplifiedMode: %d",
           ElasticViscousFactor,ElasticViscousSimplifiedMode);

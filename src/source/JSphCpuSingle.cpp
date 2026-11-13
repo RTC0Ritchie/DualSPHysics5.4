@@ -1681,7 +1681,7 @@ void JSphCpuSingle::InitFlexDissipation(const tmatrix3f* correction){
         young.data(),poisson.data(),body.data(),NumPairsc,PairIdxc,
         correction,User->FlexRestartBoundaryCorrectionMode==5,
         fac,KernelH,useCR,useKV,User->ElasticViscousFactor,
-        User->ElasticViscousSimplifiedMode);
+        User->ElasticViscousSimplifiedMode,User->ElasticHighFrequencyMode);
   }
   catch(const std::exception& e){
     Run_Exceptioon(e.what());

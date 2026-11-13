@@ -100,16 +100,23 @@ JFlexDissipation::JFlexDissipation(
     const double* poisson,const unsigned* body,const unsigned* count,
     const unsigned* const* pairs,const tmatrix3f* correction,
     bool mode5,const std::function<float(float)>& fac,
-    double h,bool useCR,bool useKV,double factor,int simplifiedMode)
+    double h,bool useCR,bool useKV,double factor,int simplifiedMode,
+    int highFrequencyMode)
   :TwoD(twoD),CR(useCR),KV(useKV && simplifiedMode==1),
-   PairKV(useKV && simplifiedMode==2),PairWeights(PairKV?n:0),
+   PairKV(useKV && simplifiedMode==2),
+   GraphCR(useCR && highFrequencyMode==2),GraphQ(GraphCR?n:0),
+   PairWeights(PairKV?n:0),
    N(n),H(h),Rows(n),Weights(CR?n:0),ViscWeights(KV?n:0),
-   Grad(CR?n:0),Pv(KV?n:0),Rho(rho,rho+n),Cp(CR || PairKV?n:0),
+   Grad(CR && !GraphCR?n:0),Pv(KV?n:0),Rho(rho,rho+n),
+   Cp(CR || PairKV?n:0),
    Eta0(useKV?n:0),SumG(KV?n:0),NormSumG(KV?n:0),
    Q(KV?n:0),ReuseF(n,0)
 {
   if(simplifiedMode!=1 && simplifiedMode!=2)
     throw std::runtime_error("KV simplifiedMode must be 1 or 2.");
+
+  if(highFrequencyMode!=1 && highFrequencyMode!=2)
+    throw std::runtime_error("High-frequency mode must be 1 or 2.");
 
   const tdouble3* X=x0;
 
@@ -224,7 +231,7 @@ JFlexDissipation::JFlexDissipation(
       }
     }
 
-    if(!CR && !KV)continue;
+    if(!(CR && !GraphCR) && !KV)continue;
     bool nonzero=false;
     for(double q:moment)nonzero=nonzero || q!=0;
     if(!nonzero)continue;
@@ -271,6 +278,7 @@ JFlexDissipation::JFlexDissipation(
     }
   }
 
+  if(GraphCR)InitGraphWeights(volume);
   if(PairKV)InitPairWeights();
   // Pay the reverse lookup once, not at every force evaluation.
   if(KV)for(unsigned i=0;i<N;i++){
@@ -294,6 +302,55 @@ JFlexDissipation::JFlexDissipation(
       });
     }
   }
+}
+
+void JFlexDissipation::InitGraphWeights(const double* volume){
+  double degreeMax=0;
+
+  for(unsigned i=0;i<N;i++){
+    double degree=0;
+
+    for(unsigned k=0;k<Rows[i].size();k++){
+      const unsigned j=Rows[i][k].j;
+      const auto& row=Rows[j];
+
+      const auto it=std::lower_bound(
+          row.begin(),row.end(),i,
+          [](const Edge& e,unsigned p){return e.j<p;});
+
+      if(it==row.end() || it->j!=i)
+        throw std::runtime_error(
+            "High-frequency mode 2 requires reciprocal pairs.");
+
+      const double p=Weights[i][k].p;
+      const double reverse=
+          Weights[j][unsigned(it-row.begin())].p;
+
+      const double a=volume[i]*Rho[i]*p;
+      const double b=volume[j]*Rho[j]*reverse;
+
+      if(p<0 || !std::isfinite(a) || !std::isfinite(b)
+          || std::abs(a-b)>1e-10*std::max(std::abs(a),std::abs(b)))
+        throw std::runtime_error(
+            "High-frequency mode 2: asymmetric mass weights.");
+
+      degree+=p;
+    }
+
+    if(!std::isfinite(degree))
+      throw std::runtime_error(
+          "High-frequency mode 2: invalid degree.");
+
+    degreeMax=std::max(degreeMax,degree);
+  }
+
+  GraphInvBeta=degreeMax>0?.5/degreeMax:0.;
+  GraphSpeed=H*degreeMax;
+
+  if(!std::isfinite(GraphSpeed)
+      || GraphSpeed>std::numeric_limits<float>::max())
+    throw std::runtime_error(
+        "High-frequency mode 2: time-step bound overflow.");
 }
 
 void JFlexDissipation::InitPairWeights(){
@@ -367,7 +424,7 @@ bool JFlexDissipation::BuildKV(unsigned i,const M& F,const M& L){
   return true;
 }
 
-template<bool twoD,bool cr,bool kv,bool pair>
+template<bool twoD,bool cr,bool kv,bool pair,bool graph>
 bool JFlexDissipation::PrepareT(
     unsigned i,const tdouble3* x,const tfloat4* velocity,
     const unsigned* rid,const tmatrix3f& existingF)
@@ -378,64 +435,54 @@ bool JFlexDissipation::PrepareT(
   }
 
   M L={{0}},F={{0}};
+  V q={{0,0,0}};
   const unsigned p=rid[i];
-
-  const V vi={{
-    velocity[p].x,
-    twoD?0.:double(velocity[p].y),
-    velocity[p].z
-  }};
-
+  const V vi=Velocity(velocity[p]);
   const bool rebuild=kv && !ReuseF[i];
+  const auto& row=Rows[i];
 
-  if(rebuild){
-    const auto& xi=x[p];
+  for(unsigned k=0;k<row.size();k++){
+    const auto& e=row[k];
+    const unsigned j=rid[e.j];
+    const V dv=Sub(Velocity(velocity[j]),vi);
 
-    for(const auto& e:Rows[i]){
-      const unsigned j=rid[e.j];
-      const auto& vj=velocity[j];
-      const auto& xj=x[j];
+    V dx={{0,0,0}};
+    if(graph || rebuild)
+      dx=Sub(Position(x[j]),Position(x[p]));
 
-      const V dv={{
-        vj.x-vi[0],
-        twoD?0.:vj.y-vi[1],
-        vj.z-vi[2]
-      }};
+    if(graph){
+      const double rr=Dot(dx,dx);
 
-      const V dx={{
-        xj.x-xi.x,
-        twoD?0.:xj.y-xi.y,
-        xj.z-xi.z
-      }};
+      if(!(rr>0) || !std::isfinite(rr))return false;
 
+      const double w=-Weights[i][k].p*Dot(dv,dx)/rr;
+
+      for(unsigned a=0;a<3;a++)if(!twoD || a!=1)
+        q[a]+=w*dx[a];
+    }
+
+    if((cr && !graph) || kv){
       for(unsigned a=0;a<3;a++)if(!twoD || a!=1)
         for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
           L[3*a+b]+=dv[a]*e.g[b];
-          F[3*a+b]+=dx[a]*e.g[b];
+          if(rebuild)F[3*a+b]+=dx[a]*e.g[b];
         }
     }
-
-    if(twoD)F[4]=1;
-  }
-  else{
-    for(const auto& e:Rows[i]){
-      const auto& vj=velocity[rid[e.j]];
-
-      const V dv={{
-        vj.x-vi[0],
-        twoD?0.:vj.y-vi[1],
-        vj.z-vi[2]
-      }};
-
-      for(unsigned a=0;a<3;a++)if(!twoD || a!=1)
-        for(unsigned b=0;b<3;b++)if(!twoD || b!=1)
-          L[3*a+b]+=dv[a]*e.g[b];
-    }
   }
 
-  for(double q:L)if(!std::isfinite(q))return false;
+  if(graph){
+    for(double value:q)
+      if(!std::isfinite(value))return false;
 
-  if(cr)Grad[i]=L;
+    GraphQ[i]=Scale(q,GraphInvBeta);
+  }
+
+  if(rebuild && twoD)F[4]=1;
+
+  for(double value:L)
+    if(!std::isfinite(value))return false;
+
+  if(cr && !graph)Grad[i]=L;
 
   if(!kv || Eta0[i]==0 || SumG[i]==0)return true;
 
@@ -444,7 +491,7 @@ bool JFlexDissipation::PrepareT(
   return BuildKV(i,F,L);
 }
 
-template<bool twoD,bool cr,bool kv,bool pair>
+template<bool twoD,bool cr,bool kv,bool pair,bool graph>
 bool JFlexDissipation::AddParticleT(
     unsigned i,const tdouble3* x,const tfloat4* velocity,
     const unsigned* rid,tdouble3& acceleration,double& rate)const
@@ -463,7 +510,7 @@ bool JFlexDissipation::AddParticleT(
       velocity[p].z
     }};
 
-    if(cr)Li=Grad[i];
+    if(cr && !graph)Li=Grad[i];
   }
 
   if(kv)Pi=Pv[i];
@@ -493,7 +540,18 @@ bool JFlexDissipation::AddParticleT(
 
       if(!(rr>0) || !std::isfinite(rr))return false;
 
-      const V normal=Scale(r,1/std::sqrt(rr));
+      if(graph){
+        const V dq=Sub(GraphQ[j],GraphQ[i]);
+        const double damp=Weights[i][k].p*Dot(dq,r)/rr;
+
+        for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
+          a[t]+=damp*r[t];
+      }
+
+      V normal={{0,0,0}};
+
+      if((cr && !graph) || pair)
+        normal=Scale(r,1/std::sqrt(rr));
 
       if(pair){
         const double damp=PairWeights[i][k]*Dot(dv,normal);
@@ -502,7 +560,7 @@ bool JFlexDissipation::AddParticleT(
           a[t]+=damp*normal[t];
       }
 
-      if(cr){
+      if(cr && !graph){
         const auto& w=Weights[i][k];
         const auto& Lj=Grad[j];
         V jump=dv;
@@ -565,14 +623,14 @@ bool JFlexDissipation::AddParticleT(
 
 // Called from a compile-time-specialized force pass, not via per-particle
 // runtime dispatch. Each particle writes only its own acceleration.
-template<bool twoD,bool cr,bool kv,bool pair>
+template<bool twoD,bool cr,bool kv,bool pair,bool graph>
 bool JFlexDissipation::Accumulate(
     unsigned i,const tdouble3* x,const tfloat4* velocity,
     const unsigned* rid,tfloat3* ace,double& speed)const
 {
   tdouble3 da=TDouble3(0);
   double rate=kv?Q[i]*NormSumG[i]:0;
-  if(!AddParticleT<twoD,cr,kv,pair>(i,x,velocity,rid,da,rate))return false;
+  if(!AddParticleT<twoD,cr,kv,pair,graph>(i,x,velocity,rid,da,rate))return false;
 
   const double limit=std::numeric_limits<float>::max();
   if(!std::isfinite(da.x) || std::abs(da.x)>limit
@@ -592,7 +650,7 @@ bool JFlexDissipation::Accumulate(
   return true;
 }
 
-template<bool twoD,bool cr,bool kv,bool pair>
+template<bool twoD,bool cr,bool kv,bool pair,bool graph>
 double JFlexDissipation::ApplyT(
     const tdouble3* x,const tfloat4* velocity,
     const typecode* code,const unsigned* rid,
@@ -609,7 +667,7 @@ double JFlexDissipation::ApplyT(
       const unsigned i=unsigned(ii);
       const tmatrix3f& F=kv && defgrad?defgrad[i]:zero;
 
-      if(!PrepareT<twoD,cr,kv,pair>(
+      if(!PrepareT<twoD,cr,kv,pair,graph>(
           i,x,velocity,rid,F))invalid++;
     }
 
@@ -629,7 +687,7 @@ double JFlexDissipation::ApplyT(
 
       if(!CODE_IsFlexStrucFlex(code[rid[i]]))continue;
 
-      if(!Accumulate<twoD,cr,kv,pair>(
+      if(!Accumulate<twoD,cr,kv,pair,graph>(
           i,x,velocity,rid,ace,speed))invalid++;
     }
   }
@@ -644,7 +702,7 @@ double JFlexDissipation::ApplyT(
 
       double unused=0;
 
-      if(!Accumulate<twoD,cr,kv,pair>(
+      if(!Accumulate<twoD,cr,kv,pair,graph>(
           i,x,velocity,rid,ace,unused))invalid++;
     }
   }
@@ -654,7 +712,9 @@ double JFlexDissipation::ApplyT(
         "Elastic dissipation: invalid stage acceleration.");
 
   return std::max(
-      std::max(cr?MaxCp:0.,speed),
+      std::max(
+          cr?(graph?std::max(MaxCp,GraphSpeed):MaxCp):0.,
+          speed),
       pair?PairSpeed:0.);
 }
 
@@ -669,6 +729,31 @@ double JFlexDissipation::Apply(
   if(MaxCp>std::numeric_limits<float>::max())
     throw std::runtime_error("Elastic dissipation: reference wave speed overflow.");
 
+  if(GraphCR){
+    if(TwoD){
+      if(PairKV)
+        return ApplyT<true,true,false,true,true>(
+            x,velocity,code,rid,defgrad,ace);
+
+      if(KV)
+        return ApplyT<true,true,true,false,true>(
+            x,velocity,code,rid,defgrad,ace);
+
+      return ApplyT<true,true,false,false,true>(
+          x,velocity,code,rid,defgrad,ace);
+    }
+
+    if(PairKV)
+      return ApplyT<false,true,false,true,true>(
+          x,velocity,code,rid,defgrad,ace);
+
+    if(KV)
+      return ApplyT<false,true,true,false,true>(
+          x,velocity,code,rid,defgrad,ace);
+
+    return ApplyT<false,true,false,false,true>(
+        x,velocity,code,rid,defgrad,ace);
+  }
   if(PairKV){
     if(TwoD){
       if(CR)

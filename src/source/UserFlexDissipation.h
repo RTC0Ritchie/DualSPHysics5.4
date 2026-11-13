@@ -26,6 +26,11 @@ class JFlexDissipation{
   };
 
   bool TwoD,CR,KV,PairKV;
+  bool GraphCR;
+  double GraphInvBeta=0,GraphSpeed=0;
+  std::vector<V> GraphQ;
+
+  void InitGraphWeights(const double* volume);
   double PairSpeed=0;
   std::vector<std::vector<double>> PairWeights;
   void InitPairWeights();
@@ -54,19 +59,19 @@ class JFlexDissipation{
 
   bool BuildKV(unsigned i,const M& F,const M& L);
 
-  template<bool twoD,bool cr,bool kv,bool pair=false>
+  template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false>
   bool PrepareT(unsigned i,const tdouble3* x,const tfloat4* velocity,
       const unsigned* rid,const tmatrix3f& F);
 
-  template<bool twoD,bool cr,bool kv,bool pair=false>
+  template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false>
   bool AddParticleT(unsigned i,const tdouble3* x,const tfloat4* velocity,
       const unsigned* rid,tdouble3& acceleration,double& rate)const;
 
-  template<bool twoD,bool cr,bool kv,bool pair=false>
+  template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false>
   bool Accumulate(unsigned i,const tdouble3* x,const tfloat4* velocity,
       const unsigned* rid,tfloat3* ace,double& speed)const;
 
-  template<bool twoD,bool cr,bool kv,bool pair=false>
+  template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false>
   double ApplyT(const tdouble3* x,const tfloat4* velocity,
       const typecode* code,const unsigned* rid,
       const tmatrix3f* defgrad,tfloat3* ace);
@@ -77,7 +82,8 @@ public:
       const double* poisson,const unsigned* body,const unsigned* count,
       const unsigned* const* pairs,const tmatrix3f* correction,
       bool mode5,const std::function<float(float)>& fac,
-      double h,bool useCR,bool useKV,double factor,int simplifiedMode=1);
+      double h,bool useCR,bool useKV,double factor,int simplifiedMode=1,
+      int highFrequencyMode=1);
 
   // Reference caches are constructed once. Apply updates only stage values.
   // defgrad uses flexible-local indices; rid maps to current global indices.

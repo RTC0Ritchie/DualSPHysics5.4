@@ -999,6 +999,9 @@ void JSphGpuSingle::InitFlexDissipation(bool beforeCorrection){
   if(beforeCorrection!=inherit)return;
   delete FlexDissipation;FlexDissipation=nullptr;
   const bool useCR=User->ElasticHighFrequencyDissipation;
+  if(useCR && User->ElasticHighFrequencyMode!=1)
+    Run_Exceptioon(
+        "High-frequency mode 2 is currently implemented only for CPU.");
   const bool useKV=User->ElasticViscousDissipation && User->ElasticViscousFactor>0;
   if(!useCR && !useKV)return;
   const unsigned np=CaseNflexstruc;
