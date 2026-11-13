@@ -13,7 +13,8 @@ public:
       const double* poisson,const unsigned* body,const unsigned* count,
       const unsigned* const* pairs,const tmatrix3f* correction,
       bool mode5,const std::function<float(float)>& fac,
-      double h,bool useCR,bool useKV,double factor,unsigned mode,int simplifiedMode=1);
+      double h,bool useCR,bool useKV,double factor,unsigned mode,int simplifiedMode=1,
+      int highFrequencyMode=1);
 
   ~UserGFlexDissipation();
   UserGFlexDissipation(const UserGFlexDissipation&)=delete;

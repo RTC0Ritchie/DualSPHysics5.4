@@ -38,6 +38,9 @@ public:
 class UserGDissCache:public UserGDissTypes{
 public:
   bool TwoD,CR,KV,PairKV;
+  bool GraphCR;
+  double GraphInvBeta=0,GraphSpeed=0;
+  void InitGraphWeights(const double* volume);
   unsigned N;
   double H;
   double MaxCp=0;
@@ -70,7 +73,7 @@ public:
       const double* poisson,const unsigned* body,const unsigned* count,
       const unsigned* const* pairs,const tmatrix3f* correction,
       bool mode5,const std::function<float(float)>& fac,
-      double h,bool useCR,bool useKV,double factor,int simplifiedMode);
+      double h,bool useCR,bool useKV,double factor,int simplifiedMode,int highFrequencyMode=1);
 
 };
 UserGDissCache::V UserGDissCache::Sub(const V& a,const V& b){
@@ -168,16 +171,23 @@ UserGDissCache::UserGDissCache(
     const double* poisson,const unsigned* body,const unsigned* count,
     const unsigned* const* pairs,const tmatrix3f* correction,
     bool mode5,const std::function<float(float)>& fac,
-    double h,bool useCR,bool useKV,double factor,int simplifiedMode)
+    double h,bool useCR,bool useKV,double factor,int simplifiedMode,
+    int highFrequencyMode)
   :TwoD(twoD),CR(useCR),KV(useKV && simplifiedMode==1),
-   PairKV(useKV && simplifiedMode==2),PairWeights(PairKV?n:0),
+   PairKV(useKV && simplifiedMode==2),
+   GraphCR(useCR && highFrequencyMode==2),
+   PairWeights(PairKV?n:0),
    N(n),H(h),Rows(n),Weights(CR?n:0),ViscWeights(KV?n:0),
-   Grad(CR?n:0),Pv(KV?n:0),Rho(rho,rho+n),Cp(CR || PairKV?n:0),
+   Grad(CR && !GraphCR?n:0),Pv(KV?n:0),Rho(rho,rho+n),
+   Cp(CR || PairKV?n:0),
    Eta0(useKV?n:0),SumG(KV?n:0),NormSumG(KV?n:0),
    Q(KV?n:0),ReuseF(n,0)
 {
   if(simplifiedMode!=1 && simplifiedMode!=2)
     throw std::runtime_error("KV simplifiedMode must be 1 or 2.");
+
+  if(highFrequencyMode!=1 && highFrequencyMode!=2)
+    throw std::runtime_error("High-frequency mode must be 1 or 2.");
 
   const tdouble3* X=x0;
 
@@ -292,7 +302,7 @@ UserGDissCache::UserGDissCache(
       }
     }
 
-    if(!CR && !KV)continue;
+    if(!(CR && !GraphCR) && !KV)continue;
     bool nonzero=false;
     for(double q:moment)nonzero=nonzero || q!=0;
     if(!nonzero)continue;
@@ -339,6 +349,7 @@ UserGDissCache::UserGDissCache(
     }
   }
 
+  if(GraphCR)InitGraphWeights(volume);
   if(PairKV)InitPairWeights();
   // Pay the reverse lookup once, not at every force evaluation.
   if(KV)for(unsigned i=0;i<N;i++){
@@ -362,6 +373,55 @@ UserGDissCache::UserGDissCache(
       });
     }
   }
+}
+
+void UserGDissCache::InitGraphWeights(const double* volume){
+  double degreeMax=0;
+
+  for(unsigned i=0;i<N;i++){
+    double degree=0;
+
+    for(unsigned k=0;k<Rows[i].size();k++){
+      const unsigned j=Rows[i][k].j;
+      const auto& row=Rows[j];
+
+      const auto it=std::lower_bound(
+          row.begin(),row.end(),i,
+          [](const Edge& e,unsigned p){return e.j<p;});
+
+      if(it==row.end() || it->j!=i)
+        throw std::runtime_error(
+            "High-frequency mode 2 requires reciprocal pairs.");
+
+      const double p=Weights[i][k].p;
+      const double reverse=
+          Weights[j][unsigned(it-row.begin())].p;
+
+      const double a=volume[i]*Rho[i]*p;
+      const double b=volume[j]*Rho[j]*reverse;
+
+      if(p<0 || !std::isfinite(a) || !std::isfinite(b)
+          || std::abs(a-b)>1e-10*std::max(std::abs(a),std::abs(b)))
+        throw std::runtime_error(
+            "High-frequency mode 2: asymmetric mass weights.");
+
+      degree+=p;
+    }
+
+    if(!std::isfinite(degree))
+      throw std::runtime_error(
+          "High-frequency mode 2: invalid degree.");
+
+    degreeMax=std::max(degreeMax,degree);
+  }
+
+  GraphInvBeta=degreeMax>0?.5/degreeMax:0.;
+  GraphSpeed=H*degreeMax;
+
+  if(!std::isfinite(GraphSpeed)
+      || GraphSpeed>std::numeric_limits<float>::max())
+    throw std::runtime_error(
+        "High-frequency mode 2: time-step bound overflow.");
 }
 
 void UserGDissCache::InitPairWeights(){
@@ -486,6 +546,9 @@ public:
   __device__ static R Min(R x,R y){return mode==0?R(fminf(float(x),float(y))):R(fmin(double(x),double(y)));}
   unsigned N;B H,MaxCp;
   R PairSpeed;Span<B>* PairWeights;
+  R GraphInvBeta,GraphSpeed;
+  Span<B>* GraphWeights;
+  UserGDissField<V> GraphQ;
   Span<Edge>* Rows;Span<CRWeight>* Weights;Span<KVWeight>* ViscWeights;
   UserGDissField<M> Grad;UserGDissField<BM> Pv;
   B *Rho,*Eta0,*SumG,*NormSumG,*Q;
@@ -494,6 +557,29 @@ public:
   __device__ static V Scale(V a,R s){for(R& q:a)q*=s;return a;}
   __device__ static R Dot(const V& a,const V& b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
   __device__ static M Matrix(const tmatrix3f& a){return {{a.a11,a.a12,a.a13,a.a21,a.a22,a.a23,a.a31,a.a32,a.a33}};}
+  template<bool twoD>
+  __device__ bool GraphProject(const V& dv,const V& r,B weight,V& sum)const{
+    if(mode==1){
+      // Double position differences and cancellation-prone projection;
+      // ordinary positive normalization and coefficient products use float.
+      const B scale=fmaxf(fabsf(B(r[0])),fmaxf(fabsf(B(r[1])),fabsf(B(r[2]))));
+      if(!(scale>0) || !isfinite(scale))return false;
+      const B invscale=B(1)/scale;
+      const B sx=B(r[0])*invscale,sy=B(r[1])*invscale,sz=B(r[2])*invscale;
+      const B rr=sx*sx+sy*sy+sz*sz;
+      const R projection=Dot(dv,r)*R(invscale);
+      if(!(rr>0) || !isfinite(rr) || !isfinite(projection))return false;
+      const B a=weight*(B(projection)/rr);
+      for(unsigned t=0;t<3;t++)if(!twoD || t!=1)
+        sum[t]+=R(a*(B(r[t])*invscale));
+    }else{
+      const R rr=Dot(r,r);
+      if(!(rr>0) || !isfinite(rr))return false;
+      const R a=R(weight)*Dot(dv,r)/rr;
+      for(unsigned t=0;t<3;t++)if(!twoD || t!=1)sum[t]+=a*r[t];
+    }
+    return true;
+  }
 __device__ bool BuildKV(unsigned i,const M& F,const M& L){
   const R J=F[0]*(F[4]*F[8]-F[5]*F[7])
       -F[1]*(F[3]*F[8]-F[5]*F[6])+F[2]*(F[3]*F[7]-F[4]*F[6]);
@@ -539,7 +625,7 @@ __device__ bool BuildKV(unsigned i,const M& F,const M& L){
   return true;
 }
 
-template<bool twoD,bool cr,bool kv>
+template<bool twoD,bool cr,bool kv,bool graph=false>
 __device__ bool PrepareT(
     unsigned i,Positions x,const float4* velocity,
     const unsigned* rid,const M& existingF)
@@ -560,7 +646,30 @@ __device__ bool PrepareT(
 
   const bool rebuild=kv && !ReuseF[i];
 
-  if(rebuild){
+  if(graph){
+    V q={{0}};
+    const auto xi=x[p];
+    const auto row=Rows[i];
+    for(unsigned k=0;k<row.size();k++){
+      const auto e=row[k];
+      const unsigned j=rid[e.j];
+      const auto vj=velocity[j];const auto xj=x[j];
+      const V dv={{R(vj.x)-vi[0],twoD?R(0):R(vj.y)-vi[1],R(vj.z)-vi[2]}};
+      const V dx={{R(xj.x-xi.x),twoD?R(0):R(xj.y-xi.y),R(xj.z-xi.z)}};
+      V negative={{-dv[0],-dv[1],-dv[2]}};
+      if(!GraphProject<twoD>(negative,dx,GraphWeights[i][k],q))return false;
+      if(kv)for(unsigned a=0;a<3;a++)if(!twoD || a!=1)
+        for(unsigned b=0;b<3;b++)if(!twoD || b!=1){
+          L[3*a+b]+=dv[a]*e.g[b];
+          if(rebuild)F[3*a+b]+=dx[a]*e.g[b];
+        }
+    }
+    q=Scale(q,GraphInvBeta);
+    for(R v:q)if(!isfinite(v))return false;
+    GraphQ.Store(i,q);
+    if(rebuild && twoD)F[4]=1;
+  }
+  else   if(rebuild){
     const auto& xi=x[p];
 
     for(const auto& e:Rows[i]){
@@ -607,7 +716,7 @@ __device__ bool PrepareT(
 
   for(R q:L)if(!isfinite(q))return false;
 
-  if(cr)Grad.Store(i,L);
+  if(cr && !graph)Grad.Store(i,L);
 
   if(!kv || Eta0[i]==0 || SumG[i]==0)return true;
 
@@ -616,7 +725,7 @@ __device__ bool PrepareT(
   return BuildKV(i,F,L);
 }
 
-template<bool twoD,bool cr,bool kv,bool pair=false>
+template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false>
 __device__ bool AddParticleT(
     unsigned i,Positions x,const float4* velocity,
     const unsigned* rid,V& acceleration,B& rate)const
@@ -636,7 +745,7 @@ __device__ bool AddParticleT(
       velocity[p].z
     }};
 
-    if(cr)Li=Grad[i];
+    if(cr && !graph)Li=Grad[i];
   }
 
   if(kv){
@@ -669,6 +778,11 @@ __device__ bool AddParticleT(
         R(x[p].z-xi.z)
       }};
 
+      if(graph){
+        const V qi=GraphQ[i],qj=GraphQ[j];
+        const V dq={{qj[0]-qi[0],qj[1]-qi[1],qj[2]-qi[2]}};
+        if(!GraphProject<twoD>(dq,r,GraphWeights[i][k],a))return false;
+      }
       if(pair){
         if(mode==1){
           // Protect position subtraction and cancellation in the projection.
@@ -692,7 +806,7 @@ __device__ bool AddParticleT(
             a[t]+=damp*normal[t];
         }
       }
-      if(cr){
+      if(cr && !graph){
       const auto& w=Weights[i][k];
       const auto& Lj=Grad[j];
       V jump=dv;
@@ -781,14 +895,14 @@ __device__ bool AddParticleT(
 
 // Called from a compile-time-specialized force pass, not via per-particle
 // runtime dispatch. Each particle writes only its own acceleration.
-template<bool twoD,bool cr,bool kv,bool pair=false>
+template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false>
 __device__ bool Accumulate(
     unsigned i,Positions x,const float4* velocity,
     const unsigned* rid,float3* ace,R& speed)const
 {
   V da={{0}};
   B rate=kv?Q[i]*NormSumG[i]:0;
-  if(!AddParticleT<twoD,cr,kv,pair>(i,x,velocity,rid,da,rate))return false;
+  if(!AddParticleT<twoD,cr,kv,pair,graph>(i,x,velocity,rid,da,rate))return false;
 
   const R limit=FLT_MAX;
   if(!isfinite(da[0]) || Abs(da[0])>limit
@@ -809,7 +923,7 @@ __device__ bool Accumulate(
 }
 
 };
-template<bool twoD,bool cr,bool kv,unsigned mode>
+template<bool twoD,bool cr,bool kv,unsigned mode,bool graph=false>
 __global__ void UserGDissPrepare(UserGDissDevice<mode> d,UserGDissPositions x,
     const float4* v,const unsigned* rid,const tmatrix3f* f,const void* state){
   unsigned i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=d.N)return;
@@ -823,22 +937,23 @@ __global__ void UserGDissPrepare(UserGDissDevice<mode> d,UserGDissPositions x,
       F[0]+=1;F[4]+=1;F[8]+=1;
     }
   }
-  if(!d.template PrepareT<twoD,cr,kv>(i,x,v,rid,F))asm("trap;");
+  if(!d.template PrepareT<twoD,cr,kv,graph>(i,x,v,rid,F))asm("trap;");
 }
-template<bool twoD,bool cr,bool kv,unsigned mode,bool pair=false>
+template<bool twoD,bool cr,bool kv,unsigned mode,bool pair=false,bool graph=false>
 __global__ void UserGDissForces(UserGDissDevice<mode> d,UserGDissPositions x,
     const float4* v,const typecode* code,const unsigned* rid,float3* ace,float* dt){
   unsigned i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=d.N)return;
   typename UserGDissDevice<mode>::R speed=cr?d.MaxCp:0;
+  if(graph)speed=UserGDissDevice<mode>::Max(speed,d.GraphSpeed);
   if(pair)speed=UserGDissDevice<mode>::Max(speed,d.PairSpeed);
   if(CODE_IsFlexStrucFlex(code[rid[i]])){
-    if(!d.template Accumulate<twoD,cr,kv,pair>(i,x,v,rid,ace,speed))asm("trap;");
+    if(!d.template Accumulate<twoD,cr,kv,pair,graph>(i,x,v,rid,ace,speed))asm("trap;");
   }
   dt[i]=fmaxf(dt[i],float(speed));
 }
 class UserGFlexDissipation::Impl{
 public:
-  bool TwoD,CR,KV,PairKV;unsigned N,Mode;
+  bool TwoD,CR,KV,PairKV,GraphCR;unsigned N,Mode;
   UserGDissDevice<0> D0={};UserGDissDevice<1> D1={};UserGDissDevice<2> D2={};
   std::vector<void*> Memory;
   size_t Bytes=0;
@@ -885,7 +1000,7 @@ public:
     using P=UserGDissPolicy<mode>;using R=typename P::R;using B=typename P::B;
     d.N=c.N;d.H=R(c.H);d.MaxCp=R(c.MaxCp);
     std::vector<std::vector<typename P::Edge>> rows(c.Rows.size());
-    std::vector<std::vector<typename P::CRWeight>> weights(c.Weights.size());
+    std::vector<std::vector<typename P::CRWeight>> weights(c.GraphCR?0:c.Weights.size());
     std::vector<std::vector<typename P::KVWeight>> visc(c.ViscWeights.size());
     for(unsigned i=0;i<rows.size();i++)for(const auto& e:c.Rows[i]){
       typename P::Edge a={};a.j=e.j;for(unsigned k=0;k<3;k++)a.g[k]=R(e.g[k]);rows[i].push_back(a);
@@ -923,6 +1038,34 @@ public:
       if(double(d.PairSpeed)<speed)d.PairSpeed=std::nextafter(d.PairSpeed,std::numeric_limits<R>::infinity());
       d.PairWeights=Flatten(pairweights);
     }
+    if(c.GraphCR){
+      std::vector<std::vector<B>> graphweights(c.N);
+      double degreeMax=0;
+      for(unsigned i=0;i<c.N;i++){
+        double degree=0;
+        for(const auto& edge:c.Weights[i]){
+          const B w=B(edge.p);
+          if(!std::isfinite(double(w)) || w<0)
+            throw std::runtime_error("High-frequency mode 2: GPU weight overflow.");
+          graphweights[i].push_back(w);degree+=double(w);
+        }
+        degreeMax=std::max(degreeMax,degree);
+      }
+      // Account for rounded GPU weights without weakening the CPU bound.
+      const double bound=std::max(c.GraphSpeed,c.H*degreeMax);
+      if(!std::isfinite(bound) || bound>FLT_MAX)
+        throw std::runtime_error("High-frequency mode 2: GPU bound overflow.");
+      d.GraphSpeed=R(bound);
+      if(double(d.GraphSpeed)<bound)
+        d.GraphSpeed=std::nextafter(d.GraphSpeed,std::numeric_limits<R>::infinity());
+      const double inv=degreeMax>0?std::min(c.GraphInvBeta,.5/degreeMax):0.;
+      d.GraphInvBeta=R(inv);
+      if(double(d.GraphInvBeta)>inv)d.GraphInvBeta=std::nextafter(d.GraphInvBeta,R(0));
+      if(inv>0 && (!(d.GraphInvBeta>0) || !std::isfinite(double(d.GraphInvBeta))))
+        throw std::runtime_error("High-frequency mode 2: GPU normalization overflow.");
+      d.GraphWeights=Flatten(graphweights);
+      d.GraphQ={Copy(std::vector<R>(size_t(c.N)*3)),c.N};
+    }
     d.Rows=Flatten(rows);d.Weights=Flatten(weights);d.ViscWeights=Flatten(visc);
     d.Grad={Copy(std::vector<R>(c.Grad.size()*9)),c.N};
     d.Pv={Copy(std::vector<B>(c.Pv.size()*9)),c.N};
@@ -932,26 +1075,26 @@ public:
     d.NormSumG=Copy(std::vector<B>(c.NormSumG.begin(),c.NormSumG.end()));
     d.Q=Copy(std::vector<B>(c.Q.begin(),c.Q.end()));d.ReuseF=Copy(c.ReuseF);
   }
-  explicit Impl(const UserGDissCache& c,unsigned mode):TwoD(c.TwoD),CR(c.CR),KV(c.KV),PairKV(c.PairKV),N(c.N),Mode(mode){
+  explicit Impl(const UserGDissCache& c,unsigned mode):TwoD(c.TwoD),CR(c.CR),KV(c.KV),PairKV(c.PairKV),GraphCR(c.GraphCR),N(c.N),Mode(mode){
     if(mode>2 || c.MaxCp>FLT_MAX)throw std::runtime_error("Invalid dissipation precision or wave speed.");
     try{
       if(mode==0)Init(D0,c);else if(mode==1)Init(D1,c);else Init(D2,c);
     }catch(...){for(void* p:Memory)cudaFree(p);throw;}
   }
-  template<bool twoD,bool cr,bool kv,bool pair=false,unsigned mode> void Launch(UserGDissDevice<mode> d,
+  template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false,unsigned mode> void Launch(UserGDissDevice<mode> d,
       UserGDissPositions x,const float4* v,const typecode* code,const unsigned* rid,
       const tmatrix3f* f,const void* h,float3* ace,float* speed){
     const unsigned blocks=(N+127)/128;
-    if(cr || kv)UserGDissPrepare<twoD,cr,kv,mode><<<blocks,128>>>(d,x,v,rid,f,h);
-    UserGDissForces<twoD,cr,kv,mode,pair><<<blocks,128>>>(d,x,v,code,rid,ace,speed);
+    if(cr || kv)UserGDissPrepare<twoD,cr,kv,mode,graph><<<blocks,128>>>(d,x,v,rid,f,h);
+    UserGDissForces<twoD,cr,kv,mode,pair,graph><<<blocks,128>>>(d,x,v,code,rid,ace,speed);
   }
-  template<bool twoD,bool cr,bool kv,bool pair=false> void Run(UserGDissPositions x,
+  template<bool twoD,bool cr,bool kv,bool pair=false,bool graph=false> void Run(UserGDissPositions x,
       const float4* v,const typecode* code,const unsigned* rid,const tmatrix3f* f,
       unsigned mode,UserGFlexPrecision* precision,float3* ace,float* speed){
     if(!N)return;
-    if(mode==0)Launch<twoD,cr,kv,pair>(D0,x,v,code,rid,f,nullptr,ace,speed);
-    else if(mode==1)Launch<twoD,cr,kv,pair>(D1,x,v,code,rid,f,kv?static_cast<const UserGFlexState<float>*>(precision->State(1,N))->H:nullptr,ace,speed);
-    else Launch<twoD,cr,kv,pair>(D2,x,v,code,rid,f,kv?static_cast<const UserGFlexState<double>*>(precision->State(2,N))->H:nullptr,ace,speed);
+    if(mode==0)Launch<twoD,cr,kv,pair,graph>(D0,x,v,code,rid,f,nullptr,ace,speed);
+    else if(mode==1)Launch<twoD,cr,kv,pair,graph>(D1,x,v,code,rid,f,kv?static_cast<const UserGFlexState<float>*>(precision->State(1,N))->H:nullptr,ace,speed);
+    else Launch<twoD,cr,kv,pair,graph>(D2,x,v,code,rid,f,kv?static_cast<const UserGFlexState<double>*>(precision->State(2,N))->H:nullptr,ace,speed);
     Check(cudaGetLastError());
   }
 };
@@ -960,10 +1103,10 @@ UserGFlexDissipation::UserGFlexDissipation(bool twoD,unsigned n,const tdouble3* 
       const double* poisson,const unsigned* body,const unsigned* count,
       const unsigned* const* pairs,const tmatrix3f* correction,
       bool mode5,const std::function<float(float)>& fac,
-      double h,bool useCR,bool useKV,double factor,unsigned mode,int simplifiedMode)
+      double h,bool useCR,bool useKV,double factor,unsigned mode,int simplifiedMode,int highFrequencyMode)
  :Data(nullptr){
   UserGDissCache cache(twoD,n,x0,volume,rho,young,poisson,body,count,pairs,
-      correction,mode5,fac,h,useCR,useKV,factor,simplifiedMode);
+      correction,mode5,fac,h,useCR,useKV,factor,simplifiedMode,highFrequencyMode);
   Data=new Impl(cache,mode);
 }
 UserGFlexDissipation::~UserGFlexDissipation(){delete Data;}
@@ -973,6 +1116,18 @@ void UserGFlexDissipation::Apply(unsigned n,const double2* xy,const double* z,
     unsigned mode,UserGFlexPrecision* precision,float3* ace,float* speed){
   if(!Data || n!=Data->N || mode!=Data->Mode)throw std::runtime_error("Invalid GPU dissipation state.");
   const UserGDissPositions x={xy,z};
+  if(Data->GraphCR){
+    if(Data->TwoD){
+      if(Data->PairKV)Data->Run<true,true,false,true,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+      else if(Data->KV)Data->Run<true,true,true,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+      else Data->Run<true,true,false,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+    }else{
+      if(Data->PairKV)Data->Run<false,true,false,true,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+      else if(Data->KV)Data->Run<false,true,true,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+      else Data->Run<false,true,false,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
+    }
+    return;
+  }
   if(Data->PairKV){
     if(Data->TwoD){
       if(Data->CR)Data->Run<true,true,false,true>(x,velocity,code,rid,f,mode,precision,ace,speed);
@@ -999,9 +1154,6 @@ void JSphGpuSingle::InitFlexDissipation(bool beforeCorrection){
   if(beforeCorrection!=inherit)return;
   delete FlexDissipation;FlexDissipation=nullptr;
   const bool useCR=User->ElasticHighFrequencyDissipation;
-  if(useCR && User->ElasticHighFrequencyMode!=1)
-    Run_Exceptioon(
-        "High-frequency mode 2 is currently implemented only for CPU.");
   const bool useKV=User->ElasticViscousDissipation && User->ElasticViscousFactor>0;
   if(!useCR && !useKV)return;
   const unsigned np=CaseNflexstruc;
@@ -1044,5 +1196,5 @@ void JSphGpuSingle::InitFlexDissipation(bool beforeCorrection){
 
   FlexDissipation=new UserGFlexDissipation(Simulate2D,np,x0.data(),volume.data(),rho.data(),
     young.data(),poisson.data(),body.data(),counts.data(),pairs.data(),
-    inherit?nullptr:correction.data(),false,fac,KernelH,useCR,useKV,User->ElasticViscousFactor,User->GPUFlexPrecisionMode,User->ElasticViscousSimplifiedMode);
+    inherit?nullptr:correction.data(),false,fac,KernelH,useCR,useKV,User->ElasticViscousFactor,User->GPUFlexPrecisionMode,User->ElasticViscousSimplifiedMode,User->ElasticHighFrequencyMode);
 }
