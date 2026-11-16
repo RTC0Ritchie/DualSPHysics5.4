@@ -59,6 +59,7 @@
 #include "UserIceInOutData.h"
 #include "JDsPartsInit.h"
 #include "UserInOutBoundMode.h"
+#include "UserThermo.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -1364,6 +1365,32 @@ void JSphCpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
       || UserInOutBoundMode::Read(User.get()).NoBackflow)
     RunFirstGaugeSystem(TimeStep);
 
+  if(User->Thermo && User->Thermo->IsEnabled()){
+    if(InOut || cfg->VRes)
+      Run_Exceptioon(
+        "CPU thermo currently requires fixed particle IDs (no InOut/VRes).");
+
+    std::vector<word> thermalMk(Np,0);
+
+    for(unsigned p=0;p<Np;p++)
+      if(CODE_IsNormal(Code_c->cptr()[p])){
+        const unsigned id=Idp_c->cptr()[p];
+
+        if(MkInfo->GetMkBlockById(id)>=MkInfo->Size())
+          Run_Exceptioon("Cannot identify thermal particle MK.");
+
+        thermalMk[p]=MkInfo->GetMkById(id);
+      }
+
+    User->Thermo->InitializeCpu(
+      DirCase,PartBeginDir,PartBegin,PartBeginTimeStep,
+      Np,Idp_c->cptr(),Code_c->cptr(),
+      Pos_c->cptr(),thermalMk.data());
+
+    Log->Printf(
+      "  Thermo: file updated %u particles.",
+      User->Thermo->GetUpdatedCount());
+  }
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu());
   UpdateMaxValues();

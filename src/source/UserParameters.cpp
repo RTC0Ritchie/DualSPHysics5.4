@@ -1555,10 +1555,12 @@ void UserParameters::VisuConfig(JLog2* log)const{
 
   if(Thermo && Thermo->IsEnabled()){
     log->Printf(
-        "  Thermo: enabled; prescribe mode=0; temperature=%.17g K",
-        Thermo->GetTemperature(0));
+      "  Thermo: mode=%u; initial fallback=%.17g K",
+      Thermo->GetPrescribeMode(),
+      Thermo->GetInitialTemperature());
+
     log->Printf(
-        "    Every run, including continuation, resets temperature from XML.");
+      "    Restart inherits temperatures; file Renew=1 overrides its MK within the grid.");
   }
 
   log->Printf(

@@ -4,6 +4,7 @@
 #include "JObject.h"
 #include "DualSphDef.h"
 #include <string>
+#include <unordered_map>
 
 class JXml;
 class TiXmlElement;
@@ -11,16 +12,28 @@ class TiXmlElement;
 class UserThermo : protected JObject
 {
   bool Enabled=false;
+  bool Ready=false;
   unsigned PrescribeMode=0;
   double InitialTemperature=0.0;
+  std::string InputFile;
+  word FileMk=0;
+  bool FileRenew=false;
+  unsigned UpdatedCount=0;
+  std::unordered_map<unsigned,double> Temperature;
 
 public:
   UserThermo();
-
-  void LoadXml(
-    const JXml* xml,const TiXmlElement* node);
+  void LoadXml(const JXml* xml,const TiXmlElement* node);
 
   bool IsEnabled()const{ return Enabled; }
+  unsigned GetPrescribeMode()const{ return PrescribeMode; }
+  double GetInitialTemperature()const{ return InitialTemperature; }
+  unsigned GetUpdatedCount()const{ return UpdatedCount; }
+
+  void InitializeCpu(const std::string& caseDir,
+    const std::string& restartDir,unsigned restartPart,double restartTime,
+    unsigned np,const unsigned* idp,const typecode* code,
+    const tdouble3* pos,const word* mk);
 
   double GetTemperature(unsigned idp)const;
 
