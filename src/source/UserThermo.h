@@ -30,6 +30,12 @@ public:
   double GetInitialTemperature()const{ return InitialTemperature; }
   unsigned GetUpdatedCount()const{ return UpdatedCount; }
 
+  // Shared initialization from host arrays (CPU or downloaded GPU state).
+  void InitializeHost(const std::string& caseDir,
+    const std::string& restartDir,unsigned restartPart,double restartTime,
+    unsigned np,const unsigned* idp,const typecode* code,
+    const tdouble3* pos,const word* mk);
+
   void InitializeCpu(const std::string& caseDir,
     const std::string& restartDir,unsigned restartPart,double restartTime,
     unsigned np,const unsigned* idp,const typecode* code,

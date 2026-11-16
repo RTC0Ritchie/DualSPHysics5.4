@@ -240,7 +240,17 @@ void UserThermo::LoadXml(
   Enabled=true;
 }
 
+// Retain the existing CPU entry point and share the implementation.
 void UserThermo::InitializeCpu(
+    const std::string& caseDir,const std::string& restartDir,
+    unsigned restartPart,double restartTime,
+    unsigned np,const unsigned* idp,const typecode* code,
+    const tdouble3* pos,const word* mk){
+  InitializeHost(caseDir,restartDir,restartPart,restartTime,
+    np,idp,code,pos,mk);
+}
+
+void UserThermo::InitializeHost(
     const std::string& caseDir,
     const std::string& restartDir,
     unsigned restartPart,double restartTime,
@@ -253,7 +263,7 @@ void UserThermo::InitializeCpu(
   Temperature.clear();
 
   if(np && (!idp || !code || !pos || !mk))
-    Run_Exceptioon("Missing CPU thermal particle arrays.");
+    Run_Exceptioon("Missing host thermal particle arrays.");
 
   std::unordered_map<unsigned,double> restored;
 
@@ -351,7 +361,7 @@ double UserThermo::GetTemperature(unsigned idp)const{
 
   if(!Ready)
     Run_Exceptioon(
-      "Thermo requires CPU initialization; GPU is not implemented.");
+      "Thermo has not been initialized.");
 
   const auto it=Temperature.find(idp);
 

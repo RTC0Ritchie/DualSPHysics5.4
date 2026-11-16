@@ -5,6 +5,9 @@
 #include "UserGIceProtection.h"
 #include "UserGParameters.h"
 #include "UserParameters.h"
+#include "UserThermo.h"
+#include <cuda_runtime.h>
+#include <vector>
 #include <cmath>
 //HEAD_DSPH
 /*
@@ -1037,6 +1040,9 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
 
   //-Load parameters and input data.
   LoadConfig(cfg);
+  if(User->Thermo && User->Thermo->IsEnabled() && (InOut || cfg->VRes))
+    Run_Exceptioon(
+      "GPU thermo currently requires fixed particle IDs (no InOut/VRes).");
   LoadCaseParticles();
   ConfigFlexRestartMode();
   VisuConfig();
@@ -1058,6 +1064,46 @@ void JSphGpuSingle::Run(std::string appname,const JSphCfgRun* cfg,JLog2* log){
   ClearIceTopFluidOnce();
   InitIceProtection();
   if(UserGIceProtection::CleanupEnabled(User.get()) || UserInOutBoundMode::Read(User.get()).Enabled || UserInOutBoundMode::Read(User.get()).NoBackflow)RunFirstGaugeSystem(TimeStep);
+  if(User->Thermo && User->Thermo->IsEnabled()){
+    // Use the final device state after elastic initialization and cleanup.
+    // Own host scratch arrays: never overwrite main-PART/output buffers.
+    std::vector<unsigned> thermalIds(Np);
+    std::vector<typecode> thermalCodes(Np);
+    std::vector<double2> thermalXY(Np);
+    std::vector<double> thermalZ(Np);
+    std::vector<tdouble3> thermalPos(Np);
+    std::vector<word> thermalMk(Np,0);
+
+    const auto download=[&](void* dst,const void* src,size_t bytes){
+      if(!bytes)return;
+      const cudaError_t err=cudaMemcpy(dst,src,bytes,cudaMemcpyDeviceToHost);
+      if(err!=cudaSuccess)
+        Run_Exceptioon(std::string("Thermo initialization download: ")
+          +cudaGetErrorString(err));
+    };
+    download(thermalIds.data(),Idp_g->cptr(),size_t(Np)*sizeof(unsigned));
+    download(thermalCodes.data(),Code_g->cptr(),size_t(Np)*sizeof(typecode));
+    download(thermalXY.data(),Posxy_g->cptr(),size_t(Np)*sizeof(double2));
+    download(thermalZ.data(),Posz_g->cptr(),size_t(Np)*sizeof(double));
+
+    for(unsigned p=0;p<Np;p++){
+      thermalPos[p]=TDouble3(thermalXY[p].x,thermalXY[p].y,thermalZ[p]);
+      if(CODE_IsNormal(thermalCodes[p])){
+        const unsigned id=thermalIds[p];
+        if(MkInfo->GetMkBlockById(id)>=MkInfo->Size())
+          Run_Exceptioon("Cannot identify thermal particle MK.");
+        thermalMk[p]=MkInfo->GetMkById(id);
+      }
+    }
+
+    User->Thermo->InitializeHost(
+      DirCase,PartBeginDir,PartBegin,PartBeginTimeStep,
+      Np,thermalIds.data(),thermalCodes.data(),
+      thermalPos.data(),thermalMk.data());
+    Log->Printf("  Thermo (GPU): file updated %u particles.",
+      User->Thermo->GetUpdatedCount());
+  }
+
   FreePartsInit();
   PrintAllocMemory(GetAllocMemoryCpu(),GetAllocMemoryGpu());
   UpdateMaxValues();
