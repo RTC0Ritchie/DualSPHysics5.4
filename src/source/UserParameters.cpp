@@ -8,6 +8,7 @@
 #include "UserIceTopProtection.h"
 #include "UserInOutBoundMode.h"
 #include "UserGParameters.h"
+#include "UserThermo.h"
 
 #include <algorithm>
 #include <set>
@@ -64,6 +65,8 @@ void UserParameters::Reset(){
   InOutHeadWritten=false;
 
   UserInOutBoundMode::Reset(this);
+
+  Thermo.reset();
 
   FlexRestartRequested=false;
   FlexRestartSourceRequested=0;
@@ -128,7 +131,11 @@ void UserParameters::LoadXml(const JXml* xml,JLog2* log){
   const TiXmlElement* root=node->ToElement();
   xml->CheckElementNames(
       root,true,
-      "*parameter output restart directcontinuation boundarylayercorrection elasticdissipation");
+      "*parameter output restart directcontinuation boundarylayercorrection elasticdissipation thermo");
+  if(const TiXmlElement* thermo=root->FirstChildElement("thermo")){
+    Thermo=std::make_shared<UserThermo>();
+    Thermo->LoadXml(xml,thermo);
+  }
 
   if(const TiXmlElement* damping=root->FirstChildElement("elasticdissipation")){
     if(damping->NextSiblingElement("elasticdissipation"))
@@ -1325,7 +1332,7 @@ void UserParameters::LoadOutputXml(
       xml->CheckAttributeNames(dynamic,"comment");
       xml->CheckElementNames(
           dynamic,true,
-          "density pressure volume velocity strain stress");
+          "density pressure volume velocity strain stress temperature");
 
       const TiXmlElement* ele=nullptr;
 
@@ -1381,6 +1388,20 @@ void UserParameters::LoadOutputXml(
       if(ele){
         CheckLeaf(ele,"comment");
         config.Dynamic.Velocity=true;
+      }
+
+      ele=dynamic->FirstChildElement("temperature");
+      if(ele){
+        CheckLeaf(ele,"comment");
+
+        if(ele->NextSiblingElement("temperature"))
+          Fail(ele,"Repeated dynamic.temperature node.");
+
+        if(!Thermo || !Thermo->IsEnabled())
+          Fail(ele,
+              "dynamic.temperature requires User.thermo enabled=true.");
+
+        config.Dynamic.Temperature=true;
       }
 
       ele=dynamic->FirstChildElement("strain");
@@ -1448,6 +1469,7 @@ void UserParameters::LoadOutputXml(
       || d.VolumeMaterial
       || d.VolumeSPH
       || d.Velocity
+      || d.Temperature
       || !d.StrainComponents.empty()
       || !d.StressComponents.empty()
       || !d.StressInvariants.empty()
@@ -1530,6 +1552,14 @@ void UserParameters::VisuConfig(JLog2* log)const{
       "unspecified";
 
   UserInOutBoundMode::PrintConfig(this,log);
+
+  if(Thermo && Thermo->IsEnabled()){
+    log->Printf(
+        "  Thermo: enabled; prescribe mode=0; temperature=%.17g K",
+        Thermo->GetTemperature(0));
+    log->Printf(
+        "    Every run, including continuation, resets temperature from XML.");
+  }
 
   log->Printf(
       "  FlexRestart.SourceRequested: %d (%s; %s)",

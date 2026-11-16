@@ -2,6 +2,7 @@
 #include "JDataArrays.h"
 #include "JSpVtkData.h"
 #include "FunctionsMath.h"
+#include "UserThermo.h"
 
 #include "JSphCpuSingle.h"
 #include "JSphMk.h"
@@ -126,6 +127,10 @@ void UserParameterOutput::SaveFiles(
       for(unsigned p=0;p<n;p++){
         velocity[p]=particles[p].Velocity;
       }
+    }
+
+    if(dynamic.Temperature){
+      AddScalar("Temperature",&StVtkParticle::Temperature);
     }
 
     // Green-Lagrange tensor components.
@@ -337,6 +342,14 @@ void JSphCpuSingle::SaveUserOutput(
   const float* svrho)
 {
   const UserParameters& User = *this->User;
+
+  if(User.Thermo && User.Thermo->IsEnabled()
+      && (SvData & SDAT_Binx)){
+    User.Thermo->SaveSnapshot(
+        DirDataOut,RunCode,unsigned(Part),unsigned(Nstep),
+        TimeStep,Np,Idp_c->cptr(),Code_c->cptr());
+  }
+
   if(User.OutputObjects.empty())return;
 
   // First output frame of this run, including restart runs.
@@ -412,7 +425,8 @@ void JSphCpuSingle::SaveUserOutput(
       || dynamic.DensitySPH
       || dynamic.VolumeSPH
       || dynamic.PressureSPH
-      || dynamic.Velocity;
+      || dynamic.Velocity
+      || dynamic.Temperature;
 
     const bool outputMass=firstFrame && config.Static.Mass;
     const bool outputBoundary=firstFrame && config.Static.Boundary;
@@ -493,6 +507,10 @@ void JSphCpuSingle::SaveUserOutput(
       particle.Idp=id;
       particle.Mk=mk;
       particle.Pos=live? Pos_c->cptr()[p]:svpos[q];
+
+      if(dynamic.Temperature){
+        particle.Temperature=User.Thermo->GetTemperature(id);
+      }
 
       if(dynamic.Velocity){
         if(live){

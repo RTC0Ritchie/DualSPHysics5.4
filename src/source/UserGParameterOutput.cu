@@ -10,6 +10,7 @@
 #include "Functions.h"
 #include "FunctionsMath.h"
 #include "FunSphEos.h"
+#include "UserThermo.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -68,6 +69,40 @@ void JSphGpuSingle::SaveUserOutput(
   const float* svrho)
 {
   const UserParameters& User = *this->User;
+
+  if(User.Thermo && User.Thermo->IsEnabled()
+      && (SvData & SDAT_Binx)){
+    // Own scratch storage: do not overwrite filtered main-PART buffers.
+    std::vector<unsigned> thermoIds(Np);
+    std::vector<typecode> thermoCodes(Np);
+
+    if(Np){
+      cudaError_t err=cudaMemcpy(
+          thermoIds.data(),Idp_g->cptr(),
+          size_t(Np)*sizeof(unsigned),
+          cudaMemcpyDeviceToHost);
+
+      if(err!=cudaSuccess)
+        Run_Exceptioon(
+            std::string("Thermo ID download:")
+            +" "+cudaGetErrorString(err));
+
+      err=cudaMemcpy(
+          thermoCodes.data(),Code_g->cptr(),
+          size_t(Np)*sizeof(typecode),
+          cudaMemcpyDeviceToHost);
+
+      if(err!=cudaSuccess)
+        Run_Exceptioon(
+            std::string("Thermo code download:")
+            +" "+cudaGetErrorString(err));
+    }
+
+    User.Thermo->SaveSnapshot(
+        DirDataOut,RunCode,unsigned(Part),unsigned(Nstep),
+        TimeStep,Np,thermoIds.data(),thermoCodes.data());
+  }
+
   if(User.OutputObjects.empty())return;
 
   // First output frame of this run, including restart runs.
@@ -157,7 +192,8 @@ void JSphGpuSingle::SaveUserOutput(
       || dynamic.DensitySPH
       || dynamic.VolumeSPH
       || dynamic.PressureSPH
-      || dynamic.Velocity;
+      || dynamic.Velocity
+      || dynamic.Temperature;
 
     const bool outputMass=firstFrame && config.Static.Mass;
     const bool outputBoundary=firstFrame && config.Static.Boundary;
@@ -257,6 +293,10 @@ void JSphGpuSingle::SaveUserOutput(
         if(dynamic.DensitySPH){
           particle.DensitySPH=rho;
         }
+      }
+
+      if(dynamic.Temperature){
+        particle.Temperature=User.Thermo->GetTemperature(id);
       }
 
       const auto it=flexById.find(id);

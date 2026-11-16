@@ -12,6 +12,7 @@ class JXml;
 class JLog2;
 class TiXmlElement;
 class JFlexDissipation;
+class UserThermo;
 
 namespace FlexBoundaryCorrection{
   struct Cache;
@@ -86,6 +87,8 @@ public:
   bool SaveInOutData=false;
   bool InOutHeadWritten=false;
 
+  std::shared_ptr<UserThermo> Thermo;
+
   // Explicit User restart request; mutually exclusive with SPH restart.
   bool FlexRestartRequested;
   // XML restartsource: 0=unspecified, 1=prescribed, 2=model_transfer.
@@ -134,6 +137,7 @@ public:
     bool VolumeMaterial=false;
     bool VolumeSPH=false;
     bool Velocity=false;
+    bool Temperature=false;
 
     // If empty, no output is generated.
     std::vector<std::string> StrainComponents;

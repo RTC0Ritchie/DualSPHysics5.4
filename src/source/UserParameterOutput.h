@@ -26,6 +26,7 @@ public:
     double VolumeMaterial=0;
     double VolumeSPH=0;
     double Mass=0;
+    double Temperature=0;
 
     tmatrix3f Strain={};
     tmatrix3f Stress={};
